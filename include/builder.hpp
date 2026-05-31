@@ -10,9 +10,7 @@ namespace lignum {
 
     class Builder {
         public:
-            Builder() = delete;
-
-            static Model load(const std::string& filepath, const std::string& model_format);
+            static Model load_json(const std::string& filepath, const std::string& model_format);
         
         private:
             static int process_leaf(TempBinNode* node, Model& model);
