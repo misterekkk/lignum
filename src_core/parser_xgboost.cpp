@@ -46,8 +46,8 @@ namespace lignum {
             auto base_score_element = doc["learner"]["learner_model_param"]["base_score"];
             if (base_score_element.error() == simdjson::SUCCESS) {
                 auto base_score_string = std::string(base_score_element.get_string().value());
-                base_score_string.erase(std::remove(base_score_string.begin(), base_score_string.end(), "]"), base_score_string.end());
-                base_score_string.erase(std::remove(base_score_string.begin(), base_score_string.end(), "["), base_score_string.end());
+                base_score_string.erase(std::remove(base_score_string.begin(), base_score_string.end(), ']'), base_score_string.end());
+                base_score_string.erase(std::remove(base_score_string.begin(), base_score_string.end(), '['), base_score_string.end());
 
                 base_score = std::stod(base_score_string);
             }
