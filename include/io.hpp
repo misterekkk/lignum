@@ -1,11 +1,11 @@
 #pragma once
 
-#include <string>
-
 #include "model.hpp"
+
+#include <string>
 
 namespace lignum {
 
-    void load_binary(const std::string& filepath);
+    Model load_binary(const std::string& filepath);
 
 } // namespace lignum
