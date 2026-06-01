@@ -13,16 +13,6 @@ namespace lignum {
 
     } // namespace
 
-    Model::Model(
-        std::vector<KNode> k_nodes,
-        std::vector<int> tree_offsets,
-        std::vector<double> leaf_values,
-        double base_score
-    ) : k_nodes(std::move(k_nodes)),
-        tree_offsets(std::move(tree_offsets)),
-        leaf_values(std::move(leaf_values)),
-        base_score(base_score) {}
-
     void Model::predict(const double* X, size_t n_samples, size_t n_features, double* out_preds) const {
         const size_t N_BLOCK = 256; // Hardcoded for now
         const size_t T_BLOCK = 32;
@@ -31,12 +21,12 @@ namespace lignum {
         for (size_t i_start = 0; i_start < n_samples; i_start += N_BLOCK) {
             size_t i_end = std::min(i_start + N_BLOCK, n_samples);
 
-            for (size_t i = i_start; i < i_end; ++i) {
-                out_preds[i] = 0.0;
+            for (size_t i = i_start; i < i_end; i++) {
+                out_preds[i] = base_score;
             }
 
-            for (size_t t_start = 0; t_start < tree_offsets.size(); t_start += T_BLOCK) {
-                size_t t_end = std::min(t_start + T_BLOCK, tree_offsets.size());
+            for (size_t t_start = 0; t_start < n_offsets; t_start += T_BLOCK) {
+                size_t t_end = std::min(t_start + T_BLOCK, n_offsets);
                 size_t unrolled_end = i_start + ((i_end - i_start) / 4) * 4;
                 
                 for (size_t i = i_start; i < unrolled_end; i += 4) {
