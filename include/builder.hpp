@@ -1,6 +1,5 @@
 #pragma once
 
-#include "parsers.hpp"
 #include "model.hpp"
 #include "ir.hpp"
 
@@ -13,8 +12,8 @@ namespace lignum {
             static Model load_json(const std::string& filepath, const std::string& model_format);
         
         private:
-            static int process_leaf(TempBinNode* node, Model& model);
-            static int build_knode(TempBinNode* node, Model& model);
+            static int process_leaf(TempBinNode* node, VectorData& data);
+            static int build_knode(TempBinNode* node, VectorData& data);
     };
 
 } // namespace lignum
