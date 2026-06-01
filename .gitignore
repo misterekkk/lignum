@@ -109,3 +109,6 @@ compile_commands.json
 *.log
 *.log.*
 *.pid
+*.bin
+
+test_lignum
