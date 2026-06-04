@@ -7,8 +7,8 @@ namespace lignum {
     struct TempBinNode {
         bool is_leaf;
         double threshold_or_value;
-        int feature_id;
-        int default_dir;
+        int32_t feature_id;
+        int32_t default_dir;
         std::unique_ptr<TempBinNode> left;
         std::unique_ptr<TempBinNode> right;
 
