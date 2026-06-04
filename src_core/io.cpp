@@ -5,9 +5,19 @@
 #include <stdexcept>
 #include <vector>
 #include <string_view>
+#include <cstring>
 
 #if defined(_WIN32)
     #include <windows.h>
+
+    std::wstring utf8_to_utf16(const std::string& str) {
+        if (str.empty()) return std::wstring();
+        int size_needed = MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), NULL, 0);
+        std::wstring wstrTo(size_needed, 0);
+        MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), &wstrTo[0], size_needed);
+        return wstrTo;
+    }
+
 #else
     #include <fcntl.h>
     #include <sys/mman.h>
@@ -15,17 +25,42 @@
     #include <unistd.h>
 #endif
 
+#if defined(_WIN32)
+    #define LIGNUM_OS_ID 1
+#elif defined(__unix__) || defined(__unix) || defined(__APPLE__) || defined(__linux__)
+    #define LIGNUM_OS_ID 2
+#else
+    #define LIGNUM_OS_ID 0
+#endif
+
+#if defined(__x86_64__) || defined(_M_X64)
+    #define LIGNUM_ARCH_ID 1
+#elif defined(__aarch64__) || defined(_M_ARM64) || defined(__ARM_NEON__)
+    #define LIGNUM_ARCH_ID 2
+#else
+    #define LIGNUM_ARCH_ID 0
+#endif
+
 namespace lignum {
 
     namespace {
 
         struct alignas(64) FileHeader {
-            char magic[8] = {'L', 'I', 'G', 'N', 'U', 'M', '\0', '\1'}; // name + version
+            char magic[6] = {'L', 'I', 'G', 'N', 'U', 'M'}; 
+            uint8_t version_major = 0;
+            uint8_t version_minor = 1;
+
+            uint8_t os_id = LIGNUM_OS_ID;
+            uint8_t arch_id = LIGNUM_ARCH_ID;
+            uint16_t reserved = 0;
+            uint32_t endian_check = 0x12345678;
+
             double base_score = 0.0;
             uint64_t n_nodes = 0;
             uint64_t n_offsets = 0;
             uint64_t n_leaves = 0;
-            uint8_t padding[24] = {0};
+            
+            uint8_t padding[16] = {0};
         };
 
         size_t align(size_t size) {
@@ -52,21 +87,27 @@ namespace lignum {
             size_t size = 0;
         
         #if defined(_WIN32)
-        HANDLE hFile = INVALID_HANDLE_VALUE;
-        HANDLE hMap = NULL;
+            HANDLE hFile = INVALID_HANDLE_VALUE;
+            HANDLE hMap = NULL;
         #else
             int fd = -1;
         #endif
 
         MmapData(const std::string& filepath) {
             #if defined(_WIN32)
-                hFile = CreateFileA(filepath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                std::wstring wfilepath = utf8_to_utf16(filepath);
+                hFile = CreateFileW(wfilepath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
                 if (hFile == INVALID_HANDLE_VALUE) throw std::runtime_error("Error opening file.");
                 
-                hMap = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+                hMap = CreateFileMappingW(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
                 if (!hMap) { CloseHandle(hFile); throw std::runtime_error("Error running mmap."); }
 
                 data = static_cast<const char*>(MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0));
+                if (!data) throw std::runtime_error("Error mapping view of file.");
+
+                LARGE_INTEGER file_size;
+                GetFileSizeEx(hFile, &file_size);
+                size = file_size.QuadPart;
             #else
                 fd = open(filepath.c_str(), O_RDONLY);
                 if (fd < 0) throw std::runtime_error("Error opening file.");
@@ -112,13 +153,30 @@ namespace lignum {
     Model load_binary(const std::string& filepath) {
         auto binary_data = std::make_shared<MmapData>(filepath);
 
-        const FileHeader* header = reinterpret_cast<const FileHeader*>(binary_data->data);
+        if (binary_data->size < sizeof(FileHeader)) {
+            throw std::runtime_error("File is too small to contain valid header.");
+        }
+
+        FileHeader header;
+        std::memcpy(&header, binary_data->data, sizeof(FileHeader));
+
+        if (std::memcmp(header.magic, "LIGNUM", 6) != 0) {
+            throw std::runtime_error("Binary file does not contain LIGNUM signature.");
+        }
+
+        if (header.endian_check != 0x12345678) {
+            throw std::runtime_error("Endianness mismatch.");
+        }
+
+        if (header.version_major != 0) {
+            throw std::runtime_error("Not compatible binary file format.");
+        }
 
         Model model;
-        model.base_score = header->base_score;
-        model.n_nodes = header->n_nodes;
-        model.n_offsets = header->n_offsets;
-        model.n_leaves = header->n_leaves;
+        model.base_score = header.base_score;
+        model.n_nodes = header.n_nodes;
+        model.n_offsets = header.n_offsets;
+        model.n_leaves = header.n_leaves;
         model.data = binary_data;
 
         size_t offset = sizeof(FileHeader);
