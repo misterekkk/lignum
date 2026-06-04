@@ -38,25 +38,28 @@ namespace lignum {
         return model;
     }
 
-    int Builder::process_leaf(TempBinNode* node, VectorData& data) {
+    int32_t Builder::process_leaf(TempBinNode* node, VectorData& data) {
             data.leaf_values.push_back(node->threshold_or_value);
-            return -static_cast<int>(data.leaf_values.size());
+            return -static_cast<int32_t>(data.leaf_values.size());
         }
 
-    int Builder::build_knode(TempBinNode* node, VectorData& data) {
+    int32_t Builder::build_knode(TempBinNode* node, VectorData& data) {
         if (node->is_leaf) return process_leaf(node, data);
 
-        int current_idx = data.k_nodes.size();
+        int32_t current_idx = data.k_nodes.size();
         data.k_nodes.push_back(KNode{});
         KNode kn = {};
 
         kn.thresholds[0] = node->threshold_or_value;
+        if (node->feature_id < 0 || node->feature_id > 65535) {
+            throw std::out_of_range("Features are stored as uint16_t.");
+        }
         kn.features[0] = static_cast<uint16_t>(node->feature_id);
         kn.dirs[0] = static_cast<uint8_t>(node->default_dir);
 
         TempBinNode* left = node->left.get();
         if (left->is_leaf) {
-            int leaf_idx = process_leaf(left, data);
+            int32_t leaf_idx = process_leaf(left, data);
             kn.children[0] = leaf_idx;
             kn.children[1] = leaf_idx;
         } else {
@@ -69,7 +72,7 @@ namespace lignum {
 
         TempBinNode* right = node->right.get();
         if (right->is_leaf) {
-            int leaf_idx = process_leaf(right, data);
+            int32_t leaf_idx = process_leaf(right, data);
             kn.children[2] = leaf_idx;
             kn.children[3] = leaf_idx;
         } else {
