@@ -14,7 +14,7 @@ namespace lignum {
                 if (left_child_result.error() == simdjson::SUCCESS) {
                     node->is_leaf = false;
                     node->threshold_or_value = obj["threshold"].get_double();
-                    node->feature_id = static_cast<int>(obj["split_feature"].get_int64());
+                    node->feature_id = static_cast<int32_t>(obj["split_feature"].get_int64());
                     bool default_left = obj["default_left"].get_bool();
                     node->default_dir = default_left ? 0 : 1;
 

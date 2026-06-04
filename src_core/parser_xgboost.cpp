@@ -22,7 +22,7 @@ namespace lignum {
                 } else {
                     node->is_leaf = false;
                     node->threshold_or_value = tree_obj["split_conditions"].get_array().at(node_id).get_double();
-                    node->feature_id = static_cast<int>(tree_obj["split_indices"].get_array().at(node_id).get_int64());
+                    node->feature_id = static_cast<int32_t>(tree_obj["split_indices"].get_array().at(node_id).get_int64());
 
                     bool default_left = (tree_obj["default_left"].get_array().at(node_id).get_int64() == 1);
                     node->default_dir = default_left ? 0 : 1;
