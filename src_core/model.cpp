@@ -3,21 +3,48 @@
 #include <algorithm>
 #include <omp.h>
 
+#ifndef CACHE_TILLING_BLOCK_SIZE
+    #if defined(__APPLE__) && defined(__ARM_NEON__)
+        #define N_BLOCK 256
+        #define T_BLOCK 32
+    #elif defined(__x86_64__) || defined(_M_X64)
+        #define N_BLOCK 128
+        #define T_BLOCK 16
+    #else
+        #define N_BLOCK 64
+        #define T_BLOCK 16
+    #endif
+#endif
+
 namespace lignum {
 
     namespace {
 
-        inline int cmp_dir(double x, double threshold, int default_dir) {
-            return default_dir ? !(x <= threshold) : (x > threshold);
-        }
+        inline int32_t cmp_dir(double x, double threshold, int default_dir) {
+            uint64_t bits;
+            std::memcpy(&bits, &x, sizeof(bits));
+            if ((bits & 0x7fffffffffffffffULL) > 0x7ff0000000000000ULL) {
+                return default_dir;
+            }
+            
+            return x >= threshold;
+}
 
     } // namespace
 
-    void Model::predict(const double* X, size_t n_samples, size_t n_features, double* out_preds) const {
-        const size_t N_BLOCK = 256; // Hardcoded for now
-        const size_t T_BLOCK = 32;
+    void Model::predict(const double* X, size_t n_samples, size_t n_features, double* out_preds, int n_jobs) const {
+        int32_t n_threads = 1;
 
-        #pragma omp parallel for schedule(dynamic)
+        #ifdef _OPENMP
+            int32_t max_num_threads = omp_get_max_threads();
+            if (n_jobs <= 0 || n_jobs > max_num_threads) {
+                n_threads = max_num_threads;
+            } else {
+                n_threads = n_jobs;
+            }
+        #endif
+
+        #pragma omp parallel for schedule(dynamic) num_threads(n_threads)
         for (size_t i_start = 0; i_start < n_samples; i_start += N_BLOCK) {
             size_t i_end = std::min(i_start + N_BLOCK, n_samples);
 
@@ -39,10 +66,10 @@ namespace lignum {
                     double sum0 = 0.0, sum1 = 0.0, sum2 = 0.0, sum3 = 0.0;
                     
                     for (size_t t = t_start; t < t_end; t++) {
-                        int node0 = tree_offsets[t];
-                        int node1 = tree_offsets[t];
-                        int node2 = tree_offsets[t];
-                        int node3 = tree_offsets[t];
+                        int32_t node0 = tree_offsets[t];
+                        int32_t node1 = tree_offsets[t];
+                        int32_t node2 = tree_offsets[t];
+                        int32_t node3 = tree_offsets[t];
 
                         while (node0 >= 0 || node1 >= 0 || node2 >= 0 || node3 >= 0) {
                             if (node0 >= 0) {
@@ -52,9 +79,9 @@ namespace lignum {
                                 double xl = row0[kn0.features[1]];
                                 double xc = row0[kn0.features[2]];
 
-                                int r = cmp_dir(xr, kn0.thresholds[0], kn0.dirs[0]);
-                                int l = cmp_dir(xl, kn0.thresholds[1], kn0.dirs[1]);
-                                int c = cmp_dir(xc, kn0.thresholds[2], kn0.dirs[2]);
+                                int32_t r = cmp_dir(xr, kn0.thresholds[0], kn0.dirs[0]);
+                                int32_t l = cmp_dir(xl, kn0.thresholds[1], kn0.dirs[1]);
+                                int32_t c = cmp_dir(xc, kn0.thresholds[2], kn0.dirs[2]);
 
                                 node0 = kn0.children[(r << 1) | (r ? c : l)];
                             }
@@ -66,9 +93,9 @@ namespace lignum {
                                 double xl = row1[kn1.features[1]];
                                 double xc = row1[kn1.features[2]];
 
-                                int r = cmp_dir(xr, kn1.thresholds[0], kn1.dirs[0]);
-                                int l = cmp_dir(xl, kn1.thresholds[1], kn1.dirs[1]);
-                                int c = cmp_dir(xc, kn1.thresholds[2], kn1.dirs[2]);
+                                int32_t r = cmp_dir(xr, kn1.thresholds[0], kn1.dirs[0]);
+                                int32_t l = cmp_dir(xl, kn1.thresholds[1], kn1.dirs[1]);
+                                int32_t c = cmp_dir(xc, kn1.thresholds[2], kn1.dirs[2]);
 
                                 node1 = kn1.children[(r << 1) | (r ? c : l)];
                             }
@@ -80,9 +107,9 @@ namespace lignum {
                                 double xl = row2[kn2.features[1]];
                                 double xc = row2[kn2.features[2]];
 
-                                int r = cmp_dir(xr, kn2.thresholds[0], kn2.dirs[0]);
-                                int l = cmp_dir(xl, kn2.thresholds[1], kn2.dirs[1]);
-                                int c = cmp_dir(xc, kn2.thresholds[2], kn2.dirs[2]);
+                                int32_t r = cmp_dir(xr, kn2.thresholds[0], kn2.dirs[0]);
+                                int32_t l = cmp_dir(xl, kn2.thresholds[1], kn2.dirs[1]);
+                                int32_t c = cmp_dir(xc, kn2.thresholds[2], kn2.dirs[2]);
 
                                 node2 = kn2.children[(r << 1) | (r ? c : l)];
                             }
@@ -94,9 +121,9 @@ namespace lignum {
                                 double xl = row3[kn3.features[1]];
                                 double xc = row3[kn3.features[2]];
 
-                                int r = cmp_dir(xr, kn3.thresholds[0], kn3.dirs[0]);
-                                int l = cmp_dir(xl, kn3.thresholds[1], kn3.dirs[1]);
-                                int c = cmp_dir(xc, kn3.thresholds[2], kn3.dirs[2]);
+                                int32_t r = cmp_dir(xr, kn3.thresholds[0], kn3.dirs[0]);
+                                int32_t l = cmp_dir(xl, kn3.thresholds[1], kn3.dirs[1]);
+                                int32_t c = cmp_dir(xc, kn3.thresholds[2], kn3.dirs[2]);
 
                                 node3 = kn3.children[(r << 1) | (r ? c : l)];
                             }
@@ -116,7 +143,7 @@ namespace lignum {
                     const double* row = &X[i * n_features];
                     double sum = 0.0;
                     for (size_t t = t_start; t < t_end; t++) {
-                        int node = tree_offsets[t];
+                        int32_t node = tree_offsets[t];
                         while (node >= 0) {
                             const KNode &kn = k_nodes[node];
                             
@@ -124,9 +151,9 @@ namespace lignum {
                             double xl = row[kn.features[1]];
                             double xc = row[kn.features[2]];
 
-                            int r = cmp_dir(xr, kn.thresholds[0], kn.dirs[0]);
-                            int l = cmp_dir(xl, kn.thresholds[1], kn.dirs[1]);
-                            int c = cmp_dir(xc, kn.thresholds[2], kn.dirs[2]);
+                            int32_t r = cmp_dir(xr, kn.thresholds[0], kn.dirs[0]);
+                            int32_t l = cmp_dir(xl, kn.thresholds[1], kn.dirs[1]);
+                            int32_t c = cmp_dir(xc, kn.thresholds[2], kn.dirs[2]);
                             
                             node = kn.children[(r << 1) | (r ? c : l)];
                         }
