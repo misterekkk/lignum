@@ -112,3 +112,4 @@ compile_commands.json
 *.bin
 
 test_lignum
+!CMakeLists.txt
