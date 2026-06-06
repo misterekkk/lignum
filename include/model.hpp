@@ -45,7 +45,7 @@ namespace lignum {
 
             Model() = default;
 
-            void predict(const double* X, size_t n_samples, size_t n_features, double* out_preds, int n_jobs = -1) const;
+            void predict(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds, int n_jobs = -1) const noexcept;
             void save(const std::string& filepath) const;
     };
 
