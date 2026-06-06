@@ -1,6 +1,8 @@
 #include "parsers.hpp"
 #include "simdjson.h"
 
+#include <cmath>
+
 namespace lignum {
 
     namespace parsers {
@@ -13,7 +15,8 @@ namespace lignum {
                 
                 if (left_child_result.error() == simdjson::SUCCESS) {
                     node->is_leaf = false;
-                    node->threshold_or_value = obj["threshold"].get_double();
+                    double thresh = obj["threshold"].get_double();
+                    node->threshold_or_value = std::nextafter(thresh, INFINITY);
                     node->feature_id = static_cast<int32_t>(obj["split_feature"].get_int64());
                     bool default_left = obj["default_left"].get_bool();
                     node->default_dir = default_left ? 0 : 1;
