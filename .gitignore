@@ -113,3 +113,7 @@ compile_commands.json
 
 test_lignum
 !CMakeLists.txt
+!inst/tinytest/*.json
+!inst/tinytest/*.csv
+!py_package/tests/*.json
+!py_package/tests/*.csv
