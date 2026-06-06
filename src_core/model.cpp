@@ -21,21 +21,15 @@ namespace lignum {
     namespace {
 
         inline int32_t cmp_dir(double x, double threshold, int default_dir) {
-            uint64_t bits;
-            std::memcpy(&bits, &x, sizeof(bits));
-            if ((bits & 0x7fffffffffffffffULL) > 0x7ff0000000000000ULL) {
-                return default_dir;
-            }
-            
-            return x >= threshold;
-}
+            return std::isnan(x) ? default_dir : (x >= threshold);
+        }
 
     } // namespace
 
-    void Model::predict(const double* X, size_t n_samples, size_t n_features, double* out_preds, int n_jobs) const {
-        int32_t n_threads = 1;
+    void Model::predict(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds, int n_jobs) const noexcept {
 
         #ifdef _OPENMP
+            int32_t n_threads = 1;
             int32_t max_num_threads = omp_get_max_threads();
             if (n_jobs <= 0 || n_jobs > max_num_threads) {
                 n_threads = max_num_threads;
