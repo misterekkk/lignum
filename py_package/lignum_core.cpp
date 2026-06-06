@@ -2,11 +2,12 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/string.h>
 
 namespace nb = nanobind;
 using namespace lignum;
 
-NB_MODULE(lignum_core, m) {
+NB_MODULE(_core, m) {
     nb::class_<Model>(m, "Model")
         .def("predict", [](const Model& self, nb::ndarray<double, nb::c_contig, nb::device::cpu> X, int n_jobs) {
             if (X.ndim() != 2) {

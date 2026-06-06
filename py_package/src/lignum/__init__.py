@@ -1,7 +1,7 @@
 import os
 import numpy as np
 
-from . import lignum_core
+from . import _core
 
 __all__ = ["Model", "load"]
 __version__ = "0.1.0"
@@ -68,5 +68,5 @@ def load(filepath: str, format: str = "auto") -> Model:
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
 
-    c_model = lignum_core.load(str(filepath), format)
+    c_model = _core.load(str(filepath), format)
     return Model(c_model)
