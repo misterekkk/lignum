@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <omp.h>
+#include <cmath>
 
 #ifndef CACHE_TILLING_BLOCK_SIZE
     #if defined(__APPLE__) && defined(__ARM_NEON__)
@@ -26,7 +27,8 @@ namespace lignum {
 
     } // namespace
 
-    void Model::predict(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds, int n_jobs) const noexcept {
+    template <bool RawScore>
+    void Model::predict_impl(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds, int n_jobs) const noexcept {
 
         #ifdef _OPENMP
             int32_t n_threads = 1;
@@ -156,7 +158,26 @@ namespace lignum {
                     out_preds[i] += sum;
                 }
             }
+            if constexpr (!RawScore) {
+                if (transform == 0) {
+                    for (size_t i = i_start; i < i_end; i++) {
+                        out_preds[i] = 1.0 / (1.0 + std::exp(-out_preds[i]));
+                    }
+                } else if (transform == 1) {
+                    for (size_t i = i_start; i < i_end; i++) {
+                        out_preds[i] = std::exp(out_preds[i]);
+                    }
+                }
+            }
         }
+    }
+
+    void Model::predict(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds, int n_jobs) const noexcept {
+        predict_impl<false>(X, n_samples, n_features, out_preds, n_jobs);
+    }
+
+    void Model::predict_raw(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds, int n_jobs) const noexcept {
+        predict_impl<true>(X, n_samples, n_features, out_preds, n_jobs);
     }
 
 } // namespace lignum

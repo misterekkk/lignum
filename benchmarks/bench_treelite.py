@@ -40,7 +40,7 @@ def run_benchmark():
     
     dmat = treelite_runtime.DMatrix(X)
     t0 = time.perf_counter()
-    tl_preds = tl_predictor.predict(dmat, pred_margin=True)
+    tl_preds = tl_predictor.predict(dmat)
     tl_time = time.perf_counter() - t0
     print(f"[Treelite] Time: {tl_time:.4f} s")
 

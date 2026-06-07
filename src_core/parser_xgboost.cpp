@@ -1,6 +1,8 @@
 #include "parsers.hpp"
 #include "simdjson.h"
 
+#include <cmath>
+
 namespace lignum {
 
     namespace parsers {
@@ -36,11 +38,31 @@ namespace lignum {
         
         } // namespace
 
-        std::vector<std::unique_ptr<TempBinNode>> load_xgboost_json(const std::string& filepath, double& out_base_score) {
+        std::vector<std::unique_ptr<TempBinNode>> load_xgboost_json(const std::string& filepath, double& out_base_score, uint8_t& transform) {
             simdjson::dom::parser parser;
             std::vector<std::unique_ptr<TempBinNode>> forest;
 
             simdjson::dom::element doc = parser.load(filepath);
+
+            auto param_element = doc["learner"]["learner_model_param"];
+            if (param_element.error() == simdjson::SUCCESS) {
+                int num_class = 0;
+                int num_target = 1;
+
+                auto num_class_elem = param_element["num_class"];
+                if (num_class_elem.error() == simdjson::SUCCESS) {
+                    num_class = std::stoi(std::string(num_class_elem.get_string().value()));
+                }
+
+                auto num_target_elem = param_element["num_target"];
+                if (num_target_elem.error() == simdjson::SUCCESS) {
+                    num_target = std::stoi(std::string(num_target_elem.get_string().value()));
+                }
+
+                if (num_class > 1 || num_target > 1) {
+                    throw std::runtime_error("Multiclass and multi-target models are not supported yet.");
+                }
+            }
 
             double base_score = 0.0;
             auto base_score_element = doc["learner"]["learner_model_param"]["base_score"];
@@ -55,23 +77,38 @@ namespace lignum {
             auto loss_func_element = doc["learner"]["objective"]["name"];
             if (loss_func_element.error() == simdjson::SUCCESS) {
                 auto loss_func_string = std::string(loss_func_element.get_string().value());
-                if (loss_func_string == "binary:logistic") {
+                if (loss_func_string == "binary:logistic" || loss_func_string == "reg:logistic") {
                     double eps = 1e-15;
                     base_score = std::min(std::max(base_score, eps), 1 - eps);
                     out_base_score = std::log(base_score / (1 - base_score));
-                } else if (loss_func_string == "reg:squarederror" || loss_func_string == "reg:pseudohubererror" || loss_func_string == "reg:linear") {
+                    transform = 0;
+                } else if (loss_func_string == "count:poisson" || loss_func_string == "reg:gamma" || loss_func_string == "reg:tweedie" || loss_func_string == "survival:cox" || loss_func_string == "survival:aft") {
+                    out_base_score = (base_score > 0.0) ? std::log(base_score) : 0.0;
+                    transform = 1;
+                } else {
                     out_base_score = base_score;
+                    transform = 2;
+                }
+            } else {
+                out_base_score = base_score;
+                transform = 2;
+            }
+
+            auto trees_element = doc["learner"]["gradient_booster"]["model"]["trees"];
+            if (trees_element.error() == simdjson::SUCCESS) {
+                simdjson::dom::array trees = trees_element.get_array();
+                for (simdjson::dom::element tree_elem : trees) {
+                    simdjson::dom::object tree_obj = tree_elem.get_object();
+                    
+                    auto cat_nodes_elem = tree_obj["categories_nodes"];
+                    if (cat_nodes_elem.error() == simdjson::SUCCESS && cat_nodes_elem.get_array().size() > 0) {
+                        throw std::runtime_error("Models with native categorical splits are not supported by this engine.");
+                    }
+
+                    forest.push_back(parse_xgboost_tree(0, tree_obj));
                 }
             }
-
-            simdjson::dom::array trees = doc["learner"]["gradient_booster"]["model"]["trees"].get_array();
-
-            for (simdjson::dom::element tree_elem : trees) {
-                simdjson::dom::object tree_obj = tree_elem.get_object();
-
-                forest.push_back(parse_xgboost_tree(0, tree_obj));
-            }
-
+            
             return forest;
         }
 
