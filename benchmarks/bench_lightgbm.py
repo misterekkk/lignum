@@ -33,11 +33,11 @@ def run_benchmark():
     lignum_model = lg.load(MODEL_JSON, format="lightgbm")
 
     X_warmup = X[:1000]
-    _ = bst.predict(X_warmup, raw_score=True, num_threads=MAX_CORES)
+    _ = bst.predict(X_warmup, num_threads=MAX_CORES)
     _ = lignum_model.predict(X_warmup, n_jobs=MAX_CORES)
 
     t0 = time.perf_counter()
-    lgb_preds = bst.predict(X, raw_score=True, num_threads=MAX_CORES)
+    lgb_preds = bst.predict(X, num_threads=MAX_CORES)
     lgb_time = time.perf_counter() - t0
     print(f"[LightGBM] Time: {lgb_time:.4f} s")
 

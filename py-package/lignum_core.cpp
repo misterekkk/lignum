@@ -9,7 +9,7 @@ using namespace lignum;
 
 NB_MODULE(_core, m) {
     nb::class_<Model>(m, "Model")
-        .def("predict", [](const Model& self, nb::ndarray<double, nb::c_contig, nb::device::cpu> X, int n_jobs) {
+        .def("predict", [](const Model& self, nb::ndarray<double, nb::c_contig, nb::device::cpu> X, bool raw_score, int n_jobs) {
             if (X.ndim() != 2) {
                 throw std::invalid_argument("Input array must be 2D.");
             }
@@ -23,11 +23,20 @@ NB_MODULE(_core, m) {
 
             nb::ndarray<nb::numpy, double, nb::c_contig, nb::device::cpu> out_preds(out_data, { n_samples }, owner);
 
-            self.predict(X.data(), n_samples, n_features, out_data, n_jobs);
+            {
+                nb::gil_scoped_release release;
 
+                if (!raw_score) {
+                    self.predict(X.data(), n_samples, n_features, out_data, n_jobs);
+                } else {
+                    self.predict_raw(X.data(), n_samples, n_features, out_data, n_jobs);
+                }
+            }
+            
             return out_preds;
         },
         nb::arg("X"),
+        nb::arg("raw_score") = false,
         nb::arg("n_jobs") = -1,
         "Returns model prediction for input data.")
         

@@ -15,7 +15,7 @@ class Model:
     def __init__(self, _c_model):
         self._c_model = _c_model
 
-    def predict(self, X: np.ndarray, n_jobs: int = -1) -> np.ndarray:
+    def predict(self, X: np.ndarray, raw_score: bool = False, n_jobs: int = -1) -> np.ndarray:
         """
         Predict values for the given input data.
 
@@ -26,6 +26,8 @@ class Model:
         ----------
         X : array-like, shape (n_samples, n_features)
             The input samples.
+        raw_score : bool, deafault=False
+            Whether to predict raw scores.
         n_jobs : int, default=-1
             Number of OpenMP threads to run. -1 means using all available cores.
 
@@ -35,7 +37,7 @@ class Model:
             The predicted values (raw leaves sum).
         """
         X_arr = np.ascontiguousarray(X, dtype=np.float64)
-        return self._c_model.predict(X_arr, n_jobs)
+        return self._c_model.predict(X_arr, raw_score, n_jobs)
 
     def save(self, filepath: str) -> None:
         """

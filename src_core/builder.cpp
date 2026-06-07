@@ -8,14 +8,15 @@ namespace lignum {
     Model Builder::load_json(const std::string& filepath, const std::string& model_format) {
         auto data = std::make_shared<VectorData>();
         double base_score = 0.0;
+        uint8_t transform = 2;
 
         std::vector<std::unique_ptr<TempBinNode>> temp_forest;
 
         if (model_format == "lightgbm" || model_format == "lgbm" || model_format == "lgb") {
-            temp_forest = parsers::load_lightgbm_json(filepath);
+            temp_forest = parsers::load_lightgbm_json(filepath, base_score, transform);
         }
         else if (model_format == "xgboost" || model_format == "xgb") {
-            temp_forest = parsers::load_xgboost_json(filepath, base_score);
+            temp_forest = parsers::load_xgboost_json(filepath, base_score, transform);
         }
         else {
             throw std::invalid_argument("This model format is not supported.");
@@ -27,6 +28,7 @@ namespace lignum {
 
         Model model;
         model.base_score = base_score;
+        model.transform = transform;
         model.n_nodes = data->k_nodes.size();
         model.k_nodes = data->k_nodes.data();
         model.n_offsets = data->tree_offsets.size();

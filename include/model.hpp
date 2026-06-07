@@ -40,13 +40,19 @@ namespace lignum {
             size_t n_leaves = 0;
 
             double base_score = 0.0;
+            uint8_t transform = 2;
 
             std::shared_ptr<const Data> data;
 
             Model() = default;
 
             void predict(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds, int n_jobs = -1) const noexcept;
+            void predict_raw(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds, int n_jobs = -1) const noexcept;
             void save(const std::string& filepath) const;
+        
+        private:
+            template <bool RawScore>
+            void predict_impl(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds, int n_jobs) const noexcept;
     };
 
 } // namespace lignum

@@ -30,11 +30,11 @@ def run_benchmark():
     bst.set_param({'nthread': MAX_CORES})
 
     X_warmup = X[:1000]
-    _ = bst.predict(xgb.DMatrix(X_warmup), output_margin=True)
+    _ = bst.predict(xgb.DMatrix(X_warmup))
     _ = lignum_model.predict(X_warmup, n_jobs=MAX_CORES)
     
     t0 = time.perf_counter()
-    xgb_preds = bst.predict(dtrain, output_margin=True)
+    xgb_preds = bst.predict(dtrain)
     xgb_time = time.perf_counter() - t0
     print(f"[XGBoost] Time: {xgb_time:.4f} s")
 
