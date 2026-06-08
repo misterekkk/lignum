@@ -1,0 +1,19 @@
+Package: lignum
+Type: Package
+Title: Fast Decision Tree Inference library
+Version: 0.1.0
+Authors@R: person("Kacper", "Piotrowski", email = "tobedone@example.com", role = c("aut", "cre"))
+Description: High-performance inference library
+License: MIT + file LICENSE
+Encoding: UTF-8
+RoxygenNote: 7.3.3
+SystemRequirements: C++17
+LinkingTo: 
+    cpp11
+Imports: 
+    cpp11
+Suggests: 
+    tinytest,
+    xgboost,
+    lightgbm,
+    jsonlite

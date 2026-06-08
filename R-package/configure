@@ -1,0 +1,15 @@
+#!/bin/bash
+set -e
+
+mkdir -p inst/include
+rm -f inst/include/*.hpp
+rm -f inst/include/simdjson.h
+
+cp ../include/*.hpp inst/include/
+cp ../extern/simdjson/simdjson.h inst/include/
+
+mkdir -p src
+rm -f src/builder.cpp src/io.cpp src/load.cpp src/model.cpp src/parser_lightgbm.cpp src/parser_xgboost.cpp src/simdjson.cpp
+
+cp ../src_core/*.cpp src/
+cp ../extern/simdjson/simdjson.cpp src/
