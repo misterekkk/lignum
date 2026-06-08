@@ -60,7 +60,7 @@ def load(filepath: str, format: str = "auto") -> Model:
     filepath : str
         Path to the model file.
     format : {'auto', 'lignum', 'binary', 'lightgbm', 'xgboost'}, default='auto'
-        Format of the model file. If 'auto' then .bin file is required.
+        Format of the model file. If 'auto', the function attempts to load binary file..
 
     Returns
     -------
