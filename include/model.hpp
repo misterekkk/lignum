@@ -1,5 +1,9 @@
 #pragma once
 
+#if defined(_MSC_VER) && !defined(__restrict__)
+    #define __restrict__ __restrict
+#endif
+
 #include <vector>
 #include <cstdint>
 #include <cstddef>
