@@ -1,0 +1,17 @@
+site_name: Lignum Python API
+site_dir: site/python
+theme:
+  name: material
+  features:
+    - navigation.indexes
+    - content.code.copy
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [py-package/src]
+nav:
+  - R Documentation: ../index.html
+  - User Guide: index.md
+  - API Reference: api.md

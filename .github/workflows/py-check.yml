@@ -1,0 +1,40 @@
+name: Python package test
+
+on:
+  push:
+    paths:
+      - 'py-package/**'
+      - 'src_core/**'
+      - 'include/**'
+      - '.github/workflows/py-check.yml'
+  pull_request:
+    paths:
+      - 'py-package/**'
+      - 'src_core/**'
+      - 'include/**'
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12"]
+        
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies and package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest lightgbm xgboost numpy pandas
+          python -m pip install -e ./py-package
+
+      - name: Run tests
+        run: pytest py-package/tests/ -v

@@ -2,7 +2,7 @@
 % Please edit documentation in R/lignum.R
 \name{save_model}
 \alias{save_model}
-\title{Save the model to Lignum binary format.}
+\title{Save Lignum Model}
 \usage{
 save_model(object, filepath)
 }
@@ -13,6 +13,9 @@ save_model(object, filepath)
 }
 \description{
 Saves the compiled model to an binary format for mmap-based loading.
+}
+\details{
+Save the model to Lignum binary format.
 }
 \examples{
 \dontrun{

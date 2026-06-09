@@ -2,7 +2,7 @@
 % Please edit documentation in R/lignum.R
 \name{load_model}
 \alias{load_model}
-\title{Load a trained model from a JSON or Lignum binary file.}
+\title{Load a Lignum Model}
 \usage{
 load_model(filepath, format = "auto")
 }
