@@ -1,7 +1,16 @@
 .PHONY: r-build py-build r-test py-test py-bench test all clean docs
 
 r-build:
-	cd R-package && ./configure
+	mkdir -p R-package/inst/include R-package/src
+	
+	rm -f R-package/inst/include/*.hpp R-package/inst/include/simdjson.h
+	rm -f R-package/src/builder.cpp R-package/src/io.cpp R-package/src/load.cpp R-package/src/model.cpp R-package/src/parser_lightgbm.cpp R-package/src/parser_xgboost.cpp R-package/src/simdjson.cpp
+	
+	cp include/*.hpp R-package/inst/include/
+	cp extern/simdjson/simdjson.h R-package/inst/include/
+	cp src_core/*.cpp R-package/src/
+	cp extern/simdjson/simdjson.cpp R-package/src/
+	
 	Rscript -e "cpp11::cpp_register('R-package')"
 	Rscript -e "devtools::document('R-package')"
 	R CMD INSTALL R-package
