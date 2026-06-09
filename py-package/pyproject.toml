@@ -14,7 +14,7 @@ authors = [
 ]
 dependencies = [
     "numpy>=1.20.0"
-)
+]
 
 [project.optional-dependencies]
 test = [
