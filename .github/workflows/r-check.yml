@@ -38,7 +38,7 @@ jobs:
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           working-directory: R-package
-          extra-packages: any::rcmdcheck, any::tinytest
+          extra-packages: any::rcmdcheck, any::tinytest, any::brio, any::decor, any::desc, any::glue, any::tibble, any::vctrs
 
       - name: Prepare C++ source
         shell: Rscript {0}
