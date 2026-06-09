@@ -52,7 +52,8 @@ namespace lignum {
 
             uint8_t os_id = LIGNUM_OS_ID;
             uint8_t arch_id = LIGNUM_ARCH_ID;
-            uint16_t reserved = 0;
+            uint8_t transform = 2;
+            uint8_t reserved = 0;
             uint32_t endian_check = 0x12345678;
 
             double base_score = 0.0;
@@ -139,6 +140,7 @@ namespace lignum {
 
         FileHeader header;
         header.base_score = base_score;
+        header.transform = transform;
         header.n_nodes = n_nodes;
         header.n_offsets = n_offsets;
         header.n_leaves = n_leaves;
@@ -174,6 +176,7 @@ namespace lignum {
 
         Model model;
         model.base_score = header.base_score;
+        model.transform = header.transform;
         model.n_nodes = header.n_nodes;
         model.n_offsets = header.n_offsets;
         model.n_leaves = header.n_leaves;
