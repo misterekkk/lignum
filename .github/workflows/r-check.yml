@@ -43,9 +43,20 @@ jobs:
       - name: Prepare C++ source
         shell: Rscript {0}
         run: |
-          if (file.exists("R-package")) {
-            setwd("R-package")
+          if (!dir.exists("R-package/inst/include")) dir.create("R-package/inst/include", recursive = TRUE)
+          if (!dir.exists("R-package/src")) dir.create("R-package/src", recursive = TRUE)
+          
+          file.copy(list.files("include", full.names = TRUE), "R-package/inst/include", overwrite = TRUE)
+          if (file.exists("extern/simdjson/simdjson.h")) {
+            file.copy("extern/simdjson/simdjson.h", "R-package/inst/include", overwrite = TRUE)
           }
+          
+          file.copy(list.files("src_core", full.names = TRUE), "R-package/src", overwrite = TRUE)
+          if (file.exists("extern/simdjson/simdjson.cpp")) {
+            file.copy("extern/simdjson/simdjson.cpp", "R-package/src", overwrite = TRUE)
+          }
+          
+          setwd("R-package")
           cpp11::cpp_register(".")
 
       - uses: r-lib/actions/check-r-package@v2
