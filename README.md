@@ -20,7 +20,7 @@ The following benchmarks show direct head-to-head comparisons on a synthetic dat
 ### Benchmark Setup
 * **Dataset:** 1,000,000 samples, 20 features (15 informative) with a **5% random missing value (NaN) rate**.
 * **Model:** 1,000 trees with a maximum depth of 6.
-* **Hardware:** Multi-threaded execution scaling across all available CPU cores.
+* **Hardware:** Multi-threaded execution scaling across all available CPU cores. Ran on MacBook Pro M4 16GB RAM.
 
 ### Head-to-Head Comparisons
 
@@ -28,19 +28,19 @@ The following benchmarks show direct head-to-head comparisons on a synthetic dat
 | Framework | Execution Time (s) | Speedup | Match Accuracy |
 | :--- | :---: | :---: | :---: |
 | LightGBM | 4.5768 s | 1.0x (Baseline) | — |
-| **Lignum (Ours)** | **0.7082 s** | **6.46x faster** | **100% Perfect Match** |
+| **Lignum** | **0.7082 s** | **6.46x faster** | **100% Perfect Match** |
 
 #### Lignum vs XGBoost
 | Framework | Execution Time (s) | Speedup | Match Accuracy |
 | :--- | :---: | :---: | :---: |
 | XGBoost | 1.5921 s | 1.0x (Baseline) | — |
-| **Lignum (Ours)** | **0.8168 s** | **1.95x faster** | **100% Perfect Match** |
+| **Lignum** | **0.8168 s** | **1.95x faster** | **100% Perfect Match** |
 
 #### Lignum vs Treelite (Compiled)
 | Framework | Execution Time (s) | Speedup | Match Accuracy |
 | :--- | :---: | :---: | :---: |
 | Treelite | 1.4242 s | 1.0x (Baseline) | — |
-| **Lignum (Ours)** | **0.7426 s** | **1.91x faster** | **100% Perfect Match** |
+| **Lignum** | **0.7426 s** | **1.91x faster** | **100% Perfect Match** |
 
 ---
 
