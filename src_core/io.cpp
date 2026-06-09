@@ -99,6 +99,15 @@ namespace lignum {
                 std::wstring wfilepath = utf8_to_utf16(filepath);
                 hFile = CreateFileW(wfilepath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
                 if (hFile == INVALID_HANDLE_VALUE) throw std::runtime_error("Error opening file.");
+
+                LARGE_INTEGER file_size;
+                if (!GetFileSizeEx(hFile, &file_size)) {
+                    CloseHandle(hFile);
+                    throw std::runtime_error("Error getting file size.");
+                }
+                size = file_size.QuadPart;
+
+                if (size == 0) { CloseHandle(hFile); throw std::runtime_error("File is empty."); }
                 
                 hMap = CreateFileMappingW(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
                 if (!hMap) { CloseHandle(hFile); throw std::runtime_error("Error running mmap."); }
@@ -106,16 +115,15 @@ namespace lignum {
                 data = static_cast<const char*>(MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0));
                 if (!data) throw std::runtime_error("Error mapping view of file.");
 
-                LARGE_INTEGER file_size;
-                GetFileSizeEx(hFile, &file_size);
-                size = file_size.QuadPart;
             #else
                 fd = open(filepath.c_str(), O_RDONLY);
-                if (fd < 0) throw std::runtime_error("Error opening file.");
+                if (fd < 0) throw std::runtime_error("Error opening file: " + filepath);
 
                 struct stat sb;
-                fstat(fd, &sb);
+                if (fstat(fd, &sb) < 0) { close(fd); throw std::runtime_error("Error getting file size."); }
                 size = sb.st_size;
+
+                if (size == 0) { close(fd); throw std::runtime_error("File is empty."); }
 
                 data = static_cast<const char*>(mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0));
                 if (data == MAP_FAILED) { close(fd); throw std::runtime_error("Error running mmap."); }
