@@ -2,7 +2,7 @@ Package: lignum
 Type: Package
 Title: Fast Decision Tree Inference Library
 Version: 0.1.0
-Authors@R: person("Kacper", "Piotrowski", role = c("aut", "cre"))
+Authors@R: person("Kacper", "Piotrowski", email = "misterekkk@users.noreply.github.com", role = c("aut", "cre"))
 Description: A high-performance inference library for decision-tree based models, 
     specifically optimized for 'LightGBM' and 'XGBoost'. By implementing a native 
     C++ engine, the package bypasses the performance bottlenecks of standard parsers. 
