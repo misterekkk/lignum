@@ -35,23 +35,18 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get install -y libcurl4-openssl-dev libxml2-dev
 
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          working-directory: R-package
+          extra-packages: any::rcmdcheck, any::tinytest
+
       - name: Prepare C++ source
         shell: Rscript {0}
         run: |
           if (file.exists("R-package")) {
             setwd("R-package")
           }
-          if (requireNamespace("cpp11", quietly = TRUE)) {
-            cpp11::cpp_register(".")
-          } else {
-            install.packages("cpp11", repos = "https://cloud.r-project.org")
-            cpp11::cpp_register(".")
-          }
-
-      - uses: r-lib/actions/setup-r-dependencies@v2
-        with:
-          working-directory: R-package
-          extra-packages: any::rcmdcheck, any::tinytest
+          cpp11::cpp_register(".")
 
       - uses: r-lib/actions/check-r-package@v2
         with:
