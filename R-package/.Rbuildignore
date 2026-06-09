@@ -6,3 +6,4 @@
 ^\.github$
 ^docs$
 ^benchmarks$
+^_pkgdown\.yml$

@@ -55,7 +55,7 @@ load_model <- function(filepath, format = "auto") {
 #' X <- matrix(rnorm(1000 * 50), nrow = 1000, ncol = 50)
 #' preds <- predict(model, X, n_jobs = -1L)
 #' }
-predict.lignum_model <- function(object, X, raw_score = FALSE, n_jobs = -1L) {
+predict.lignum_model <- function(object, X, raw_score = FALSE, n_jobs = -1L, ...) {
   if (!inherits(object, "lignum_model")) {
     stop("Object is not a valid Lignum model.")
   }

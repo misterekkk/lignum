@@ -4,63 +4,53 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: "pages"
-  cancel-in-progress: true
 
 jobs:
-  build-and-deploy:
+  docs:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup R
-        uses: r-lib/actions/setup-r@v2
+      - uses: r-lib/actions/setup-r@v2
         with:
-          use-public-rspm: true
+          r-version: "release"
 
-      - name: Install R system dependencies
-        run: sudo apt-get install -y libcurl4-openssl-dev libicu-dev
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      - name: Setup Pandoc
-        uses: r-lib/actions/setup-pandoc@v2
+      - name: Install Linux system dependencies
+        run: sudo apt-get install -y libcurl4-openssl-dev libxml2-dev
 
-      - name: Install R dependencies (pkgdown, devtools)
-        uses: r-lib/actions/setup-r-dependencies@v2
+      - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           working-directory: R-package
-          extra-packages: any::pkgdown, any::devtools, any::cpp11
+          extra-packages: any::pkgdown, any::brio, any::decor, any::desc, any::glue, any::tibble, any::vctrs
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
-      - name: Install Python package and docs tools
+      - name: Prepare C++ source
+        shell: Rscript {0}
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e py-package/
-          python -m pip install mkdocs-material "mkdocstrings[python]"
+          if (!dir.exists("R-package/inst/include")) dir.create("R-package/inst/include", recursive = TRUE)
+          if (!dir.exists("R-package/src")) dir.create("R-package/src", recursive = TRUE)
+          file.copy(list.files("include", full.names = TRUE), "R-package/inst/include", overwrite = TRUE)
+          if (file.exists("extern/simdjson/simdjson.h")) {
+            file.copy("extern/simdjson/simdjson.h", "R-package/inst/include", overwrite = TRUE)
+          }
+          file.copy(list.files("src_core", full.names = TRUE), "R-package/src", overwrite = TRUE)
+          if (file.exists("extern/simdjson/simdjson.cpp")) {
+            file.copy("extern/simdjson/simdjson.cpp", "R-package/src", overwrite = TRUE)
+          }
+          setwd("R-package")
+          cpp11::cpp_register(".")
 
-      - name: Build documentation (Makefile)
+      - name: Install local R package
+        run: R CMD INSTALL R-package
+
+      - name: Build Documentation
         run: make docs
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v4
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v3
         with:
-          path: './site'
+          path: site/
 
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - uses: actions/deploy-pages@v4
