@@ -48,7 +48,7 @@ namespace lignum {
 
         #pragma omp parallel for schedule(dynamic) num_threads(n_threads)
         for (omp_iterator_t i_start = 0; i_start < static_cast<omp_iterator_t>(n_samples); i_start += N_BLOCK) {
-            size_t i_end = std::min(i_start + N_BLOCK, n_samples);
+            size_t i_end = std::min<size_t>(i_start + N_BLOCK, n_samples);
 
             for (size_t i = i_start; i < i_end; i++) {
                 out_preds[i] = base_score;
