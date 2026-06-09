@@ -4,6 +4,12 @@
 #include <omp.h>
 #include <cmath>
 
+#ifdef _MSC_VER
+    using omp_iterator_t = ptrdiff_t;
+#else
+    using omp_iterator_t = size_t;
+#endif
+
 #ifndef CACHE_TILLING_BLOCK_SIZE
     #if defined(__APPLE__) && defined(__ARM_NEON__)
         #define N_BLOCK 256
@@ -41,7 +47,7 @@ namespace lignum {
         #endif
 
         #pragma omp parallel for schedule(dynamic) num_threads(n_threads)
-        for (size_t i_start = 0; i_start < n_samples; i_start += N_BLOCK) {
+        for (omp_iterator_t i_start = 0; i_start < static_cast<omp_iterator_t>(n_samples); i_start += N_BLOCK) {
             size_t i_end = std::min(i_start + N_BLOCK, n_samples);
 
             for (size_t i = i_start; i < i_end; i++) {
