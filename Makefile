@@ -1,4 +1,4 @@
-.PHONY: r-build py-build r-test py-test py-bench test all clean
+.PHONY: r-build py-build r-test py-test py-bench test all clean docs
 
 r-build:
 	cd R-package && ./configure
@@ -21,6 +21,12 @@ py-bench: py-build
 	python benchmarks/bench_treelite.py
 	rm -f benchmarks/bench_model_*
 
+docs:
+	rm -rf site/
+	Rscript -e "pkgdown::build_site('R-package', override = list(destination = '../site'))"
+	python -m pip install mkdocs-material "mkdocstrings[python]"
+	python -m mkdocs build
+
 test: r-test py-test
 all: r-build py-build
 
@@ -28,4 +34,4 @@ clean:
 	rm -f R-package/src/builder.cpp R-package/src/io.cpp R-package/src/load.cpp R-package/src/model.cpp R-package/src/parser_lightgbm.cpp R-package/src/parser_xgboost.cpp R-package/src/simdjson.cpp
 	rm -rf R-package/inst/include/
 	rm -f R-package/src/*.o R-package/src/*.so R-package/src/*.dll
-	rm -rf build/ R-package.Rcheck/ lignum.Rcheck/ py-package/.pytest_cache/ benchmarks/bench_model_*
+	rm -rf build/ R-package.Rcheck/ lignum.Rcheck/ py-package/.pytest_cache/ benchmarks/bench_model_* site/

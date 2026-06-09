@@ -1,0 +1,60 @@
+name: R package check
+
+on:
+  push:
+    paths:
+      - 'R-package/**'
+      - 'src_core/**'
+      - 'include/**'
+      - '.github/workflows/r-check.yml'
+  pull_request:
+    paths:
+      - 'R-package/**'
+      - 'src_core/**'
+      - 'include/**'
+
+jobs:
+  test:
+    name: Check on ${{ matrix.config.os }}
+    runs-on: ${{ matrix.config.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - {os: ubuntu-latest}
+          - {os: windows-latest}
+          
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "release"
+          
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y libcurl4-openssl-dev libxml2-dev
+
+      - name: Prepare C++ source
+        shell: Rscript {0}
+        run: |
+          if (file.exists("R-package")) {
+            setwd("R-package")
+          }
+          if (requireNamespace("cpp11", quietly = TRUE)) {
+            cpp11::cpp_register(".")
+          } else {
+            install.packages("cpp11", repos = "https://cloud.r-project.org")
+            cpp11::cpp_register(".")
+          }
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          working-directory: R-package
+          extra-packages: any::rcmdcheck, any::tinytest
+
+      - uses: r-lib/actions/check-r-package@v2
+        with:
+          working-directory: R-package
+          args: 'c("--as-cran")'
+          error-on: '"error"'

@@ -2,7 +2,7 @@
 % Please edit documentation in R/lignum.R
 \name{predict.lignum_model}
 \alias{predict.lignum_model}
-\title{Predict values for the given input data.}
+\title{Predict using Lignum Model}
 \usage{
 \method{predict}{lignum_model}(object, X, raw_score = FALSE, n_jobs = -1L)
 }
@@ -17,7 +17,7 @@
 \code{-1} means using all available cores. Default is \code{-1}.}
 }
 \value{
-A numeric vector of shape \code{(n_samples,)} containing the predicted values (raw leaves sum).
+A numeric vector of shape \code{(n_samples,)} containing the predicted values.
 }
 \description{
 Computes predictions using a compiled Lignum decision tree model.
@@ -25,6 +25,9 @@ Computes predictions using a compiled Lignum decision tree model.
 For optimal performance, the C++ backend requires a C-contiguous (row-major) 
 memory layout. Since R matrices are Fortran-contiguous (column-major) by default, 
 an internal transpose operation is triggered to ensure maximum cache efficiency.
+}
+\details{
+Predict values for the given input data.
 }
 \examples{
 \dontrun{

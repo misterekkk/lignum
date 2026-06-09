@@ -1,13 +1,19 @@
 Package: lignum
 Type: Package
-Title: Fast Decision Tree Inference library
+Title: Fast Decision Tree Inference Library
 Version: 0.1.0
-Authors@R: person("Kacper", "Piotrowski", email = "tobedone@example.com", role = c("aut", "cre"))
-Description: High-performance inference library
+Authors@R: person("Kacper", "Piotrowski", role = c("aut", "cre"))
+Description: A high-performance inference library for decision-tree based models, 
+    specifically optimized for 'LightGBM' and 'XGBoost'. By implementing a native 
+    C++ engine, the package bypasses the performance bottlenecks of standard parsers. 
+    It features instant file loading via memory mapping ('mmap'), zero-overhead architecture, 
+    and efficient row-major multi-threaded computations using OpenMP to ensure maximum CPU 
+    cache efficiency during batch predictions.
 License: MIT + file LICENSE
 Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.3
-SystemRequirements: C++17
+SystemRequirements: C++17, GNU make
 LinkingTo: 
     cpp11
 Imports: 
