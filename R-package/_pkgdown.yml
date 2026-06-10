@@ -13,6 +13,3 @@ navbar:
     python_api:
       text: "Python API"
       href: python/index.html
-
-news:
-  source: ../NEWS.md
