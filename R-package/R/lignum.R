@@ -1,9 +1,7 @@
 #' @details 
-#' Lignum deliveres fast interference for decision-tree based models.
-#' @docType package
-#' @name lignum
+#' Lignum delivers fast inference for decision-tree based models.
 #' @useDynLib lignum, .registration = TRUE
-NULL
+"_PACKAGE"
 
 #' Load a trained model from a JSON or Lignum binary file.
 #'
