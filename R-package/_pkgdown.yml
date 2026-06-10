@@ -4,7 +4,7 @@ template:
 
 navbar:
   structure:
-    left:  [reference, articles, news, changelog]
+    left:  [reference, articles, changelog]
     right: [python_api, github]
   components:
     changelog:
