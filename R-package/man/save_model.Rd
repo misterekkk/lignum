@@ -18,7 +18,7 @@ Saves the compiled model to an binary format for mmap-based loading.
 Save the model to Lignum binary format.
 }
 \examples{
-\dontshow{if (FALSE) withAutoprint(\{ # examplesIf}
+\dontrun{
 save_model(model, "fast_model.bin")
-\dontshow{\}) # examplesIf}
+}
 }

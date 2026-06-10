@@ -20,7 +20,7 @@ An object of class \code{lignum_model} ready for inference.
 Load a trained model from a JSON or Lignum binary file.
 }
 \examples{
-\dontshow{if (FALSE) withAutoprint(\{ # examplesIf}
+\dontrun{
 model <- load_model("model_xgboost.json", format = "xgboost")
-\dontshow{\}) # examplesIf}
+}
 }

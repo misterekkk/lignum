@@ -14,8 +14,10 @@
 #' @return An object of class \code{lignum_model} ready for inference.
 #' @export
 #'
-#' @examplesIf FALSE
+#' @examples
+#' \dontrun{
 #' model <- load_model("model_xgboost.json", format = "xgboost")
+#' }
 load_model <- function(filepath, format = "auto") {
   filepath <- path.expand(filepath)
   if (!file.exists(filepath)) {
@@ -46,9 +48,11 @@ load_model <- function(filepath, format = "auto") {
 #' @return A numeric vector of shape \code{(n_samples,)} containing the predicted values.
 #' @export
 #'
-#' @examplesIf FALSE
+#' @examples
+#' \dontrun{
 #' X <- matrix(rnorm(1000 * 50), nrow = 1000, ncol = 50)
 #' preds <- predict(model, X, n_jobs = -1L)
+#' }
 predict.lignum_model <- function(object, X, raw_score = FALSE, n_jobs = -1L, ...) {
   if (!inherits(object, "lignum_model")) {
     stop("Object is not a valid Lignum model.")
@@ -80,8 +84,10 @@ predict.lignum_model <- function(object, X, raw_score = FALSE, n_jobs = -1L, ...
 #'
 #' @export
 #'
-#' @examplesIf FALSE
+#' @examples
+#' \dontrun{
 #' save_model(model, "fast_model.bin")
+#' }
 save_model <- function(object, filepath) {
   if (!inherits(object, "lignum_model")) {
     stop("Object is not a valid Lignum model.")
