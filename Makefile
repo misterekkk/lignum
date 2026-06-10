@@ -34,7 +34,7 @@ docs:
 	rm -rf site/
 	Rscript -e "pkgdown::build_site('R-package', override = list(destination = '../site'))"
 	python -m pip install mkdocs-material "mkdocstrings[python]"
-	python -m mkdocs build
+	python -m mkdocs build --dirty
 
 test: r-test py-test
 all: r-build py-build
