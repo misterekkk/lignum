@@ -84,6 +84,9 @@ You can use the global `Makefile` to trigger tests across both environments simu
 make test
 
 ```
+## Acknowledgments
+
+`lignum` achieves extreme parsing speeds by utilizing the [simdjson](https://github.com/simdjson/simdjson) library for parsing JSON model files. We are grateful to the authors and contributors of simdjson for their outstanding work.
 
 ---
 
