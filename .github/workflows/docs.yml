@@ -60,6 +60,6 @@ jobs:
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: site/
+          path: "${{ github.workspace }}/site"
 
       - uses: actions/deploy-pages@v4
