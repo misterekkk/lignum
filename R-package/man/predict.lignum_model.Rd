@@ -30,8 +30,8 @@ an internal transpose operation is triggered to ensure maximum cache efficiency.
 Predict values for the given input data.
 }
 \examples{
-\dontshow{if (FALSE) withAutoprint(\{ # examplesIf}
+\dontrun{
 X <- matrix(rnorm(1000 * 50), nrow = 1000, ncol = 50)
 preds <- predict(model, X, n_jobs = -1L)
-\dontshow{\}) # examplesIf}
+}
 }
