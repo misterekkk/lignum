@@ -9,7 +9,7 @@ navbar:
   components:
     changelog:
         text: "Changelog"
-        href: news.html
+        href: news/index.html
     python_api:
       text: "Python API"
       href: python/index.html
