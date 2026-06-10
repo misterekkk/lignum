@@ -4,9 +4,15 @@ template:
 
 navbar:
   structure:
-    left:  [reference, articles, news]
+    left:  [reference, articles, news, changelog]
     right: [python_api, github]
   components:
+    changelog:
+        text: "Changelog"
+        href: news.html
     python_api:
       text: "Python API"
       href: python/index.html
+
+news:
+  source: ../NEWS.md
