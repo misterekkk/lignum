@@ -9,8 +9,8 @@ load_model(filepath, format = "auto")
 \arguments{
 \item{filepath}{A string specifying the path to the model file.}
 
-\item{format}{A string specifying the format of the model file. 
-Options are \code{'auto'}, \code{'lignum'}, \code{'binary'}, \code{'lightgbm'}, \code{'xgboost'}. 
+\item{format}{A string specifying the format of the model file.
+Options are \code{'auto'}, \code{'lignum'}, \code{'binary'}, \code{'lightgbm'}, \code{'xgboost'}.
 If \code{'auto'} (the default), the function attempts to load binary file.}
 }
 \value{
@@ -20,7 +20,7 @@ An object of class \code{lignum_model} ready for inference.
 Load a trained model from a JSON or Lignum binary file.
 }
 \examples{
-\dontrun{
+\dontshow{if (FALSE) withAutoprint(\{ # examplesIf}
 model <- load_model("model_xgboost.json", format = "xgboost")
-}
+\dontshow{\}) # examplesIf}
 }

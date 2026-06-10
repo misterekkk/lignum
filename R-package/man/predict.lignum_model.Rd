@@ -4,7 +4,7 @@
 \alias{predict.lignum_model}
 \title{Predict using Lignum Model}
 \usage{
-\method{predict}{lignum_model}(object, X, raw_score = FALSE, n_jobs = -1L)
+\method{predict}{lignum_model}(object, X, raw_score = FALSE, n_jobs = -1L, ...)
 }
 \arguments{
 \item{object}{A \code{lignum_model} object returned by \code{\link{load_model}}.}
@@ -13,7 +13,7 @@
 
 \item{raw_score}{Whether to predict raw scores.}
 
-\item{n_jobs}{Integer specifying the number of OpenMP threads to run. 
+\item{n_jobs}{Integer specifying the number of OpenMP threads to run.
 \code{-1} means using all available cores. Default is \code{-1}.}
 }
 \value{
@@ -22,16 +22,16 @@ A numeric vector of shape \code{(n_samples,)} containing the predicted values.
 \description{
 Computes predictions using a compiled Lignum decision tree model.
 
-For optimal performance, the C++ backend requires a C-contiguous (row-major) 
-memory layout. Since R matrices are Fortran-contiguous (column-major) by default, 
+For optimal performance, the C++ backend requires a C-contiguous (row-major)
+memory layout. Since R matrices are Fortran-contiguous (column-major) by default,
 an internal transpose operation is triggered to ensure maximum cache efficiency.
 }
 \details{
 Predict values for the given input data.
 }
 \examples{
-\dontrun{
+\dontshow{if (FALSE) withAutoprint(\{ # examplesIf}
 X <- matrix(rnorm(1000 * 50), nrow = 1000, ncol = 50)
 preds <- predict(model, X, n_jobs = -1L)
-}
+\dontshow{\}) # examplesIf}
 }
