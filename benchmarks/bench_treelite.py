@@ -24,7 +24,18 @@ def run_benchmark():
 
     t_comp_start = time.perf_counter()
     tl_model = treelite.Model.load(MODEL_TXT, model_format='lightgbm')
-    tl_model.export_lib(toolchain='clang', libpath=LIB_PATH, params={'parallel_comp': MAX_CORES}, verbose=False)
+    tl_model.export_lib(
+        toolchain='clang',
+        libpath=LIB_PATH,
+        params={
+            'parallel_comp': MAX_CORES, 
+            'quantize': 1
+        },
+        options=['-O3', '-march=native'],
+        verbose=False
+    )
+    
+    tl_predictor = treelite_runtime.Predictor(LIB_PATH, nthread=MAX_CORES)
     tl_predictor = treelite_runtime.Predictor(LIB_PATH, nthread=MAX_CORES)
     comp_time = time.perf_counter() - t_comp_start
     print(f"Treelite compilation time: {comp_time:.2f} s")

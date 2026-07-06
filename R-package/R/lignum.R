@@ -42,6 +42,7 @@ load_model <- function(filepath, format = "auto") {
 #' @param raw_score Whether to predict raw scores.
 #' @param n_jobs Integer specifying the number of OpenMP threads to run. 
 #'   \code{-1} means using all available cores. Default is \code{-1}.
+#' @param ... Further arguments passed to or from other methods.
 #'
 #' @return A numeric vector of shape \code{(n_samples,)} containing the predicted values.
 #' @export

@@ -15,6 +15,8 @@
 
 \item{n_jobs}{Integer specifying the number of OpenMP threads to run.
 \code{-1} means using all available cores. Default is \code{-1}.}
+
+\item{...}{Further arguments passed to or from other methods.}
 }
 \value{
 A numeric vector of shape \code{(n_samples,)} containing the predicted values.

@@ -12,6 +12,6 @@ A high-performance inference library for decision-tree based models, specificall
 Lignum delivers fast inference for decision-tree based models.
 }
 \author{
-\strong{Maintainer}: Kacper Piotrowski \email{misterekkk@users.noreply.github.com}
+\strong{Maintainer}: Kacper Piotrowski \email{188080070+misterekkk@users.noreply.github.com}
 
 }
