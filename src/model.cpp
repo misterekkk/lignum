@@ -124,24 +124,45 @@ namespace lignum {
             return cmp_dir<(Kind & tree_kind::ZeroMissing) != 0>(x, kn.thresholds[k], kn.dirs[k]);
         }
 
-        // One KNode = two tree levels. All three comparisons are evaluated, then the
-        // grandchild is picked without a dependency between the two levels. `Kind` is the
-        // tree_kind of the tree, so numeric trees compile to plain threshold comparisons.
-        template <uint8_t Kind>
-        LIGNUM_INLINE int32_t step(const KNode& kn, const double* __restrict__ row, const uint32_t* __restrict__ bitsets) {
-        #ifdef LIGNUM_BRANCHY
-            // Experimental: branch on the root comparison like compiled code, so the CPU can
-            // speculate down the predicted path; only the taken child's comparison is evaluated.
-            if (slot_dir<Kind>(kn, 0, row, bitsets)) {
-                return kn.children[2 | slot_dir<Kind>(kn, 2, row, bitsets)];
-            }
-            return kn.children[slot_dir<Kind>(kn, 1, row, bitsets)];
+        // Experimental traversal choices (see TASKS.md); off by default.
+        //   LIGNUM_BRANCHY_CAT:  branchy steps in trees with categorical splits (4-row walks too)
+        //   LIGNUM_BRANCHY_TAIL: branchy steps for leftover rows (fewer than four, e.g. one row)
+        #ifdef LIGNUM_BRANCHY_CAT
+            constexpr bool kBranchyCat = true;
         #else
-            int32_t r = slot_dir<Kind>(kn, 0, row, bitsets);
-            int32_t l = slot_dir<Kind>(kn, 1, row, bitsets);
-            int32_t c = slot_dir<Kind>(kn, 2, row, bitsets);
-            return kn.children[(r << 1) | (r ? c : l)];
+            constexpr bool kBranchyCat = false;
         #endif
+        #ifdef LIGNUM_BRANCHY_TAIL
+            constexpr bool kBranchyTail = true;
+        #else
+            constexpr bool kBranchyTail = false;
+        #endif
+
+        template <uint8_t Kind>
+        constexpr bool branchy_rows = kBranchyCat && (Kind & tree_kind::Categorical) != 0;
+        template <uint8_t Kind>
+        constexpr bool branchy_tail = kBranchyTail || branchy_rows<Kind>;
+
+        // One KNode = two tree levels. `Kind` is the tree_kind of the tree, so numeric trees
+        // compile to plain threshold comparisons.
+        //  - Branch-free (default): all three comparisons are evaluated, then the grandchild is
+        //    picked without a dependency between the two levels.
+        //  - Branchy: branch on the root comparison like compiled code, so the CPU speculates down
+        //    the predicted path and only the taken child's comparison is evaluated. Cheaper when a
+        //    comparison is expensive (categorical) or there is nothing to interleave (one row).
+        template <uint8_t Kind, bool Branchy>
+        LIGNUM_INLINE int32_t step(const KNode& kn, const double* __restrict__ row, const uint32_t* __restrict__ bitsets) {
+            if constexpr (Branchy) {
+                if (slot_dir<Kind>(kn, 0, row, bitsets)) {
+                    return kn.children[2 | slot_dir<Kind>(kn, 2, row, bitsets)];
+                }
+                return kn.children[slot_dir<Kind>(kn, 1, row, bitsets)];
+            } else {
+                int32_t r = slot_dir<Kind>(kn, 0, row, bitsets);
+                int32_t l = slot_dir<Kind>(kn, 1, row, bitsets);
+                int32_t c = slot_dir<Kind>(kn, 2, row, bitsets);
+                return kn.children[(r << 1) | (r ? c : l)];
+            }
         }
 
         struct Forest {
@@ -154,12 +175,13 @@ namespace lignum {
         LIGNUM_INLINE void walk4(Forest f, int32_t root,
                                  const double* r0, const double* r1, const double* r2, const double* r3,
                                  int32_t& n0, int32_t& n1, int32_t& n2, int32_t& n3) {
+            constexpr bool B = branchy_rows<Kind>;
             n0 = n1 = n2 = n3 = root;
             while (n0 >= 0 || n1 >= 0 || n2 >= 0 || n3 >= 0) {
-                if (n0 >= 0) n0 = step<Kind>(f.nodes[n0], r0, f.bitsets);
-                if (n1 >= 0) n1 = step<Kind>(f.nodes[n1], r1, f.bitsets);
-                if (n2 >= 0) n2 = step<Kind>(f.nodes[n2], r2, f.bitsets);
-                if (n3 >= 0) n3 = step<Kind>(f.nodes[n3], r3, f.bitsets);
+                if (n0 >= 0) n0 = step<Kind, B>(f.nodes[n0], r0, f.bitsets);
+                if (n1 >= 0) n1 = step<Kind, B>(f.nodes[n1], r1, f.bitsets);
+                if (n2 >= 0) n2 = step<Kind, B>(f.nodes[n2], r2, f.bitsets);
+                if (n3 >= 0) n3 = step<Kind, B>(f.nodes[n3], r3, f.bitsets);
             }
         }
 
@@ -167,18 +189,20 @@ namespace lignum {
         template <uint8_t Kind>
         LIGNUM_INLINE void walk4_trees(Forest f, const int32_t* roots, const double* row,
                                        int32_t& n0, int32_t& n1, int32_t& n2, int32_t& n3) {
+            constexpr bool B = branchy_tail<Kind>;
             n0 = roots[0]; n1 = roots[1]; n2 = roots[2]; n3 = roots[3];
             while (n0 >= 0 || n1 >= 0 || n2 >= 0 || n3 >= 0) {
-                if (n0 >= 0) n0 = step<Kind>(f.nodes[n0], row, f.bitsets);
-                if (n1 >= 0) n1 = step<Kind>(f.nodes[n1], row, f.bitsets);
-                if (n2 >= 0) n2 = step<Kind>(f.nodes[n2], row, f.bitsets);
-                if (n3 >= 0) n3 = step<Kind>(f.nodes[n3], row, f.bitsets);
+                if (n0 >= 0) n0 = step<Kind, B>(f.nodes[n0], row, f.bitsets);
+                if (n1 >= 0) n1 = step<Kind, B>(f.nodes[n1], row, f.bitsets);
+                if (n2 >= 0) n2 = step<Kind, B>(f.nodes[n2], row, f.bitsets);
+                if (n3 >= 0) n3 = step<Kind, B>(f.nodes[n3], row, f.bitsets);
             }
         }
 
         template <uint8_t Kind>
         LIGNUM_INLINE int32_t walk1(Forest f, int32_t node, const double* row) {
-            while (node >= 0) node = step<Kind>(f.nodes[node], row, f.bitsets);
+            constexpr bool B = branchy_tail<Kind>;
+            while (node >= 0) node = step<Kind, B>(f.nodes[node], row, f.bitsets);
             return node;
         }
 
