@@ -73,6 +73,7 @@ Every split is normalised to: **go right ⇔ `isnan(x) ? default_right : x >= th
 | LightGBM `missing_type=Zero` | NaN → 0.0, and 0 is missing → `default_left` | direct; nodes where this differs from the natural direction of 0 get `ZeroIsMissing` |
 | XGBoost | left iff `float(x) < t` (t is float32), NaN → `default_left` | threshold = smallest double that rounds to ≥ `t` in float32 |
 | LightGBM categorical (`==`) | NaN → right; x ≤ -1 → right; else `int(x)` in set → left | categorical slot (see KNode) |
+| XGBoost categorical (`split_type` 1) | NaN → `default_left`; `c = int(float32(x))`; c < 0 or c ≥ 2^24 → left; c in `categories` → right | categorical slot with `dir_bits::XGBoostCategory` |
 
 XGBoost also accumulates and transforms in float32, and converts `base_score` to margin space with
 float32 `log`/logit (`binary:logitraw` uses `base_score` as is; multiclass models store a vector of
@@ -100,4 +101,4 @@ rejected; re-export from JSON.
 
 ## Known limitations
 
-See [TASKS.md](TASKS.md): no XGBoost categorical splits, no multi-target / vector-leaf models, only row-major float64 input.
+See [TASKS.md](TASKS.md): no multi-target / vector-leaf models, only row-major float64 input.

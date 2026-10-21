@@ -86,15 +86,19 @@ namespace lignum {
             return (x + multiple - 1) / multiple * multiple;
         }
 
-        // Categorical slot (LightGBM semantics): NaN and x <= -1 go right; otherwise the category
-        // is int(x) (truncation) and goes left iff it is in the set.
+        // Categorical slot. NaN follows the default direction. Otherwise (see slot_kind):
+        //  - LightGBM: valid iff -1 < x < 2^31; int(x) in the set goes left, everything else right.
+        //  - XGBoost:  x is first rounded to float32; valid iff 0 <= x < 2^24; int(x) in the set
+        //              goes right, everything else left.
         //
         // Branch-free on purpose: NaN, the valid range and the category value depend on the data,
-        // so branches on them mispredict and stall the interleaved rows (measured: ~3x slower).
+        // so branches on them mispredict and stall the interleaved rows (measured: ~10% slower).
         // Word 0 of cat_bitsets is always zero, so non-bitset slots read a harmless address.
         LIGNUM_INLINE int32_t cat_dir(double x, double encoded, uint8_t kind, uint8_t dirs, const uint32_t* __restrict__ bitsets) {
-            const bool valid = x > -1.0 && x < 2147483648.0;  // false for NaN and +-inf
-            const uint32_t c = static_cast<uint32_t>(valid ? x : 0.0);
+            const bool xgb = (dirs & dir_bits::XGBoostCategory) != 0;
+            const double v = xgb ? static_cast<double>(static_cast<float>(x)) : x;
+            const bool valid = xgb ? (v >= 0.0 && v < 16777216.0) : (v > -1.0 && v < 2147483648.0);  // false for NaN, +-inf
+            const uint32_t c = static_cast<uint32_t>(valid ? v : 0.0);
             const uint64_t payload = std::bit_cast<uint64_t>(encoded);
             const uint32_t lo = static_cast<uint32_t>(payload);
             const uint32_t hi = static_cast<uint32_t>(payload >> 32);
@@ -106,8 +110,9 @@ namespace lignum {
             const bool in_bitset = static_cast<bool>((bitsets[word_ok ? lo + word : 0] >> (c & 31)) & 1);
 
             const bool in_set = kind == slot_kind::CatMask ? in_mask : (kind == slot_kind::CatRange ? in_range : in_bitset);
+            const bool goes_right = xgb ? (valid & in_set) : !(valid & in_set);
             const int32_t nan_dir = dirs & dir_bits::DefaultRight;
-            return std::isnan(x) ? nan_dir : static_cast<int32_t>(!(valid & in_set));
+            return std::isnan(x) ? nan_dir : static_cast<int32_t>(goes_right);
         }
 
         template <uint8_t Kind>

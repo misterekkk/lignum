@@ -97,7 +97,25 @@ load from L2), not dispatch. Next idea: keep a 64-bit mask for categories < 64 i
 
 ## Stage 4 — XGBoost categorical splits
 
-- [ ] `categories_nodes/segments/sizes`; in XGBoost a category in the set goes **right**
+- [x] Semantics verified against XGBoost 3.4: `categories` lists the categories that go **right**; the category is `int(float32(x))`; negative or ≥ 2^24 goes **left**; NaN follows `default_left`
+- [x] Parser reads `split_type`, `categories`, `categories_nodes/segments/sizes`; same slot encodings as LightGBM, `dir_bits::XGBoostCategory` selects the semantics
+- [x] Parity tests (16): cardinality 2..1000, one-hot and partition splits, mixed, multiclass, round trip, values such as 2.9999999999 (→ 3 in float32), 16777216, negatives
+- [ ] Benchmark vs TL2cgen / native (`xgboost-cat` workload)
+
+## Model-shape matrix (`benchmarks/run_matrix.sh`, M4, 1M rows unless noted)
+
+| shape | lignum | lleaves | tuned TL2cgen | native |
+|---|---:|---:|---:|---:|
+| depth 3, LightGBM | 0.52 s | **0.33 s** | **0.33 s** | 2.52 s |
+| depth 3, XGBoost | **0.47 s** | — | 0.54 s | 0.68 s |
+| leaf-wise 255 leaves, 500 trees | **1.12 s** | 1.19 s | 1.53 s | 8.21 s |
+| XGBoost depth 10, 500 trees | **0.72 s** | — | 1.76 s | 1.44 s |
+| 5000 trees, LightGBM / XGBoost | **3.62 / 3.67 s** | 4.52 s | 9.05 / 12.2 s | 38.2 / 7.48 s |
+| 500 features (200k rows) | **0.20 / 0.20 s** | 0.40 s | 0.60 / 0.66 s | 1.01 / 0.35 s |
+
+Weak spots:
+- [ ] Shallow trees: a depth-3 tree costs 73% of a depth-6 one (per-tree overhead: root, loop, leaf load, sum; the last KNode level is half empty). Ideas: single-level node for the last odd level, fixed-depth unrolled traversal for complete trees, several trees per loop iteration
+- [ ] Single row on large models (5000 trees, ~6.5 MB): 39 µs vs 23–25 µs (TL2cgen) — memory-latency bound
 
 ## Stage 5 — Zero-copy input streaming (inference only)
 

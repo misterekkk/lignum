@@ -74,7 +74,8 @@ namespace lignum {
         }
         kn.features[slot] = static_cast<uint16_t>(split->feature_id);
         kn.dirs[slot] = static_cast<uint8_t>((split->default_dir ? dir_bits::DefaultRight : 0) |
-                                             (split->zero_is_missing ? dir_bits::ZeroIsMissing : 0));
+                                             (split->zero_is_missing ? dir_bits::ZeroIsMissing : 0) |
+                                             (split->cat_set_goes_right ? dir_bits::XGBoostCategory : 0));
         if (split->categorical) {
             fill_categorical(kn, slot, split, data);
             stats.tree_kind |= tree_kind::Categorical;

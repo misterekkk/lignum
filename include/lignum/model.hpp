@@ -33,6 +33,7 @@ namespace lignum {
     namespace dir_bits {
         constexpr uint8_t DefaultRight = 1 << 0;   // where missing values go
         constexpr uint8_t ZeroIsMissing = 1 << 1;  // LightGBM missing_type=Zero: |x| <= 1e-35 is missing too
+        constexpr uint8_t XGBoostCategory = 1 << 2;  // categorical slot with XGBoost semantics (see slot_kind)
     } // namespace dir_bits
 
     // Per-tree kinds: the kernel picks a traversal per tree, so special cases only cost
@@ -44,8 +45,10 @@ namespace lignum {
     } // namespace tree_kind
 
     // Kind of each KNode slot. A categorical slot stores its category set in the 64 bits of
-    // `thresholds[slot]` and goes LEFT when the category is in the set (LightGBM semantics:
-    // NaN and values <= -1 go right; other values are truncated to an integer category).
+    // `thresholds[slot]`. NaN follows dirs & DefaultRight. Otherwise:
+    //  - LightGBM: x <= -1 (or >= 2^31) goes right; int(x) in the set goes left.
+    //  - XGBoost (dirs & XGBoostCategory): c = int(float(x)); c < 0 or c >= 2^24 goes left;
+    //    c in the set goes right.
     namespace slot_kind {
         constexpr uint8_t Numeric = 0;
         constexpr uint8_t CatMask = 1;    // bits: categories 0..63 (bit c set = c in the set)

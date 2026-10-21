@@ -176,6 +176,23 @@ def build_workloads(args) -> list[Workload]:
         workloads.append(Workload("lightgbm-cat", np.ascontiguousarray(Xc), Xc_train,
                                   np.ascontiguousarray(Xc[n_train:n_train + 100_000]), js, txt, booster))
 
+    if "xgboost-cat" in args.only:
+        js, cat_data = cache / "xgb_cat.json", cache / "data_cat.npz"
+        if not cat_data.exists():
+            np.savez(cat_data, **dict(zip(["X", "y"], make_categorical_data(args.rows))))
+        Xc, yc = (np.load(cat_data)[k] for k in ["X", "y"])
+        n_cat = len(CAT_CARDINALITIES)
+        types = ["c"] * n_cat + ["q"] * (Xc.shape[1] - n_cat)
+        Xc_train = np.ascontiguousarray(Xc[:n_train])
+        if not js.exists():
+            params = {"objective": "binary:logistic", "max_depth": args.depth, "learning_rate": 0.1,
+                      "tree_method": "hist", "seed": 42, "max_cat_to_onehot": 4, "max_cat_threshold": 256}
+            dtrain = xgb.DMatrix(Xc_train, yc[:n_train], feature_types=types, enable_categorical=True)
+            xgb.train(params, dtrain, num_boost_round=args.trees).save_model(str(js))
+        booster = xgb.Booster(model_file=str(js))
+        workloads.append(Workload("xgboost-cat", np.ascontiguousarray(Xc), Xc_train,
+                                  np.ascontiguousarray(Xc[n_train:n_train + 100_000]), js, js, booster))
+
     if "xgboost" in args.only:
         js = cache / "xgb.json"
         if not js.exists():
@@ -502,7 +519,7 @@ def main():
     parser.add_argument("--train-rows", type=int, default=200_000)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--latency-budget", type=float, default=2.0, help="seconds per latency measurement")
-    parser.add_argument("--only", default="lightgbm,xgboost,lightgbm-multi,xgboost-multi,lightgbm-cat")
+    parser.add_argument("--only", default="lightgbm,xgboost,lightgbm-multi,xgboost-multi,lightgbm-cat,xgboost-cat")
     parser.add_argument("--engines", default=",".join(ENGINES))
     parser.add_argument("--quick", action="store_true", help="100k rows, 200 trees, fewer repeats")
     parser.add_argument("--verbose", action="store_true")

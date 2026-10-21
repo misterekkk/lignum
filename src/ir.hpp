@@ -22,7 +22,8 @@ namespace lignum {
         int32_t feature_id = -1;
         int32_t default_dir = 0;        // 0 = left, 1 = right
         bool zero_is_missing = false;
-        bool categorical = false;           // LightGBM "==": go left iff int(x) is in `categories`
+        bool categorical = false;           // categorical split on `categories` (see cat_set_goes_right)
+        bool cat_set_goes_right = false;    // false: LightGBM (in set -> left); true: XGBoost (in set -> right)
         std::vector<uint32_t> categories;
         std::unique_ptr<TempBinNode> left;
         std::unique_ptr<TempBinNode> right;

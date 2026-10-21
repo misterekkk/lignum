@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace lignum {
@@ -33,6 +34,8 @@ namespace lignum {
                 std::vector<int64_t> left, right, split_index;
                 std::vector<double> split_condition;
                 std::vector<bool> default_left;
+                std::vector<int64_t> split_type;                      // 1 = categorical
+                std::unordered_map<int64_t, std::vector<uint32_t>> categories;  // node -> categories going right
             };
 
             TreeArrays read_tree_arrays(simdjson::dom::object tree_obj) {
@@ -43,6 +46,29 @@ namespace lignum {
                 for (simdjson::dom::element v : tree_obj["split_conditions"].get_array()) arrays.split_condition.push_back(v.get_double());
                 for (simdjson::dom::element v : tree_obj["default_left"].get_array()) {
                     arrays.default_left.push_back(v.is_bool() ? v.get_bool().value() : v.get_int64().value() != 0);
+                }
+
+                auto split_type = tree_obj["split_type"];
+                if (split_type.error() == simdjson::SUCCESS) {
+                    for (int64_t v : split_type.get_array()) arrays.split_type.push_back(v);
+                }
+                auto cat_nodes = tree_obj["categories_nodes"];
+                if (cat_nodes.error() == simdjson::SUCCESS && cat_nodes.get_array().size() > 0) {
+                    std::vector<int64_t> nodes, segments, sizes;
+                    std::vector<uint32_t> values;
+                    for (int64_t v : cat_nodes.get_array()) nodes.push_back(v);
+                    for (int64_t v : tree_obj["categories_segments"].get_array()) segments.push_back(v);
+                    for (int64_t v : tree_obj["categories_sizes"].get_array()) sizes.push_back(v);
+                    for (int64_t v : tree_obj["categories"].get_array()) values.push_back(static_cast<uint32_t>(v));
+                    if (segments.size() != nodes.size() || sizes.size() != nodes.size()) {
+                        throw std::runtime_error("Malformed categorical split arrays.");
+                    }
+                    for (size_t k = 0; k < nodes.size(); k++) {
+                        if (segments[k] < 0 || sizes[k] < 0 || static_cast<size_t>(segments[k] + sizes[k]) > values.size()) {
+                            throw std::runtime_error("Malformed categorical split arrays.");
+                        }
+                        arrays.categories[nodes[k]].assign(values.begin() + segments[k], values.begin() + segments[k] + sizes[k]);
+                    }
                 }
                 return arrays;
             }
@@ -58,8 +84,17 @@ namespace lignum {
                 }
 
                 node->feature_id = static_cast<int32_t>(t.split_index.at(node_id));
-                node->threshold_or_value = xgboost_threshold(t.split_condition.at(node_id));
                 node->default_dir = t.default_left.at(node_id) ? 0 : 1;
+                if (node_id < t.split_type.size() && t.split_type[node_id] == 1) {
+                    // XGBoost: float(x) is the category; categories in the set go RIGHT, invalid
+                    // ones (negative or too large) go LEFT, NaN follows default_left.
+                    const auto found = t.categories.find(static_cast<int64_t>(node_id));
+                    node->categorical = true;
+                    node->cat_set_goes_right = true;
+                    if (found != t.categories.end()) node->categories = found->second;
+                } else {
+                    node->threshold_or_value = xgboost_threshold(t.split_condition.at(node_id));
+                }
                 node->left = build_tree(t, static_cast<size_t>(t.left[node_id]));
                 node->right = build_tree(t, static_cast<size_t>(t.right.at(node_id)));
                 return node;
@@ -146,11 +181,6 @@ namespace lignum {
             if (trees_element.error() == simdjson::SUCCESS) {
                 for (simdjson::dom::element tree_elem : trees_element.get_array()) {
                     simdjson::dom::object tree_obj = tree_elem.get_object();
-
-                    auto cat_nodes_elem = tree_obj["categories_nodes"];
-                    if (cat_nodes_elem.error() == simdjson::SUCCESS && cat_nodes_elem.get_array().size() > 0) {
-                        throw std::runtime_error("Models with native categorical splits are not supported by this engine.");
-                    }
 
                     forest.push_back(build_tree(read_tree_arrays(tree_obj), 0));
                 }

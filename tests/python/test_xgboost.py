@@ -61,18 +61,3 @@ def test_xgboost_rejects_multitarget(tmp_path, base_data):
     
     with pytest.raises(RuntimeError, match="not supported"):
         lg.load(model_path, format="xgboost")
-
-def test_xgboost_rejects_categorical(tmp_path):
-    df = pd.DataFrame({
-        "cat": pd.Categorical(["A", "B", "A", "B", "C", "A"] * 20)
-    })
-    y = (df["cat"] == "A").astype(np.float32)
-    
-    model = xgb.XGBRegressor(n_estimators=2, max_depth=2, enable_categorical=True)
-    model.fit(df, y)
-    
-    model_path = str(tmp_path / "xgb_cat.json")
-    model.save_model(model_path)
-    
-    with pytest.raises(RuntimeError, match="not supported"):
-        lg.load(model_path, format="xgboost")
