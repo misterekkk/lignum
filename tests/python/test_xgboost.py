@@ -39,7 +39,7 @@ def test_xgboost_objectives(tmp_path, base_data, objective, model_type, positive
 
     expected_raw = model.predict(X, output_margin=True)
     actual_raw = lg_model.predict(X, raw_score=True)
-    np.testing.assert_allclose(actual_raw, expected_raw, rtol=1e-4, atol=1e-4)
+    np.testing.assert_array_equal(actual_raw, expected_raw)
 
     if model_type == "classifier":
         expected_out = model.predict_proba(X)[:, 1]
@@ -47,7 +47,7 @@ def test_xgboost_objectives(tmp_path, base_data, objective, model_type, positive
         expected_out = model.predict(X)
         
     actual_out = lg_model.predict(X, raw_score=False)
-    np.testing.assert_allclose(actual_out, expected_out, rtol=1e-4, atol=1e-4)
+    np.testing.assert_array_equal(actual_out, expected_out)
 
 def test_xgboost_rejects_multiclass(tmp_path, base_data):
     X, _, _ = base_data

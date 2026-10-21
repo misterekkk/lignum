@@ -10,10 +10,16 @@ namespace lignum {
     class Builder {
         public:
             static Model load_json(const std::string& filepath, const std::string& model_format);
-        
+
         private:
-            static int process_leaf(TempBinNode* node, VectorData& data);
-            static int build_knode(TempBinNode* node, VectorData& data);
+            struct BuildStats {
+                int32_t max_feature = -1;
+                bool has_zero_missing = false;
+            };
+
+            static int32_t process_leaf(TempBinNode* node, VectorData& data);
+            static void fill_slot(KNode& kn, int slot, const TempBinNode* split, BuildStats& stats);
+            static int32_t build_knode(TempBinNode* node, VectorData& data, BuildStats& stats);
     };
 
 } // namespace lignum

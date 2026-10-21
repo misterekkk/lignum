@@ -32,8 +32,8 @@ def test_binary_serialization_pipeline(tmp_path):
     actual_json_prob = lg_model_json.predict(X, raw_score=False)
     actual_bin_prob = lg_model_bin.predict(X, raw_score=False)
     
-    np.testing.assert_allclose(actual_json_raw, expected_raw, rtol=1e-5, atol=1e-5)
-    np.testing.assert_allclose(actual_json_prob, expected_prob, rtol=1e-5, atol=1e-5)
+    np.testing.assert_array_equal(actual_json_raw, expected_raw)
+    np.testing.assert_array_equal(actual_json_prob, expected_prob)
     
-    np.testing.assert_allclose(actual_bin_raw, actual_json_raw, rtol=1e-7, atol=1e-7)
-    np.testing.assert_allclose(actual_bin_prob, actual_json_prob, rtol=1e-7, atol=1e-7)
+    np.testing.assert_array_equal(actual_bin_raw, actual_json_raw)
+    np.testing.assert_array_equal(actual_bin_prob, actual_json_prob)
