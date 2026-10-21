@@ -45,6 +45,13 @@ jobs:
       - name: Run benchmark
         run: python benchmarks/bench.py ${{ github.event.inputs.args || '--rows 300000 --trees 500 --repeats 5' }}
 
+      # Same machine, same job: lignum tuned for the host CPU (lleaves compiles for the host too).
+      - name: Rebuild lignum with LIGNUM_NATIVE=ON
+        run: CMAKE_ARGS="-DLIGNUM_NATIVE=ON" python -m pip install --force-reinstall --no-deps .
+
+      - name: Run benchmark (native-tuned lignum)
+        run: python benchmarks/bench.py --engines lignum ${{ github.event.inputs.args || '--rows 300000 --trees 500 --repeats 5' }}
+
       - uses: actions/upload-artifact@v4
         with:
           name: bench-${{ matrix.os }}

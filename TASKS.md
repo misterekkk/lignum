@@ -113,7 +113,13 @@ load from L2), not dispatch. Next idea: keep a 64-bit mask for categories < 64 i
 | 5000 trees, LightGBM / XGBoost | **3.62 / 3.67 s** | 4.52 s | 9.05 / 12.2 s | 38.2 / 7.48 s |
 | 500 features (200k rows) | **0.20 / 0.20 s** | 0.40 s | 0.60 / 0.66 s | 1.01 / 0.35 s |
 
+GitHub runners (`benchmarks/results/ci/`, 300k rows, 500 trees, 4 threads, generic lignum build):
+on x86-64 lleaves beats lignum on large LightGBM batches (0.45 s vs 0.72 s; categorical 1.36 vs 2.22 s),
+on aarch64 Linux too (0.33 vs 0.44 s). lignum still wins vs TL2cgen (1.5×), native libraries, small
+batches (100 rows: 268 µs vs 403 TL2cgen / 668 lleaves) and is the only bit-exact engine.
+
 Weak spots:
+- [ ] Large LightGBM batches on x86-64 / Linux aarch64 vs lleaves (host-tuned): measure `LIGNUM_NATIVE=ON` on the same runner, then profile the kernel on x86 (register pressure of 4-way interleave with 16 GPRs, N_BLOCK/T_BLOCK)
 - [ ] Shallow trees: a depth-3 tree costs 73% of a depth-6 one (per-tree overhead: root, loop, leaf load, sum; the last KNode level is half empty). Ideas: single-level node for the last odd level, fixed-depth unrolled traversal for complete trees, several trees per loop iteration
 - [ ] Single row on large models (5000 trees, ~6.5 MB): 39 µs vs 23–25 µs (TL2cgen) — memory-latency bound
 
