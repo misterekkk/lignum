@@ -23,6 +23,7 @@ endif()
 # Core library
 # ---------------------------------------------------------------------------
 add_library(lignum STATIC
+    src/binned.cpp
     src/builder.cpp
     src/c_api.cpp
     src/io.cpp

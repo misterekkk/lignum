@@ -1,6 +1,7 @@
 #include <lignum/lignum.hpp>
 #include "builder.hpp"
 #include "io.hpp"
+#include "binned.hpp"
 
 #include <fstream>
 #include <stdexcept>
@@ -28,8 +29,26 @@ namespace lignum {
 
     } // namespace
 
+    namespace {
+
+        Model with_binned(Model model) {
+        #if defined(LIGNUM_BINNED) && LIGNUM_BINNED
+            model.binned = build_binned(model);
+        #endif
+            return model;
+        }
+
+        Model load_any(const std::string& filepath, const std::string& fmt);
+
+    } // namespace
+
     Model load(const std::string& filepath, const std::string& format) {
-        std::string fmt = lower_case(format);
+        return with_binned(load_any(filepath, lower_case(format)));
+    }
+
+    namespace {
+
+    Model load_any(const std::string& filepath, const std::string& fmt) {
 
         if (fmt == "auto" || fmt == "lignum" || fmt == "binary" || fmt == "bin") {
             if (is_lignum_bin(filepath)) {
@@ -43,6 +62,8 @@ namespace lignum {
         }
         throw std::invalid_argument("Unknown model format.");
     }
+
+    } // namespace
 
 
 } // namespace lignum

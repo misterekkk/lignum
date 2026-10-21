@@ -24,8 +24,8 @@ concurrency:
 
 env:
   # Compile flags of the experimental kernel variant measured next to the default build
-  # (empty = skip).
-  EXPERIMENT_CXX_FLAGS: ""
+  # (empty = skip). Current: exact input binning, 3 tree levels per node (numeric models only).
+  EXPERIMENT_CXX_FLAGS: "-DLIGNUM_BINNED=1"
   BENCH_ARGS: ${{ github.event.inputs.args || '--only lightgbm,lightgbm-cat --rows 300000 --trees 500 --repeats 5 --latency-budget 1' }}
 
 jobs:

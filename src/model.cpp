@@ -1,5 +1,7 @@
 #include <lignum/model.hpp>
 
+#include "binned.hpp"
+
 #include <algorithm>
 #include <bit>
 #ifdef _OPENMP
@@ -495,6 +497,146 @@ namespace lignum {
             }
         }
 
+        // ---- Experimental binned kernel (LIGNUM_BINNED, see src/binned.hpp) --------------------
+
+        // Number of cuts <= x (branch-free binary search); NaN -> kNanBin.
+        LIGNUM_INLINE uint16_t bin_of(const double* __restrict__ cuts, uint32_t len, double x) {
+            if (std::isnan(x)) return kNanBin;
+            const double* base = cuts;
+            uint32_t n = len;
+            while (n > 1) {
+                const uint32_t half = n / 2;
+                base = (base[half] <= x) ? base + half : base;
+                n -= half;
+            }
+            return static_cast<uint16_t>((base - cuts) + (n == 1 && *base <= x));
+        }
+
+        LIGNUM_INLINE int32_t bdir(const BNode& b, int s, const uint16_t* __restrict__ bins) {
+            const uint16_t v = static_cast<uint16_t>(bins[b.features[s]] + ((b.nan_left >> s) & 1));
+            return v >= b.thresholds[s];
+        }
+
+        // Three tree levels per step, comparing only along the path (3 dependent comparisons).
+        LIGNUM_INLINE int32_t bstep(const BNode& b, const uint16_t* __restrict__ bins) {
+        #ifdef LIGNUM_BINNED_SPECULATIVE
+            const int32_t d0 = bdir(b, 0, bins), d1 = bdir(b, 1, bins), d2 = bdir(b, 2, bins);
+            const int32_t d3 = bdir(b, 3, bins), d4 = bdir(b, 4, bins), d5 = bdir(b, 5, bins), d6 = bdir(b, 6, bins);
+            const int32_t g = (d0 << 1) | (d0 ? d2 : d1);
+            const int32_t dg = g == 0 ? d3 : (g == 1 ? d4 : (g == 2 ? d5 : d6));
+            return b.children[(g << 1) | dg];
+        #else
+            const int32_t d0 = bdir(b, 0, bins);
+            const int32_t d1 = bdir(b, 1 + d0, bins);
+            const int32_t g = (d0 << 1) | d1;
+            const int32_t d2 = bdir(b, 3 + g, bins);
+            return b.children[(g << 1) | d2];
+        #endif
+        }
+
+        template <typename Acc>
+        class BinnedKernel {
+            public:
+                BinnedKernel(const Model& model, const BinnedForest& forest, const double* X, size_t n_features, bool raw_score)
+                    : m_(model), f_(forest), X_(X), n_features_(n_features), raw_score_(raw_score) {}
+
+                void predict_rows(size_t i_begin, size_t i_end, double* __restrict__ out) const {
+                    const size_t nd = f_.feature_of.size();
+                    thread_local std::vector<uint16_t> buffer;
+                    buffer.resize((i_end - i_begin) * nd);
+                    uint16_t* bins = buffer.data();
+                    for (size_t i = i_begin; i < i_end; i++) {
+                        const double* row = &X_[i * n_features_];
+                        uint16_t* rb = &bins[(i - i_begin) * nd];
+                        for (size_t j = 0; j < nd; j++) {
+                            const uint32_t lo = f_.cut_offsets[j];
+                            rb[j] = bin_of(&f_.cuts[lo], f_.cut_offsets[j + 1] - lo, row[f_.feature_of[j]]);
+                        }
+                    }
+
+                    const double base = static_cast<double>(static_cast<Acc>(m_.base_scores[0]));
+                    for (size_t i = i_begin; i < i_end; i++) out[i] = base;
+                    for (size_t t_start = 0; t_start < f_.roots.size(); t_start += T_BLOCK) {
+                        accumulate(bins, nd, i_begin, i_end, t_start, std::min(t_start + T_BLOCK, f_.roots.size()), out);
+                    }
+                    finish(i_begin, i_end, out);
+                }
+
+            private:
+                const Model& m_;
+                const BinnedForest& f_;
+                const double* X_;
+                size_t n_features_;
+                bool raw_score_;
+
+                void accumulate(const uint16_t* __restrict__ bins, size_t nd, size_t i_begin, size_t i_end,
+                                size_t t_begin, size_t t_end, double* __restrict__ out) const {
+                    const BNode* __restrict__ nodes = f_.nodes.data();
+                    const int32_t* __restrict__ roots = f_.roots.data();
+                    const double* __restrict__ leaf_values = m_.leaf_values;
+                    const size_t unrolled_end = i_begin + ((i_end - i_begin) / 4) * 4;
+                    for (size_t i = i_begin; i < unrolled_end; i += 4) {
+                        const uint16_t* b0 = &bins[(i - i_begin) * nd];
+                        const uint16_t* b1 = b0 + nd;
+                        const uint16_t* b2 = b1 + nd;
+                        const uint16_t* b3 = b2 + nd;
+                        Acc sum0 = static_cast<Acc>(out[i]);
+                        Acc sum1 = static_cast<Acc>(out[i + 1]);
+                        Acc sum2 = static_cast<Acc>(out[i + 2]);
+                        Acc sum3 = static_cast<Acc>(out[i + 3]);
+                        for (size_t t = t_begin; t < t_end; t++) {
+                            int32_t n0 = roots[t], n1 = roots[t], n2 = roots[t], n3 = roots[t];
+                            while (n0 >= 0 || n1 >= 0 || n2 >= 0 || n3 >= 0) {
+                                if (n0 >= 0) n0 = bstep(nodes[n0], b0);
+                                if (n1 >= 0) n1 = bstep(nodes[n1], b1);
+                                if (n2 >= 0) n2 = bstep(nodes[n2], b2);
+                                if (n3 >= 0) n3 = bstep(nodes[n3], b3);
+                            }
+                            sum0 += static_cast<Acc>(leaf_value(leaf_values, n0));
+                            sum1 += static_cast<Acc>(leaf_value(leaf_values, n1));
+                            sum2 += static_cast<Acc>(leaf_value(leaf_values, n2));
+                            sum3 += static_cast<Acc>(leaf_value(leaf_values, n3));
+                        }
+                        out[i] = static_cast<double>(sum0);
+                        out[i + 1] = static_cast<double>(sum1);
+                        out[i + 2] = static_cast<double>(sum2);
+                        out[i + 3] = static_cast<double>(sum3);
+                    }
+                    for (size_t i = unrolled_end; i < i_end; i++) {
+                        const uint16_t* rb = &bins[(i - i_begin) * nd];
+                        Acc sum = static_cast<Acc>(out[i]);
+                        for (size_t t = t_begin; t < t_end; t++) {
+                            int32_t n = roots[t];
+                            while (n >= 0) n = bstep(nodes[n], rb);
+                            sum += static_cast<Acc>(leaf_value(leaf_values, n));
+                        }
+                        out[i] = static_cast<double>(sum);
+                    }
+                }
+
+                void finish(size_t i_begin, size_t i_end, double* __restrict__ out) const {
+                    const uint8_t tr = m_.transform;
+                    if (raw_score_ || tr == transform::Identity) return;
+                    for (size_t i = i_begin; i < i_end; i++) {
+                        if constexpr (std::is_same_v<Acc, float>) {
+                            out[i] = static_cast<double>(apply_transform(static_cast<float>(out[i]), tr));
+                        } else {
+                            out[i] = apply_transform(out[i], tr, m_.sigmoid);
+                        }
+                    }
+                }
+        };
+
+        template <typename Acc>
+        void run_binned(const Model& model, const double* X, size_t n_samples, size_t n_features, double* out,
+                        int n_jobs, Strategy strategy, bool raw_score) {
+            const BinnedKernel<Acc> kernel(model, *model.binned, X, n_features, raw_score);
+            const int n_threads = resolve_threads(n_jobs);
+            if (strategy == Strategy::Auto) strategy = choose_strategy(n_samples, n_threads);
+            if (strategy == Strategy::Serial) run_serial(kernel, n_samples, out);
+            else                              run_rows(kernel, n_samples, out, n_threads);
+        }
+
         void dispatch(const Model& model, const double* X, size_t n_samples, size_t n_features, double* out,
                       int n_jobs, Strategy strategy, bool raw_score) {
             if (n_features < model.n_features) {
@@ -502,6 +644,13 @@ namespace lignum {
                                             std::to_string(model.n_features) + ".");
             }
             if (n_samples == 0) return;
+
+            // Experimental binned path for batches; single rows keep the direct traversal.
+            if (model.binned && n_samples >= kMinRowsForThreads && model.transform != transform::Argmax) {
+                if (model.float32) run_binned<float>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+                else               run_binned<double>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+                return;
+            }
 
             if (raw_score || model.transform != transform::Argmax) {
                 run_any(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
