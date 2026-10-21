@@ -1,4 +1,4 @@
-#include "lignum.hpp"
+#include <lignum/lignum.hpp>
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>

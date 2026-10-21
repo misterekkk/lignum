@@ -11,7 +11,7 @@ Python bindings for the `lignum` ultra-fast decision tree inference engine. This
 ## Installation
 
 ### Prerequisites
-* C++17 compliant compiler (GCC, Clang, or MSVC)
+* C++20 compliant compiler (GCC, Clang, or MSVC)
 * CMake (>= 3.18)
 * Python (>= 3.8)
 
@@ -19,14 +19,14 @@ Python bindings for the `lignum` ultra-fast decision tree inference engine. This
 From the root directory of the repository, run:
 
 ```bash
-pip install ./py-package
+pip install .
 
 ```
 
 For local development and running benchmarks, install in editable mode with development dependencies:
 
 ```bash
-pip install -e ./py-package
+pip install -e .
 
 ```
 
@@ -53,9 +53,9 @@ model.save("lignum_model.bin")
 
 ## Running Tests
 
-To verify the installation and core functionality, run `pytest` from the `py-package` directory:
+To verify the installation and core functionality, run `pytest` from the repository root:
 
 ```bash
-pytest tests/ -v
+pytest tests/python -v
 
 ```

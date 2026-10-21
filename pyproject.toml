@@ -1,0 +1,35 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "lignum"
+version = "0.2.0.dev0"
+description = "Fast decision tree inference for LightGBM and XGBoost models via native C++ and mmap"
+readme = "python/README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Kacper Piotrowski" }
+]
+dependencies = [
+    "numpy>=1.20.0"
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "lightgbm",
+    "xgboost",
+    "scikit-learn",
+    "pandas",
+]
+
+[tool.scikit-build]
+cmake.version = ">=3.18"
+cmake.build-type = "Release"
+wheel.packages = ["python/lignum"]
+sdist.exclude = ["benchmarks", "docs", ".github", "tests", "*.npy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]

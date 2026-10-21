@@ -1,5 +1,5 @@
-site_name: Lignum Python API
-site_dir: site/python
+site_name: Lignum
+site_dir: site
 theme:
   name: material
   features:
@@ -10,8 +10,7 @@ plugins:
   - mkdocstrings:
       handlers:
         python:
-          paths: [py-package/src]
+          paths: [python]
 nav:
-  - R Documentation: ../index.html
   - User Guide: index.md
   - API Reference: api.md

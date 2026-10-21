@@ -21,7 +21,7 @@ git clone [https://github.com/misterekkk/lignum.git](https://github.com/misterek
 cd lignum
 
 # Install the Python package directly from the directory
-pip install ./py-package
+pip install .
 
 ```
 

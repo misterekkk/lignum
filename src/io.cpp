@@ -1,4 +1,4 @@
-#include "model.hpp"
+#include <lignum/model.hpp>
 #include "io.hpp"
 
 #include <fstream>

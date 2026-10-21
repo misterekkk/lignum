@@ -1,6 +1,6 @@
 #pragma once
 
-#include "model.hpp"
+#include <lignum/model.hpp>
 
 #include <string>
 

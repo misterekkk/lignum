@@ -1,4 +1,4 @@
-#include "lignum.hpp"
+#include <lignum/lignum.hpp>
 #include "builder.hpp"
 #include "io.hpp"
 

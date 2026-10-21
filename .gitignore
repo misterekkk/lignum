@@ -112,13 +112,7 @@ compile_commands.json
 
 test_lignum
 !CMakeLists.txt
-!inst/tinytest/*.json
-!inst/tinytest/*.csv
-!py_package/tests/*.json
-!py_package/tests/*.csv
 site/
-R-package/inst/include
-R-package/src/*.cpp
-R-package/src/*.o
-!R-package/src/cpp11.cpp
-!R-package/src/r_wrapper.cpp
+.venv/
+*.npy
+benchmarks/bench_model_*
