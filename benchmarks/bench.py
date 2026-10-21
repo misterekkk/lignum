@@ -102,7 +102,7 @@ def build_workloads(args) -> list[Workload]:
     import lightgbm as lgb
     import xgboost as xgb
 
-    key = f"r{args.rows}_f{args.features}_t{args.trees}_d{args.depth}"
+    key = f"r{args.rows}_f{args.features}_t{args.trees}_d{args.depth}" + (f"_l{args.num_leaves}" if args.num_leaves else "")
     cache = CACHE / key
     cache.mkdir(parents=True, exist_ok=True)
 
@@ -112,7 +112,7 @@ def build_workloads(args) -> list[Workload]:
         np.savez(data_path, X=X, y=y)
     data = np.load(data_path)
     X, y = data["X"], data["y"]
-    n_train = min(200_000, len(X) // 2)
+    n_train = min(args.train_rows, len(X) // 2)
     X_train, y_train = np.ascontiguousarray(X[:n_train]), y[:n_train]
     X_holdout = np.ascontiguousarray(X[n_train:n_train + 100_000])
 
@@ -120,7 +120,7 @@ def build_workloads(args) -> list[Workload]:
     if "lightgbm" in args.only:
         txt, js = cache / "lgb.txt", cache / "lgb.json"
         if not txt.exists():
-            params = {"objective": "binary", "max_depth": args.depth, "num_leaves": 2 ** args.depth - 1,
+            params = {"objective": "binary", "max_depth": args.depth, "num_leaves": args.num_leaves or 2 ** args.depth - 1,
                       "learning_rate": 0.1, "verbose": -1, "seed": 42}
             booster = lgb.train(params, lgb.Dataset(X_train, y_train), num_boost_round=args.trees)
             booster.save_model(str(txt))
@@ -461,7 +461,8 @@ def render(results: list[Result], env: dict, args) -> str:
         f"# Benchmark {env['date']}",
         "",
         f"- lignum commit `{env['commit']}`, {env['cpu']}, {env['threads']} threads, Python {env['python']}",
-        f"- {args.rows:,} rows × {args.features} features (5% NaN), {args.trees} trees, max depth {args.depth}; "
+        f"- {args.rows:,} rows × {args.features} features (5% NaN), {args.trees} trees, max depth {args.depth}"
+        + (f", num_leaves {args.num_leaves}" if args.num_leaves else "") + "; "
         f"binary classification, and 10-class softmax ({args.trees // 10} iterations × 10 trees) for `*-multi`; "
         f"`lightgbm-cat`: {len(CAT_CARDINALITIES)} categorical features (cardinality {', '.join(map(str, CAT_CARDINALITIES))}) + 15 numeric",
         "- versions: " + ", ".join(f"{k} {v}" for k, v in env["versions"].items() if v),
@@ -496,7 +497,9 @@ def main():
     parser.add_argument("--rows", type=int, default=1_000_000)
     parser.add_argument("--features", type=int, default=20)
     parser.add_argument("--trees", type=int, default=1000)
-    parser.add_argument("--depth", type=int, default=6)
+    parser.add_argument("--depth", type=int, default=6, help="max depth (-1: unlimited, LightGBM leaf-wise)")
+    parser.add_argument("--num-leaves", type=int, default=None, help="LightGBM num_leaves (default 2**depth - 1)")
+    parser.add_argument("--train-rows", type=int, default=200_000)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--latency-budget", type=float, default=2.0, help="seconds per latency measurement")
     parser.add_argument("--only", default="lightgbm,xgboost,lightgbm-multi,xgboost-multi,lightgbm-cat")
