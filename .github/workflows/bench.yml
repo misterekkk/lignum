@@ -2,13 +2,9 @@ name: Benchmark
 
 # Manual run on shared GitHub runners. Absolute times are noisy; compare engines within one run
 # (ratios), not across runs. Results are uploaded as an artifact.
+# Full comparison against every engine; start it by hand. Day-to-day kernel work uses
+# bench-lleaves.yml, which runs automatically and only against lleaves.
 on:
-  # Runs when the benchmark itself changes on the development branch; otherwise start it by hand.
-  push:
-    branches: [dev/v0.2]
-    paths:
-      - '.github/workflows/bench.yml'
-      - 'benchmarks/bench.py'
   workflow_dispatch:
     inputs:
       args:
@@ -55,4 +51,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: bench-${{ matrix.os }}
-          path: benchmarks/results/
+          path: |
+            benchmarks/results/2*.md
+            !benchmarks/results/*-m4-*.md
