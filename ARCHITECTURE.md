@@ -43,8 +43,9 @@ comparison is ignored.
   row) interleave four trees instead. Leaves are still added in tree order.
 - Per KNode the three comparisons are evaluated speculatively and the child is selected with
   `children[(r << 1) | (r ? c : l)]`, which removes the dependency between the two levels.
-- Template parameters: accumulator type (`double` for LightGBM, `float` for XGBoost) and whether
-  any split uses zero-as-missing. The traversal (`step`, `walk4`, `walk1`) is force-inlined and works
+- Template parameters: accumulator type (`double` for LightGBM, `float` for XGBoost) and `Mixed`
+  (the model has trees of kind `ZeroMissing`). With `Mixed`, the traversal is chosen per tree from
+  `tree_kinds[]`; otherwise there is no per-tree branch at all. The traversal (`step`, `walk4`, `walk1`) is force-inlined and works
   on local copies of the model pointers; going through `Model&` members cost ~7-13%.
 - Leaves are added to a running sum loaded from `out_preds[i]`, in model order, so floating point
   results are identical to the source library.
@@ -67,10 +68,11 @@ float32 `log`/logit (`binary:logitraw` uses `base_score` as is).
 Verified bit-exact by `tests/python/test_parity.py` on inputs with NaNs, zeros, values in the zero
 band and values placed exactly on every split threshold.
 
-## Binary format (version 0.2)
+## Binary format (version 0.3)
 
 64-byte header (`magic "LIGNUM"`, version, transform, flags {float32, zero-missing}, base_score,
-sigmoid, n_features, section sizes), followed by 64-byte aligned sections: nodes, tree offsets, leaves.
+sigmoid, n_features, section sizes), followed by 64-byte aligned sections: nodes, tree offsets,
+leaves, tree kinds.
 Loading validates the version and the file size, then maps the file read-only. Older versions are
 rejected; re-export from JSON.
 

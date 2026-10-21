@@ -49,7 +49,7 @@ namespace lignum {
         struct alignas(64) FileHeader {
             char magic[6] = {'L', 'I', 'G', 'N', 'U', 'M'}; 
             uint8_t version_major = 0;
-            uint8_t version_minor = 2;
+            uint8_t version_minor = 3;
 
             uint8_t os_id = LIGNUM_OS_ID;
             uint8_t arch_id = LIGNUM_ARCH_ID;
@@ -170,6 +170,7 @@ namespace lignum {
         padded_write(out, reinterpret_cast<const char*>(k_nodes), n_nodes * sizeof(KNode));
         padded_write(out, reinterpret_cast<const char*>(tree_offsets), n_offsets * sizeof(int32_t));
         padded_write(out, reinterpret_cast<const char*>(leaf_values), n_leaves * sizeof(double));
+        padded_write(out, reinterpret_cast<const char*>(tree_kinds), n_offsets * sizeof(uint8_t));
     }
 
     Model load_binary(const std::string& filepath) {
@@ -190,13 +191,14 @@ namespace lignum {
             throw std::runtime_error("Endianness mismatch.");
         }
 
-        if (header.version_major != 0 || header.version_minor != 2) {
+        if (header.version_major != 0 || header.version_minor != 3) {
             throw std::runtime_error("Unsupported lignum binary format version " + std::to_string(header.version_major) + "." +
                                      std::to_string(header.version_minor) + "; re-export the model from JSON.");
         }
 
         const size_t expected_size = sizeof(FileHeader) + align(header.n_nodes * sizeof(KNode)) +
-                                     align(header.n_offsets * sizeof(int32_t)) + header.n_leaves * sizeof(double);
+                                     align(header.n_offsets * sizeof(int32_t)) + align(header.n_leaves * sizeof(double)) +
+                                     header.n_offsets * sizeof(uint8_t);
         if (binary_data->size < expected_size) {
             throw std::runtime_error("Binary file is truncated or corrupted.");
         }
@@ -225,6 +227,10 @@ namespace lignum {
         }
         if (model.n_leaves > 0) {
             model.leaf_values = reinterpret_cast<const double*>(binary_data->data + offset);
+            offset += align(model.n_leaves * sizeof(double));
+        }
+        if (model.n_offsets > 0) {
+            model.tree_kinds = reinterpret_cast<const uint8_t*>(binary_data->data + offset);
         }
 
         return model;

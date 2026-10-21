@@ -24,7 +24,9 @@ namespace lignum {
 
         BuildStats stats;
         for (const auto& root : temp_forest) {
+            stats.tree_zero_missing = false;
             data->tree_offsets.push_back(build_knode(root.get(), *data, stats));
+            data->tree_kinds.push_back(stats.tree_zero_missing ? tree_kind::ZeroMissing : tree_kind::Numeric);
         }
 
         Model model;
@@ -38,6 +40,7 @@ namespace lignum {
         model.k_nodes = data->k_nodes.data();
         model.n_offsets = data->tree_offsets.size();
         model.tree_offsets = data->tree_offsets.data();
+        model.tree_kinds = data->tree_kinds.data();
         model.n_leaves = data->leaf_values.size();
         model.leaf_values = data->leaf_values.data();
         model.data = data;
@@ -60,6 +63,7 @@ namespace lignum {
                                              (split->zero_is_missing ? dir_bits::ZeroIsMissing : 0));
         stats.max_feature = std::max(stats.max_feature, split->feature_id);
         stats.has_zero_missing |= split->zero_is_missing;
+        stats.tree_zero_missing |= split->zero_is_missing;
     }
 
     int32_t Builder::build_knode(TempBinNode* node, VectorData& data, BuildStats& stats) {

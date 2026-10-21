@@ -15,6 +15,7 @@ namespace lignum {
             struct BuildStats {
                 int32_t max_feature = -1;
                 bool has_zero_missing = false;
+                bool tree_zero_missing = false;  // reset per tree
             };
 
             static int32_t process_leaf(TempBinNode* node, VectorData& data);

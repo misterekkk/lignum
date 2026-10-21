@@ -33,6 +33,13 @@ namespace lignum {
         constexpr uint8_t ZeroIsMissing = 1 << 1;  // LightGBM missing_type=Zero: |x| <= 1e-35 is missing too
     } // namespace dir_bits
 
+    // Per-tree kinds: the kernel picks a traversal per tree, so special cases only cost
+    // in the trees that need them. Values are part of the binary format.
+    namespace tree_kind {
+        constexpr uint8_t Numeric = 0;
+        constexpr uint8_t ZeroMissing = 1;  // has splits with dir_bits::ZeroIsMissing
+    } // namespace tree_kind
+
     // Two levels of a binary tree in one cache line. Slot 0 is the root split, slots 1 and 2
     // its left and right children; children[0..3] are the four grandchildren (negative = leaf).
     // Every split goes right iff  isnan(x) ? (dirs & DefaultRight) : (x >= threshold).
@@ -54,6 +61,7 @@ namespace lignum {
         public:
             std::vector<KNode> k_nodes;
             std::vector<int32_t> tree_offsets;
+            std::vector<uint8_t> tree_kinds;
             std::vector<double> leaf_values;
     };
 
@@ -63,6 +71,7 @@ namespace lignum {
             size_t n_nodes = 0;
 
             const int32_t* tree_offsets = nullptr;
+            const uint8_t* tree_kinds = nullptr;  // n_offsets entries, see tree_kind
             size_t n_offsets = 0;
 
             const double* leaf_values = nullptr;
@@ -72,7 +81,7 @@ namespace lignum {
             double sigmoid = 1.0;
             uint8_t transform = transform::Identity;
             bool float32 = false;           // accumulate and transform in float32 (XGBoost semantics)
-            bool has_zero_missing = false;  // some split has dir_bits::ZeroIsMissing
+            bool has_zero_missing = false;  // some tree is tree_kind::ZeroMissing
             uint32_t n_features = 0;        // minimum number of input columns
 
             std::shared_ptr<const Data> data;

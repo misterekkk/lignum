@@ -24,15 +24,20 @@ Benchmark at the end of Stage 0 vs `main` (M4, 1M rows × 20 features, 1000 tree
 | Model | main | dev/v0.2 | Note |
 |---|---|---|---|
 | LightGBM binary | 0.73 s | 0.73 s | — |
-| LightGBM `zero_as_missing` | 0.73 s (wrong results) | 0.88 s | extra check per split; fixed by Stage 1 |
+| LightGBM `zero_as_missing` | 0.73 s (wrong results) | 0.88 s | extra check per split; see Stage 1 finding |
 | XGBoost binary:logistic | 0.78 s | 0.80 s | float32 accumulation, required for parity |
 | LightGBM, 100 rows | 343 µs | ~360 µs | superseded by Stage 1b: 161 µs |
 
 ## Stage 1 — Tree kinds and outputs
 
-- [ ] `tree_kind[]` and `tree_output[]` in `Model` and the binary format
-- [ ] Kernel dispatches per tree, in model order; only trees with `ZeroIsMissing` splits use that path
-- [ ] No result changes, no regression
+- [x] `tree_kinds[]` in `Model` and the binary format (0.3); `tree_output[]` moves to Stage 2 where it is used
+- [x] Kernel dispatches per tree, in model order; only trees with `ZeroIsMissing` splits use that path
+- [x] No result changes, no regression (1M rows 0.715 / 0.724 s)
+
+Finding: with `zero_as_missing=True` LightGBM marks every split `missing_type=Zero`; 36% of splits
+need the zero check and every tree has some, so per-tree dispatch barely helps those models
+(0.88 → ~0.83 s vs 0.71 s for a normal model). A branchless check was slower; accepted as the cost
+of that option.
 
 ## Stage 1b — Small-batch latency (from the baseline benchmark)
 
@@ -57,6 +62,7 @@ Result (`benchmarks/results/2026-10-21-m4-stage1b.md`): 1M rows 0.73 s (LightGBM
 ## Stage 2 — Multiclass
 
 - [ ] LightGBM (`t % num_tree_per_iteration`) and XGBoost (`tree_info`)
+- [ ] `tree_outputs[]` (class per tree) in `Model` and the binary format
 - [ ] `n_samples × K` output, softmax / per-class sigmoid (`multiclassova`), per-class base score
 - [ ] Python returns 2-D for K > 1
 

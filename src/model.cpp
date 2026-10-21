@@ -106,6 +106,19 @@ namespace lignum {
             }
         }
 
+        // Four trees of the same row, interleaved (used when there are fewer than four rows).
+        template <bool ZeroMissing>
+        LIGNUM_INLINE void walk4_trees(const KNode* __restrict__ nodes, const int32_t* roots, const double* row,
+                                       int32_t& n0, int32_t& n1, int32_t& n2, int32_t& n3) {
+            n0 = roots[0]; n1 = roots[1]; n2 = roots[2]; n3 = roots[3];
+            while (n0 >= 0 || n1 >= 0 || n2 >= 0 || n3 >= 0) {
+                if (n0 >= 0) n0 = step<ZeroMissing>(nodes[n0], row);
+                if (n1 >= 0) n1 = step<ZeroMissing>(nodes[n1], row);
+                if (n2 >= 0) n2 = step<ZeroMissing>(nodes[n2], row);
+                if (n3 >= 0) n3 = step<ZeroMissing>(nodes[n3], row);
+            }
+        }
+
         template <bool ZeroMissing>
         LIGNUM_INLINE int32_t walk1(const KNode* __restrict__ nodes, int32_t node, const double* row) {
             while (node >= 0) node = step<ZeroMissing>(nodes[node], row);
@@ -122,7 +135,9 @@ namespace lignum {
         //
         // A tree-parallel strategy (threads fill a per-tree leaf buffer, rows sum it in order) was
         // measured and lost to Serial below 8 rows and to Rows above, so it is not offered.
-        template <typename Acc, bool ZeroMissing>
+        // `Mixed`: the model has trees of kind ZeroMissing. Only then does the kernel branch per
+        // tree; numeric trees always take the plain traversal.
+        template <typename Acc, bool Mixed>
         class Kernel {
             public:
                 Kernel(const Model& model, const double* X, size_t n_features, bool raw_score)
@@ -144,12 +159,24 @@ namespace lignum {
                 bool raw_score_;
 
                 Acc base() const { return static_cast<Acc>(m_.base_score); }
+
+                // True if any of trees [t, t + count) needs the zero-as-missing traversal.
+                static LIGNUM_INLINE bool is_zero_missing(const uint8_t* kinds, size_t t, size_t count) {
+                    if constexpr (!Mixed) {
+                        return false;
+                    } else {
+                        uint8_t any = 0;
+                        for (size_t k = 0; k < count; k++) any |= kinds[t + k];
+                        return any & tree_kind::ZeroMissing;
+                    }
+                }
                 const double* row(size_t i) const { return &X_[i * n_features_]; }
 
                 // Adds trees [t_begin, t_end) to the running sums of rows [i_begin, i_end).
                 void accumulate(size_t i_begin, size_t i_end, size_t t_begin, size_t t_end, double* __restrict__ out) const {
                     const KNode* __restrict__ nodes = m_.k_nodes;
                     const int32_t* __restrict__ roots = m_.tree_offsets;
+                    const uint8_t* __restrict__ kinds = m_.tree_kinds;
                     const double* __restrict__ leaf_values = m_.leaf_values;
                     const size_t unrolled_end = i_begin + ((i_end - i_begin) / 4) * 4;
                     for (size_t i = i_begin; i < unrolled_end; i += 4) {
@@ -160,7 +187,8 @@ namespace lignum {
                         Acc sum3 = static_cast<Acc>(out[i + 3]);
                         for (size_t t = t_begin; t < t_end; t++) {
                             int32_t n0, n1, n2, n3;
-                            walk4<ZeroMissing>(nodes, roots[t], r0, r1, r2, r3, n0, n1, n2, n3);
+                            if (is_zero_missing(kinds, t, 1)) walk4<true>(nodes, roots[t], r0, r1, r2, r3, n0, n1, n2, n3);
+                            else                              walk4<false>(nodes, roots[t], r0, r1, r2, r3, n0, n1, n2, n3);
                             sum0 += static_cast<Acc>(leaf_value(leaf_values, n0));
                             sum1 += static_cast<Acc>(leaf_value(leaf_values, n1));
                             sum2 += static_cast<Acc>(leaf_value(leaf_values, n2));
@@ -178,20 +206,17 @@ namespace lignum {
                         const double* r = row(i);
                         Acc sum = static_cast<Acc>(out[i]);
                         for (size_t t = t_begin; t < trees_unrolled_end; t += 4) {
-                            int32_t n0 = roots[t], n1 = roots[t + 1], n2 = roots[t + 2], n3 = roots[t + 3];
-                            while (n0 >= 0 || n1 >= 0 || n2 >= 0 || n3 >= 0) {
-                                if (n0 >= 0) n0 = step<ZeroMissing>(nodes[n0], r);
-                                if (n1 >= 0) n1 = step<ZeroMissing>(nodes[n1], r);
-                                if (n2 >= 0) n2 = step<ZeroMissing>(nodes[n2], r);
-                                if (n3 >= 0) n3 = step<ZeroMissing>(nodes[n3], r);
-                            }
+                            int32_t n0, n1, n2, n3;
+                            if (is_zero_missing(kinds, t, 4)) walk4_trees<true>(nodes, &roots[t], r, n0, n1, n2, n3);
+                            else                              walk4_trees<false>(nodes, &roots[t], r, n0, n1, n2, n3);
                             sum += static_cast<Acc>(leaf_value(leaf_values, n0));
                             sum += static_cast<Acc>(leaf_value(leaf_values, n1));
                             sum += static_cast<Acc>(leaf_value(leaf_values, n2));
                             sum += static_cast<Acc>(leaf_value(leaf_values, n3));
                         }
                         for (size_t t = trees_unrolled_end; t < t_end; t++) {
-                            sum += static_cast<Acc>(leaf_value(leaf_values, walk1<ZeroMissing>(nodes, roots[t], r)));
+                            const int32_t leaf = is_zero_missing(kinds, t, 1) ? walk1<true>(nodes, roots[t], r) : walk1<false>(nodes, roots[t], r);
+                            sum += static_cast<Acc>(leaf_value(leaf_values, leaf));
                         }
                         out[i] = static_cast<double>(sum);
                     }
@@ -209,15 +234,15 @@ namespace lignum {
                 }
         };
 
-        template <typename Acc, bool ZeroMissing>
-        void run_serial(const Kernel<Acc, ZeroMissing>& kernel, size_t n_samples, double* out) {
+        template <typename Acc, bool Mixed>
+        void run_serial(const Kernel<Acc, Mixed>& kernel, size_t n_samples, double* out) {
             for (size_t i_start = 0; i_start < n_samples; i_start += N_BLOCK) {
                 kernel.predict_rows(i_start, std::min<size_t>(i_start + N_BLOCK, n_samples), out);
             }
         }
 
-        template <typename Acc, bool ZeroMissing>
-        void run_rows(const Kernel<Acc, ZeroMissing>& kernel, size_t n_samples, double* out, int n_threads) {
+        template <typename Acc, bool Mixed>
+        void run_rows(const Kernel<Acc, Mixed>& kernel, size_t n_samples, double* out, int n_threads) {
             // Enough blocks for every thread (two each, for balance across P/E cores), but never
             // larger than N_BLOCK, which keeps a tile of trees hot in cache for the whole block.
             const size_t per_thread = (n_samples + 2 * n_threads - 1) / (2 * n_threads);
@@ -238,10 +263,10 @@ namespace lignum {
             return Strategy::Rows;
         }
 
-        template <typename Acc, bool ZeroMissing>
+        template <typename Acc, bool Mixed>
         void run(const Model& model, const double* X, size_t n_samples, size_t n_features, double* out,
                  int n_jobs, Strategy strategy, bool raw_score) {
-            const Kernel<Acc, ZeroMissing> kernel(model, X, n_features, raw_score);
+            const Kernel<Acc, Mixed> kernel(model, X, n_features, raw_score);
             const int n_threads = resolve_threads(n_jobs);
             if (strategy == Strategy::Auto) strategy = choose_strategy(n_samples, n_threads);
 
