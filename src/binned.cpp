@@ -109,8 +109,14 @@ namespace lignum {
                         c.kind = n.kind;
                         c.xgboost = (n.dirs & dir_bits::XGBoostCategory) != 0;
                         c.nan_right = nan_right;
+                        c.dense = j;
+                        // Slot id for now; build_binned() rewrites it to a decision bit index.
                         b.thresholds[slot] = static_cast<uint16_t>(out_.cat_slots.size());
                         b.cat_slots |= static_cast<uint8_t>(1u << slot);
+                        if (c.xgboost) {
+                            b.xgb_slots |= static_cast<uint8_t>(1u << slot);
+                            if (nan_right) b.nan_left |= static_cast<uint8_t>(1u << slot);
+                        }
                         out_.cat_slots.push_back(c);
                         tree_has_cat = true;
                         return;
@@ -144,6 +150,68 @@ namespace lignum {
                     b.children[first + 1] = pack(bt_[i].right);
                 }
         };
+
+        // Calls fn(c) for every category c in a slot's set.
+        template <typename Fn>
+        void for_each_category(const BinnedCatSlot& slot, const uint32_t* bitsets, Fn&& fn) {
+            const uint32_t lo = static_cast<uint32_t>(slot.payload), hi = static_cast<uint32_t>(slot.payload >> 32);
+            switch (slot.kind) {
+                case slot_kind::CatMask:
+                    for (uint32_t c = 0; c < 64; c++) if ((slot.payload >> c) & 1) fn(c);
+                    break;
+                case slot_kind::CatRange:
+                    for (uint32_t c = lo; c <= lo + hi; c++) fn(c);
+                    break;
+                default:
+                    for (uint32_t w = 0; w < hi; w++) {
+                        for (uint32_t b = 0; b < 32; b++) if ((bitsets[lo + w] >> b) & 1) fn(w * 32 + b);
+                    }
+                    break;
+            }
+        }
+
+        // Per categorical feature, a table category -> decision bits of all its slots; the slots'
+        // BNode thresholds become bit indices into a row's decision bits.
+        bool build_decision_tables(const Model& model, BinnedForest& f) {
+            std::vector<std::vector<uint32_t>> slots_of(f.feature_of.size());
+            for (uint32_t id = 0; id < f.cat_slots.size(); id++) slots_of[f.cat_slots[id].dense].push_back(id);
+
+            std::vector<uint32_t> bit_of(f.cat_slots.size());
+            uint32_t row_words = 0;
+            for (uint16_t j = 0; j < slots_of.size(); j++) {
+                const auto& ids = slots_of[j];
+                if (ids.empty()) continue;
+                BinnedCatFeature cf{};
+                cf.dense = j;
+                cf.words = static_cast<uint32_t>((ids.size() + 63) / 64);
+                cf.row_offset = row_words;
+                for (uint32_t id : ids) {
+                    cf.n_categories = std::max<uint32_t>(cf.n_categories, static_cast<uint32_t>(
+                        category_bound(f.cat_slots[id].kind, f.cat_slots[id].payload)));
+                }
+                cf.table_offset = f.cat_tables.size();
+                const uint64_t table_words = uint64_t{cf.n_categories} * cf.words;
+                if (cf.table_offset + table_words > (uint64_t{256} << 20) / 8) return false;  // 256 MB
+                f.cat_tables.resize(cf.table_offset + table_words, 0);
+                for (uint32_t l = 0; l < ids.size(); l++) {
+                    bit_of[ids[l]] = row_words * 64 + l;
+                    for_each_category(f.cat_slots[ids[l]], model.cat_bitsets, [&](uint32_t c) {
+                        f.cat_tables[cf.table_offset + uint64_t{c} * cf.words + l / 64] |= uint64_t{1} << (l % 64);
+                    });
+                }
+                row_words += cf.words;
+                f.cat_features.push_back(cf);
+            }
+            if (uint64_t{row_words} * 64 > 0xFFFF) return false;  // bit indices are 16-bit
+            f.decision_words = row_words;
+
+            for (BNode& b : f.nodes) {
+                for (int s = 0; s < 7; s++) {
+                    if ((b.cat_slots >> s) & 1) b.thresholds[s] = static_cast<uint16_t>(bit_of[b.thresholds[s]]);
+                }
+            }
+            return true;
+        }
 
     } // namespace
 
@@ -199,6 +267,7 @@ namespace lignum {
         } catch (const std::length_error&) {
             return nullptr;  // more categorical slots than a 16-bit index can address
         }
+        if (!build_decision_tables(model, *forest)) return nullptr;
         return forest;
     }
 

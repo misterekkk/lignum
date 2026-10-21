@@ -8,6 +8,7 @@
     #include <omp.h>
 #endif
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -530,34 +531,25 @@ namespace lignum {
             return static_cast<uint16_t>(std::min<uint32_t>(c, kInvalidCat));
         }
 
-        // Categorical slot on a precomputed code: only the set test is left in the hot loop.
-        LIGNUM_INLINE int32_t binned_cat_dir(uint16_t code, const BinnedCatSlot& e, const uint32_t* __restrict__ bitsets) {
-            const uint32_t c = code;
-            const uint32_t lo = static_cast<uint32_t>(e.payload);
-            const uint32_t hi = static_cast<uint32_t>(e.payload >> 32);
-            const bool in_mask = (c < 64) & static_cast<bool>((e.payload >> (c & 63)) & 1);
-            const bool in_range = (c - lo) <= hi;
-            const uint32_t word = c >> 5;
-            const bool word_ok = (e.kind == slot_kind::CatBitset) & (word < hi);
-            const bool in_bitset = static_cast<bool>((bitsets[word_ok ? lo + word : 0] >> (c & 31)) & 1);
-            const bool in_set = e.kind == slot_kind::CatMask ? in_mask : (e.kind == slot_kind::CatRange ? in_range : in_bitset);
-            // LightGBM: in set -> left; NaN/invalid are never in a set, so they go right.
-            // XGBoost: in set -> right; invalid -> left; NaN follows its default direction.
-            return e.xgboost ? static_cast<int32_t>(in_set | ((code == kNanBin) & static_cast<bool>(e.nan_right)))
-                             : static_cast<int32_t>(!in_set);
-        }
-
-        struct BinnedView {
-            const BNode* __restrict__ nodes;
-            const BinnedCatSlot* __restrict__ cats;
-            const uint32_t* __restrict__ bitsets;
+        // Per row: 16-bit codes (bins / categories) and precomputed categorical decision bits.
+        struct BinnedRow {
+            const uint16_t* __restrict__ codes;
+            const uint64_t* __restrict__ decisions;
         };
 
         template <bool Cat>
-        LIGNUM_INLINE int32_t bdir(const BNode& b, int s, const uint16_t* __restrict__ codes, const BinnedView& v) {
-            const uint16_t code = codes[b.features[s]];
+        LIGNUM_INLINE int32_t bdir(const BNode& b, int s, const BinnedRow& r) {
+            const uint16_t code = r.codes[b.features[s]];
             if constexpr (Cat) {
-                if ((b.cat_slots >> s) & 1) return binned_cat_dir(code, v.cats[b.thresholds[s]], v.bitsets);
+                if ((b.cat_slots >> s) & 1) {
+                    // The answer was computed before the walk: one bit from L1.
+                    const uint32_t bit = b.thresholds[s];
+                    const bool in_set = (r.decisions[bit >> 6] >> (bit & 63)) & 1;
+                    if ((b.xgb_slots >> s) & 1) {
+                        return static_cast<int32_t>(in_set | ((code == kNanBin) & static_cast<bool>((b.nan_left >> s) & 1)));
+                    }
+                    return static_cast<int32_t>(!in_set);
+                }
             }
             return static_cast<uint16_t>(code + ((b.nan_left >> s) & 1)) >= b.thresholds[s];
         }
@@ -565,29 +557,29 @@ namespace lignum {
         // Three tree levels per step, comparing only along the path (3 dependent comparisons):
         // evaluating all seven speculatively was 2x slower (the kernel is compute bound).
         template <bool Cat>
-        LIGNUM_INLINE int32_t bstep(const BNode& b, const uint16_t* __restrict__ codes, const BinnedView& v) {
-            const int32_t d0 = bdir<Cat>(b, 0, codes, v);
-            const int32_t d1 = bdir<Cat>(b, 1 + d0, codes, v);
+        LIGNUM_INLINE int32_t bstep(const BNode& b, const BinnedRow& r) {
+            const int32_t d0 = bdir<Cat>(b, 0, r);
+            const int32_t d1 = bdir<Cat>(b, 1 + d0, r);
             const int32_t g = (d0 << 1) | d1;
-            const int32_t d2 = bdir<Cat>(b, 3 + g, codes, v);
+            const int32_t d2 = bdir<Cat>(b, 3 + g, r);
             return b.children[(g << 1) | d2];
         }
 
         template <bool Cat>
-        LIGNUM_INLINE void bwalk4(const BinnedView& v, int32_t root, const uint16_t* c0, const uint16_t* c1,
-                                  const uint16_t* c2, const uint16_t* c3, int32_t& n0, int32_t& n1, int32_t& n2, int32_t& n3) {
+        LIGNUM_INLINE void bwalk4(const BNode* __restrict__ nodes, int32_t root, const BinnedRow* r,
+                                  int32_t& n0, int32_t& n1, int32_t& n2, int32_t& n3) {
             n0 = n1 = n2 = n3 = root;
             while (n0 >= 0 || n1 >= 0 || n2 >= 0 || n3 >= 0) {
-                if (n0 >= 0) n0 = bstep<Cat>(v.nodes[n0], c0, v);
-                if (n1 >= 0) n1 = bstep<Cat>(v.nodes[n1], c1, v);
-                if (n2 >= 0) n2 = bstep<Cat>(v.nodes[n2], c2, v);
-                if (n3 >= 0) n3 = bstep<Cat>(v.nodes[n3], c3, v);
+                if (n0 >= 0) n0 = bstep<Cat>(nodes[n0], r[0]);
+                if (n1 >= 0) n1 = bstep<Cat>(nodes[n1], r[1]);
+                if (n2 >= 0) n2 = bstep<Cat>(nodes[n2], r[2]);
+                if (n3 >= 0) n3 = bstep<Cat>(nodes[n3], r[3]);
             }
         }
 
         template <bool Cat>
-        LIGNUM_INLINE int32_t bwalk1(const BinnedView& v, int32_t node, const uint16_t* codes) {
-            while (node >= 0) node = bstep<Cat>(v.nodes[node], codes, v);
+        LIGNUM_INLINE int32_t bwalk1(const BNode* __restrict__ nodes, int32_t node, const BinnedRow& r) {
+            while (node >= 0) node = bstep<Cat>(nodes[node], r);
             return node;
         }
 
@@ -599,9 +591,13 @@ namespace lignum {
 
                 void predict_rows(size_t i_begin, size_t i_end, double* __restrict__ out) const {
                     const size_t nd = f_.feature_of.size();
+                    const size_t nw = f_.decision_words;
                     thread_local std::vector<uint16_t> buffer;
+                    thread_local std::vector<uint64_t> decision_buffer;
                     buffer.resize((i_end - i_begin) * nd);
+                    decision_buffer.resize((i_end - i_begin) * nw);
                     uint16_t* codes = buffer.data();
+                    uint64_t* decisions = decision_buffer.data();
                     for (size_t i = i_begin; i < i_end; i++) {
                         const double* row = &X_[i * n_features_];
                         uint16_t* rc = &codes[(i - i_begin) * nd];
@@ -615,6 +611,17 @@ namespace lignum {
                                 rc[j] = category_code(x, kind == feature_kind::XGBoostCategory);
                             }
                         }
+                        // Categorical part, done once per row: copy the decision bits of the row's
+                        // category for every categorical slot of the model.
+                        uint64_t* rd = &decisions[(i - i_begin) * nw];
+                        for (const BinnedCatFeature& cf : f_.cat_features) {
+                            const uint16_t code = rc[cf.dense];
+                            if (code < cf.n_categories) {
+                                std::memcpy(rd + cf.row_offset, &f_.cat_tables[cf.table_offset + uint64_t{code} * cf.words], cf.words * sizeof(uint64_t));
+                            } else {
+                                std::memset(rd + cf.row_offset, 0, cf.words * sizeof(uint64_t));
+                            }
+                        }
                     }
 
                     const size_t K = Multi ? m_.n_outputs : 1;
@@ -622,7 +629,7 @@ namespace lignum {
                         for (size_t c = 0; c < K; c++) out[i * K + c] = static_cast<double>(static_cast<Acc>(m_.base_scores[c]));
                     }
                     for (size_t t_start = 0; t_start < f_.roots.size(); t_start += T_BLOCK) {
-                        accumulate(codes, nd, i_begin, i_end, t_start, std::min(t_start + T_BLOCK, f_.roots.size()), out);
+                        accumulate(codes, nd, decisions, nw, i_begin, i_end, t_start, std::min(t_start + T_BLOCK, f_.roots.size()), out);
                     }
                     finish_rows<Acc, Multi>(m_, raw_score_, i_begin, i_end, out);
                 }
@@ -640,23 +647,23 @@ namespace lignum {
                     out[slot] = static_cast<double>(static_cast<Acc>(out[slot]) + static_cast<Acc>(leaf_value(m_.leaf_values, node)));
                 }
 
-                void accumulate(const uint16_t* __restrict__ codes, size_t nd, size_t i_begin, size_t i_end,
-                                size_t t_begin, size_t t_end, double* __restrict__ out) const {
-                    const BinnedView v{f_.nodes.data(), f_.cat_slots.data(), m_.cat_bitsets};
+                void accumulate(const uint16_t* __restrict__ codes, size_t nd, const uint64_t* __restrict__ decisions, size_t nw,
+                                size_t i_begin, size_t i_end, size_t t_begin, size_t t_end, double* __restrict__ out) const {
+                    const BNode* __restrict__ nodes = f_.nodes.data();
                     const int32_t* __restrict__ roots = f_.roots.data();
                     const uint8_t* __restrict__ has_cat = f_.tree_has_cat.data();
                     const double* __restrict__ leaf_values = m_.leaf_values;
+                    auto row = [&](size_t i) LIGNUM_LAMBDA_INLINE {
+                        return BinnedRow{&codes[(i - i_begin) * nd], &decisions[(i - i_begin) * nw]};
+                    };
                     const size_t unrolled_end = i_begin + ((i_end - i_begin) / 4) * 4;
                     for (size_t i = i_begin; i < unrolled_end; i += 4) {
-                        const uint16_t* c0 = &codes[(i - i_begin) * nd];
-                        const uint16_t* c1 = c0 + nd;
-                        const uint16_t* c2 = c1 + nd;
-                        const uint16_t* c3 = c2 + nd;
+                        const BinnedRow r[4] = {row(i), row(i + 1), row(i + 2), row(i + 3)};
                         if constexpr (Multi) {
                             for (size_t t = t_begin; t < t_end; t++) {
                                 int32_t n0, n1, n2, n3;
-                                if (has_cat[t]) bwalk4<true>(v, roots[t], c0, c1, c2, c3, n0, n1, n2, n3);
-                                else            bwalk4<false>(v, roots[t], c0, c1, c2, c3, n0, n1, n2, n3);
+                                if (has_cat[t]) bwalk4<true>(nodes, roots[t], r, n0, n1, n2, n3);
+                                else            bwalk4<false>(nodes, roots[t], r, n0, n1, n2, n3);
                                 add(out, i, t, n0);
                                 add(out, i + 1, t, n1);
                                 add(out, i + 2, t, n2);
@@ -669,8 +676,8 @@ namespace lignum {
                             Acc sum3 = static_cast<Acc>(out[i + 3]);
                             for (size_t t = t_begin; t < t_end; t++) {
                                 int32_t n0, n1, n2, n3;
-                                if (has_cat[t]) bwalk4<true>(v, roots[t], c0, c1, c2, c3, n0, n1, n2, n3);
-                                else            bwalk4<false>(v, roots[t], c0, c1, c2, c3, n0, n1, n2, n3);
+                                if (has_cat[t]) bwalk4<true>(nodes, roots[t], r, n0, n1, n2, n3);
+                                else            bwalk4<false>(nodes, roots[t], r, n0, n1, n2, n3);
                                 sum0 += static_cast<Acc>(leaf_value(leaf_values, n0));
                                 sum1 += static_cast<Acc>(leaf_value(leaf_values, n1));
                                 sum2 += static_cast<Acc>(leaf_value(leaf_values, n2));
@@ -683,9 +690,9 @@ namespace lignum {
                         }
                     }
                     for (size_t i = unrolled_end; i < i_end; i++) {
-                        const uint16_t* rc = &codes[(i - i_begin) * nd];
+                        const BinnedRow r = row(i);
                         for (size_t t = t_begin; t < t_end; t++) {
-                            add(out, i, t, has_cat[t] ? bwalk1<true>(v, roots[t], rc) : bwalk1<false>(v, roots[t], rc));
+                            add(out, i, t, has_cat[t] ? bwalk1<true>(nodes, roots[t], r) : bwalk1<false>(nodes, roots[t], r));
                         }
                     }
                 }
