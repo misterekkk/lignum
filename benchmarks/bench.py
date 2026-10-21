@@ -76,6 +76,28 @@ def make_data(n_rows: int, n_features: int) -> tuple[np.ndarray, np.ndarray]:
     return np.ascontiguousarray(X), y
 
 
+CAT_CARDINALITIES = [10, 50, 200, 1000, 5000]
+
+
+def make_categorical_data(n_rows: int, n_numeric: int = 15) -> tuple[np.ndarray, np.ndarray]:
+    """Categorical columns (as float codes) first, then numeric ones; 5% NaN everywhere."""
+    rng = np.random.default_rng(11)
+    cols, signal = [], np.zeros(n_rows)
+    for k in CAT_CARDINALITIES:
+        codes = np.minimum(rng.zipf(1.3, n_rows) - 1, k - 1)  # skewed, like real categories
+        effect = rng.normal(size=k)
+        signal += effect[codes]
+        cols.append(codes.astype(float))
+    for _ in range(n_numeric):
+        x = rng.normal(size=n_rows)
+        signal += 0.3 * x
+        cols.append(x)
+    X = np.column_stack(cols)
+    X[rng.random(X.shape) < 0.05] = np.nan
+    y = (signal + rng.normal(scale=0.5, size=n_rows) > np.median(signal)).astype(float)
+    return X, y
+
+
 def build_workloads(args) -> list[Workload]:
     import lightgbm as lgb
     import xgboost as xgb
@@ -135,6 +157,24 @@ def build_workloads(args) -> list[Workload]:
             booster.save_model(str(js))
         booster = xgb.Booster(model_file=str(js))
         workloads.append(Workload("xgboost-multi", X, X_train, X_holdout, js, js, booster, n_classes))
+
+    if "lightgbm-cat" in args.only:
+        txt, js, cat_data = cache / "lgb_cat.txt", cache / "lgb_cat.json", cache / "data_cat.npz"
+        if not cat_data.exists():
+            np.savez(cat_data, **dict(zip(["X", "y"], make_categorical_data(args.rows))))
+        Xc, yc = (np.load(cat_data)[k] for k in ["X", "y"])
+        Xc_train = np.ascontiguousarray(Xc[:n_train])
+        if not txt.exists():
+            params = {"objective": "binary", "max_depth": args.depth, "num_leaves": 2 ** args.depth - 1,
+                      "learning_rate": 0.1, "verbose": -1, "seed": 42, "max_cat_to_onehot": 4,
+                      "max_cat_threshold": 256, "cat_smooth": 10, "min_data_per_group": 50}
+            booster = lgb.train(params, lgb.Dataset(Xc_train, yc[:n_train], categorical_feature=list(range(len(CAT_CARDINALITIES)))),
+                                num_boost_round=args.trees)
+            booster.save_model(str(txt))
+            js.write_text(json.dumps(booster.dump_model()))
+        booster = lgb.Booster(model_file=str(txt))
+        workloads.append(Workload("lightgbm-cat", np.ascontiguousarray(Xc), Xc_train,
+                                  np.ascontiguousarray(Xc[n_train:n_train + 100_000]), js, txt, booster))
 
     if "xgboost" in args.only:
         js = cache / "xgb.json"
@@ -422,7 +462,8 @@ def render(results: list[Result], env: dict, args) -> str:
         "",
         f"- lignum commit `{env['commit']}`, {env['cpu']}, {env['threads']} threads, Python {env['python']}",
         f"- {args.rows:,} rows × {args.features} features (5% NaN), {args.trees} trees, max depth {args.depth}; "
-        f"binary classification, and 10-class softmax ({args.trees // 10} iterations × 10 trees) for `*-multi`",
+        f"binary classification, and 10-class softmax ({args.trees // 10} iterations × 10 trees) for `*-multi`; "
+        f"`lightgbm-cat`: {len(CAT_CARDINALITIES)} categorical features (cardinality {', '.join(map(str, CAT_CARDINALITIES))}) + 15 numeric",
         "- versions: " + ", ".join(f"{k} {v}" for k, v in env["versions"].items() if v),
         "",
         "Batch = full data set, all threads (best / median of repeats); 1 thread is normalised to the full data set.",
@@ -458,7 +499,7 @@ def main():
     parser.add_argument("--depth", type=int, default=6)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--latency-budget", type=float, default=2.0, help="seconds per latency measurement")
-    parser.add_argument("--only", default="lightgbm,xgboost,lightgbm-multi,xgboost-multi")
+    parser.add_argument("--only", default="lightgbm,xgboost,lightgbm-multi,xgboost-multi,lightgbm-cat")
     parser.add_argument("--engines", default=",".join(ENGINES))
     parser.add_argument("--quick", action="store_true", help="100k rows, 200 trees, fewer repeats")
     parser.add_argument("--verbose", action="store_true")

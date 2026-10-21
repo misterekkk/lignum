@@ -49,7 +49,7 @@ namespace lignum {
         struct alignas(64) FileHeader {
             char magic[6] = {'L', 'I', 'G', 'N', 'U', 'M'}; 
             uint8_t version_major = 0;
-            uint8_t version_minor = 4;
+            uint8_t version_minor = 5;
 
             uint8_t os_id = LIGNUM_OS_ID;
             uint8_t arch_id = LIGNUM_ARCH_ID;
@@ -57,7 +57,7 @@ namespace lignum {
             uint8_t flags = 0;
             uint32_t endian_check = 0x12345678;
 
-            double reserved0 = 0.0;
+            uint64_t n_cat_words = 0;
             uint64_t n_nodes = 0;
             uint64_t n_offsets = 0;
             uint64_t n_leaves = 0;
@@ -71,7 +71,7 @@ namespace lignum {
 
         namespace header_flags {
             constexpr uint8_t Float32 = 1 << 0;
-            constexpr uint8_t ZeroMissing = 1 << 1;
+            constexpr uint8_t SpecialTrees = 1 << 1;
         } // namespace header_flags
 
         size_t align(size_t size) {
@@ -158,9 +158,10 @@ namespace lignum {
 
         FileHeader header;
         header.n_outputs = static_cast<uint16_t>(n_outputs);
+        header.n_cat_words = n_cat_words;
         header.sigmoid = sigmoid;
         header.transform = transform;
-        header.flags = static_cast<uint8_t>((float32 ? header_flags::Float32 : 0) | (has_zero_missing ? header_flags::ZeroMissing : 0));
+        header.flags = static_cast<uint8_t>((float32 ? header_flags::Float32 : 0) | (has_special_trees ? header_flags::SpecialTrees : 0));
         header.n_features = n_features;
         header.n_nodes = n_nodes;
         header.n_offsets = n_offsets;
@@ -176,6 +177,7 @@ namespace lignum {
         if (n_outputs > 1) {
             padded_write(out, reinterpret_cast<const char*>(tree_outputs), n_offsets * sizeof(uint16_t));
         }
+        padded_write(out, reinterpret_cast<const char*>(cat_bitsets), n_cat_words * sizeof(uint32_t));
     }
 
     Model load_binary(const std::string& filepath) {
@@ -196,7 +198,7 @@ namespace lignum {
             throw std::runtime_error("Endianness mismatch.");
         }
 
-        if (header.version_major != 0 || header.version_minor != 4) {
+        if (header.version_major != 0 || header.version_minor != 5) {
             throw std::runtime_error("Unsupported lignum binary format version " + std::to_string(header.version_major) + "." +
                                      std::to_string(header.version_minor) + "; re-export the model from JSON.");
         }
@@ -204,7 +206,8 @@ namespace lignum {
         const size_t expected_size = sizeof(FileHeader) + align(header.n_nodes * sizeof(KNode)) +
                                      align(header.n_offsets * sizeof(int32_t)) + align(header.n_leaves * sizeof(double)) +
                                      align(header.n_offsets * sizeof(uint8_t)) + align(header.n_outputs * sizeof(double)) +
-                                     (header.n_outputs > 1 ? header.n_offsets * sizeof(uint16_t) : 0);
+                                     (header.n_outputs > 1 ? align(header.n_offsets * sizeof(uint16_t)) : 0) +
+                                     header.n_cat_words * sizeof(uint32_t);
         if (header.n_outputs == 0) {
             throw std::runtime_error("Binary file declares zero outputs.");
         }
@@ -217,7 +220,8 @@ namespace lignum {
         model.sigmoid = header.sigmoid;
         model.transform = header.transform;
         model.float32 = (header.flags & header_flags::Float32) != 0;
-        model.has_zero_missing = (header.flags & header_flags::ZeroMissing) != 0;
+        model.has_special_trees = (header.flags & header_flags::SpecialTrees) != 0;
+        model.n_cat_words = header.n_cat_words;
         model.n_features = header.n_features;
         model.n_nodes = header.n_nodes;
         model.n_offsets = header.n_offsets;
@@ -246,6 +250,10 @@ namespace lignum {
         offset += align(model.n_outputs * sizeof(double));
         if (model.n_outputs > 1 && model.n_offsets > 0) {
             model.tree_outputs = reinterpret_cast<const uint16_t*>(binary_data->data + offset);
+            offset += align(model.n_offsets * sizeof(uint16_t));
+        }
+        if (model.n_cat_words > 0) {
+            model.cat_bitsets = reinterpret_cast<const uint32_t*>(binary_data->data + offset);
         }
 
         return model;

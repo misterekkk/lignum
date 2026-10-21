@@ -73,12 +73,27 @@ Result (`benchmarks/results/2026-10-21-m4-stage1b.md`): 1M rows 0.73 s (LightGBM
 
 ## Stage 3 — LightGBM categorical splits (exact semantics)
 
-- [ ] IR: categorical node kind + category list
-- [ ] Lowering: contiguous set → `CAT_RANGE` (`(uint32)(int(x) - a) <= b - a`), span < 64 → `CAT_MASK`, otherwise `CAT_BITSET`
-- [ ] Opt-in `assume_known_categories` for float lowering
-- [ ] `CAT` kernel kind; numeric-only trees keep the numeric kernel
-- [ ] Parity tests: cardinality 2/5/63/64/200, unseen/negative/NaN/non-integer categories, mixed models
-- [ ] Benchmark vs Treelite on a categorical model
+- [x] Semantics verified against LightGBM 4.7: NaN always right (even when 0 is in the set and for any `missing_type`), x <= -1 right, otherwise `int(x)` (truncation) in set → left
+- [x] IR: categorical nodes with their category list; per-slot `kinds[]` in `KNode` (was padding), `tree_kind::Categorical`
+- [x] Encodings: `CatMask` (all categories < 64), `CatRange` (contiguous), `CatBitset` (side array `cat_bitsets`, word 0 reserved as a zero target); binary format 0.5
+- [x] Parity tests: cardinality 2/5/63/64/200/1000, all three encodings (range via one-hot splits on ids ≥ 64), unseen/negative/fractional/NaN/±inf/huge values, mixed, multiclass, zero_as_missing, binary round trip, pandas category codes
+- [x] Benchmark (`benchmarks/results/2026-10-22-m4-stage3-categorical.md`, 5 categorical + 15 numeric features): lignum 2.95 s vs tuned TL2cgen 5.36 s, native 8.41 s, lleaves 2.09 s; only lignum and TL2cgen are bit-exact
+- [ ] Opt-in `assume_known_categories` (float lowering) — only if a real model needs it
+
+Kernel experiments on the categorical model (100k rows, 200 trees; same data without categories: 0.014 s):
+
+| variant | 10 threads | 1 thread |
+|---|---:|---:|
+| branchy `cat_dir` (early returns + switch) | 0.053 s | 0.387 s |
+| everything branch-free, also numeric slots | 0.061 s | — |
+| **branch on slot kind + branch-free `cat_dir` (kept)** | **0.049 s** | **0.335 s** |
+| branch per node (flag in `kinds[3]`) | 0.052 s | 0.333 s |
+| 8 interleaved rows instead of 4 | 0.056 s | 0.347 s |
+| numeric model forced through the mixed path | 0.015 s | 0.101 s |
+
+The cost is the longer dependency chain of a categorical comparison (float→int, dependent bitset
+load from L2), not dispatch. Next idea: keep a 64-bit mask for categories < 64 inline and touch
+`cat_bitsets` only for larger ids (cheap when category ids are frequency-ordered, which is common).
 
 ## Stage 4 — XGBoost categorical splits
 

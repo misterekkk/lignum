@@ -24,12 +24,17 @@ struct alignas(64) KNode {          // one cache line = two levels of a binary t
     int32_t  children[4];           // four grandchildren; negative = leaf index (-k-1)
     uint16_t features[4];
     uint8_t  dirs[4];               // bit0: missing goes right, bit1: zero is missing (LightGBM)
-    uint8_t  padding[4];
+    uint8_t  kinds[4];              // slot_kind: Numeric, CatMask, CatRange, CatBitset
 };
 ```
 
 If a child of the root is a leaf, both of its grandchild pointers reference that leaf and the slot's
 comparison is ignored.
+
+A categorical slot keeps its category set in the 64 bits of `thresholds[slot]`: a mask when every
+category is below 64, `[first, last - first]` when the set is contiguous, otherwise
+`[offset, words]` into `Model::cat_bitsets` (word 0 is always zero, so branch-free lookups of
+non-bitset slots read a valid address).
 
 ## Kernel (src/model.cpp)
 
@@ -44,8 +49,10 @@ comparison is ignored.
 - Per KNode the three comparisons are evaluated speculatively and the child is selected with
   `children[(r << 1) | (r ? c : l)]`, which removes the dependency between the two levels.
 - Template parameters: accumulator type (`double` for LightGBM, `float` for XGBoost) and `Mixed`
-  (the model has trees of kind `ZeroMissing`). With `Mixed`, the traversal is chosen per tree from
-  `tree_kinds[]`; otherwise there is no per-tree branch at all. The traversal (`step`, `walk4`, `walk1`) is force-inlined and works
+  (the model has trees that are not plain numeric). With `Mixed`, the traversal is specialised per
+  tree from `tree_kinds[]` (bits `ZeroMissing`, `Categorical`); otherwise there is no per-tree branch.
+- In categorical trees each slot branches on its kind (structural, predictable) and the categorical
+  test itself is branch-free (`cat_dir`), because NaN/range/category branches depend on the data. The traversal (`step`, `walk4`, `walk1`) is force-inlined and works
   on local copies of the model pointers; going through `Model&` members cost ~7-13%.
 - Leaves are added to a running sum loaded from `out_preds[i]`, in model order, so floating point
   results are identical to the source library.
@@ -65,6 +72,7 @@ Every split is normalised to: **go right ⇔ `isnan(x) ? default_right : x >= th
 | LightGBM `missing_type=None` | NaN → 0.0, compared normally | `default_right = (0 >= threshold)` |
 | LightGBM `missing_type=Zero` | NaN → 0.0, and 0 is missing → `default_left` | direct; nodes where this differs from the natural direction of 0 get `ZeroIsMissing` |
 | XGBoost | left iff `float(x) < t` (t is float32), NaN → `default_left` | threshold = smallest double that rounds to ≥ `t` in float32 |
+| LightGBM categorical (`==`) | NaN → right; x ≤ -1 → right; else `int(x)` in set → left | categorical slot (see KNode) |
 
 XGBoost also accumulates and transforms in float32, and converts `base_score` to margin space with
 float32 `log`/logit (`binary:logitraw` uses `base_score` as is; multiclass models store a vector of
@@ -74,11 +82,11 @@ sums in double and divides by `float(sum)`; LightGBM's softmax is all double.
 Verified bit-exact by `tests/python/test_parity.py` on inputs with NaNs, zeros, values in the zero
 band and values placed exactly on every split threshold.
 
-## Binary format (version 0.4)
+## Binary format (version 0.5)
 
-64-byte header (`magic "LIGNUM"`, version, transform, flags {float32, zero-missing}, sigmoid,
-n_features, n_outputs, section sizes), followed by 64-byte aligned sections: nodes, tree offsets,
-leaves, tree kinds, base scores, and tree outputs (multiclass only).
+64-byte header (`magic "LIGNUM"`, version, transform, flags {float32, special trees}, sigmoid,
+n_features, n_outputs, n_cat_words, section sizes), followed by 64-byte aligned sections: nodes, tree offsets,
+leaves, tree kinds, base scores, tree outputs (multiclass only) and categorical bitsets.
 Loading validates the version and the file size, then maps the file read-only. Older versions are
 rejected; re-export from JSON.
 
@@ -92,4 +100,4 @@ rejected; re-export from JSON.
 
 ## Known limitations
 
-See [TASKS.md](TASKS.md): no categorical splits, no multi-target / vector-leaf models, only row-major float64 input.
+See [TASKS.md](TASKS.md): no XGBoost categorical splits, no multi-target / vector-leaf models, only row-major float64 input.

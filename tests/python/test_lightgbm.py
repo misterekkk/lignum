@@ -52,29 +52,3 @@ def test_lightgbm_objectives(tmp_path, base_data, objective, model_type, positiv
         
     actual_out = lg_model.predict(X, raw_score=False)
     np.testing.assert_array_equal(actual_out, expected_out)
-
-def test_lightgbm_rejects_string_categorical(tmp_path):
-    cats = ["A", "B", "C", "D", "E", "F"] * 100
-    df = pd.DataFrame({
-        "cat": pd.Categorical(cats)
-    })
-    
-    y = np.array([1 if c in ["A", "C", "E"] else 0 for c in cats]).astype(np.float32)
-    
-    model = lgb.LGBMClassifier(
-        n_estimators=1,
-        max_depth=2,
-        max_cat_to_onehot=1,
-        min_data_in_leaf=1,
-        min_gain_to_split=0.0,
-        random_state=42
-    )
-    model.fit(df, y)
-    
-    model_path = str(tmp_path / "lgb_cat.json")
-    model_dict = model.booster_.dump_model()
-    with open(model_path, "w") as f:
-        json.dump(model_dict, f)
-    
-    with pytest.raises(RuntimeError, match="Native string-based categorical splits .* are not supported yet"):
-        lg.load(model_path, format="lightgbm")

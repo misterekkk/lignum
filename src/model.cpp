@@ -1,6 +1,7 @@
 #include <lignum/model.hpp>
 
 #include <algorithm>
+#include <bit>
 #ifdef _OPENMP
     #include <omp.h>
 #endif
@@ -85,47 +86,103 @@ namespace lignum {
             return (x + multiple - 1) / multiple * multiple;
         }
 
+        // Categorical slot (LightGBM semantics): NaN and x <= -1 go right; otherwise the category
+        // is int(x) (truncation) and goes left iff it is in the set.
+        //
+        // Branch-free on purpose: NaN, the valid range and the category value depend on the data,
+        // so branches on them mispredict and stall the interleaved rows (measured: ~3x slower).
+        // Word 0 of cat_bitsets is always zero, so non-bitset slots read a harmless address.
+        LIGNUM_INLINE int32_t cat_dir(double x, double encoded, uint8_t kind, uint8_t dirs, const uint32_t* __restrict__ bitsets) {
+            const bool valid = x > -1.0 && x < 2147483648.0;  // false for NaN and +-inf
+            const uint32_t c = static_cast<uint32_t>(valid ? x : 0.0);
+            const uint64_t payload = std::bit_cast<uint64_t>(encoded);
+            const uint32_t lo = static_cast<uint32_t>(payload);
+            const uint32_t hi = static_cast<uint32_t>(payload >> 32);
+
+            const bool in_mask = (c < 64) & static_cast<bool>((payload >> (c & 63)) & 1);
+            const bool in_range = (c - lo) <= hi;
+            const uint32_t word = c >> 5;
+            const bool word_ok = (kind == slot_kind::CatBitset) & (word < hi);
+            const bool in_bitset = static_cast<bool>((bitsets[word_ok ? lo + word : 0] >> (c & 31)) & 1);
+
+            const bool in_set = kind == slot_kind::CatMask ? in_mask : (kind == slot_kind::CatRange ? in_range : in_bitset);
+            const int32_t nan_dir = dirs & dir_bits::DefaultRight;
+            return std::isnan(x) ? nan_dir : static_cast<int32_t>(!(valid & in_set));
+        }
+
+        template <uint8_t Kind>
+        LIGNUM_INLINE int32_t slot_dir(const KNode& kn, int k, const double* __restrict__ row, const uint32_t* __restrict__ bitsets) {
+            const double x = row[kn.features[k]];
+            if constexpr ((Kind & tree_kind::Categorical) != 0) {
+                if (kn.kinds[k] != slot_kind::Numeric) return cat_dir(x, kn.thresholds[k], kn.kinds[k], kn.dirs[k], bitsets);
+            }
+            return cmp_dir<(Kind & tree_kind::ZeroMissing) != 0>(x, kn.thresholds[k], kn.dirs[k]);
+        }
+
         // One KNode = two tree levels. All three comparisons are evaluated, then the
-        // grandchild is picked without a dependency between the two levels.
-        template <bool ZeroMissing>
-        LIGNUM_INLINE int32_t step(const KNode& kn, const double* __restrict__ row) {
-            int32_t r = cmp_dir<ZeroMissing>(row[kn.features[0]], kn.thresholds[0], kn.dirs[0]);
-            int32_t l = cmp_dir<ZeroMissing>(row[kn.features[1]], kn.thresholds[1], kn.dirs[1]);
-            int32_t c = cmp_dir<ZeroMissing>(row[kn.features[2]], kn.thresholds[2], kn.dirs[2]);
+        // grandchild is picked without a dependency between the two levels. `Kind` is the
+        // tree_kind of the tree, so numeric trees compile to plain threshold comparisons.
+        template <uint8_t Kind>
+        LIGNUM_INLINE int32_t step(const KNode& kn, const double* __restrict__ row, const uint32_t* __restrict__ bitsets) {
+            int32_t r = slot_dir<Kind>(kn, 0, row, bitsets);
+            int32_t l = slot_dir<Kind>(kn, 1, row, bitsets);
+            int32_t c = slot_dir<Kind>(kn, 2, row, bitsets);
             return kn.children[(r << 1) | (r ? c : l)];
         }
 
+        struct Forest {
+            const KNode* __restrict__ nodes;
+            const uint32_t* __restrict__ bitsets;
+        };
+
         // Four rows walk the same tree interleaved to hide memory latency.
-        template <bool ZeroMissing>
-        LIGNUM_INLINE void walk4(const KNode* __restrict__ nodes, int32_t root,
+        template <uint8_t Kind>
+        LIGNUM_INLINE void walk4(Forest f, int32_t root,
                                  const double* r0, const double* r1, const double* r2, const double* r3,
                                  int32_t& n0, int32_t& n1, int32_t& n2, int32_t& n3) {
             n0 = n1 = n2 = n3 = root;
             while (n0 >= 0 || n1 >= 0 || n2 >= 0 || n3 >= 0) {
-                if (n0 >= 0) n0 = step<ZeroMissing>(nodes[n0], r0);
-                if (n1 >= 0) n1 = step<ZeroMissing>(nodes[n1], r1);
-                if (n2 >= 0) n2 = step<ZeroMissing>(nodes[n2], r2);
-                if (n3 >= 0) n3 = step<ZeroMissing>(nodes[n3], r3);
+                if (n0 >= 0) n0 = step<Kind>(f.nodes[n0], r0, f.bitsets);
+                if (n1 >= 0) n1 = step<Kind>(f.nodes[n1], r1, f.bitsets);
+                if (n2 >= 0) n2 = step<Kind>(f.nodes[n2], r2, f.bitsets);
+                if (n3 >= 0) n3 = step<Kind>(f.nodes[n3], r3, f.bitsets);
             }
         }
 
         // Four trees of the same row, interleaved (used when there are fewer than four rows).
-        template <bool ZeroMissing>
-        LIGNUM_INLINE void walk4_trees(const KNode* __restrict__ nodes, const int32_t* roots, const double* row,
+        template <uint8_t Kind>
+        LIGNUM_INLINE void walk4_trees(Forest f, const int32_t* roots, const double* row,
                                        int32_t& n0, int32_t& n1, int32_t& n2, int32_t& n3) {
             n0 = roots[0]; n1 = roots[1]; n2 = roots[2]; n3 = roots[3];
             while (n0 >= 0 || n1 >= 0 || n2 >= 0 || n3 >= 0) {
-                if (n0 >= 0) n0 = step<ZeroMissing>(nodes[n0], row);
-                if (n1 >= 0) n1 = step<ZeroMissing>(nodes[n1], row);
-                if (n2 >= 0) n2 = step<ZeroMissing>(nodes[n2], row);
-                if (n3 >= 0) n3 = step<ZeroMissing>(nodes[n3], row);
+                if (n0 >= 0) n0 = step<Kind>(f.nodes[n0], row, f.bitsets);
+                if (n1 >= 0) n1 = step<Kind>(f.nodes[n1], row, f.bitsets);
+                if (n2 >= 0) n2 = step<Kind>(f.nodes[n2], row, f.bitsets);
+                if (n3 >= 0) n3 = step<Kind>(f.nodes[n3], row, f.bitsets);
             }
         }
 
-        template <bool ZeroMissing>
-        LIGNUM_INLINE int32_t walk1(const KNode* __restrict__ nodes, int32_t node, const double* row) {
-            while (node >= 0) node = step<ZeroMissing>(nodes[node], row);
+        template <uint8_t Kind>
+        LIGNUM_INLINE int32_t walk1(Forest f, int32_t node, const double* row) {
+            while (node >= 0) node = step<Kind>(f.nodes[node], row, f.bitsets);
             return node;
+        }
+
+        // Calls fn(std::integral_constant<uint8_t, kind>) so the traversal is specialised per tree
+        // kind. Models with only numeric trees (Mixed = false) never branch.
+        template <bool Mixed, typename Fn>
+        LIGNUM_INLINE void with_kind(uint8_t kind, Fn&& fn) {
+            using K0 = std::integral_constant<uint8_t, 0>;
+            if constexpr (!Mixed) {
+                fn(K0{});
+            } else {
+                switch (kind & 3) {
+                    case 0:  fn(K0{}); break;
+                    case 1:  fn(std::integral_constant<uint8_t, 1>{}); break;
+                    case 2:  fn(std::integral_constant<uint8_t, 2>{}); break;
+                    default: fn(std::integral_constant<uint8_t, 3>{}); break;
+                }
+            }
         }
 
         LIGNUM_INLINE double leaf_value(const double* __restrict__ leaves, int32_t node) {
@@ -138,8 +195,8 @@ namespace lignum {
         //
         // A tree-parallel strategy (threads fill a per-tree leaf buffer, rows sum it in order) was
         // measured and lost to Serial below 8 rows and to Rows above, so it is not offered.
-        // `Mixed`: the model has trees of kind ZeroMissing. Only then does the kernel branch per
-        // tree; numeric trees always take the plain traversal.
+        // `Mixed`: the model has trees that are not plain numeric (zero-as-missing or categorical).
+        // Only then does the kernel branch per tree; numeric trees always take the plain traversal.
         // `Multi`: the model has several outputs (classes). Row i's outputs live in
         // out[i * K .. i * K + K), and each tree adds to its own output, still in model order.
         template <typename Acc, bool Mixed, bool Multi>
@@ -173,22 +230,24 @@ namespace lignum {
                 size_t n_features_;
                 bool raw_score_;
 
-                // True if any of trees [t, t + count) needs the zero-as-missing traversal.
-                static LIGNUM_INLINE bool is_zero_missing(const uint8_t* kinds, size_t t, size_t count) {
+                // Union of the kinds of trees [t, t + count): their traversal must handle all of them.
+                static LIGNUM_INLINE uint8_t kind_of(const uint8_t* kinds, size_t t, size_t count) {
                     if constexpr (!Mixed) {
-                        return false;
+                        return 0;
                     } else {
                         uint8_t any = 0;
                         for (size_t k = 0; k < count; k++) any |= kinds[t + k];
-                        return any & tree_kind::ZeroMissing;
+                        return any;
                     }
                 }
+
+                Forest forest() const { return Forest{m_.k_nodes, m_.cat_bitsets}; }
 
                 const double* row(size_t i) const { return &X_[i * n_features_]; }
 
                 // Adds trees [t_begin, t_end) to the running sums of rows [i_begin, i_end).
                 void accumulate(size_t i_begin, size_t i_end, size_t t_begin, size_t t_end, double* __restrict__ out) const {
-                    const KNode* __restrict__ nodes = m_.k_nodes;
+                    const Forest f = forest();
                     const int32_t* __restrict__ roots = m_.tree_offsets;
                     const uint8_t* __restrict__ kinds = m_.tree_kinds;
                     const double* __restrict__ leaf_values = m_.leaf_values;
@@ -201,8 +260,9 @@ namespace lignum {
                         Acc sum3 = static_cast<Acc>(out[i + 3]);
                         for (size_t t = t_begin; t < t_end; t++) {
                             int32_t n0, n1, n2, n3;
-                            if (is_zero_missing(kinds, t, 1)) walk4<true>(nodes, roots[t], r0, r1, r2, r3, n0, n1, n2, n3);
-                            else                              walk4<false>(nodes, roots[t], r0, r1, r2, r3, n0, n1, n2, n3);
+                            with_kind<Mixed>(kind_of(kinds, t, 1), [&](auto K) LIGNUM_LAMBDA_INLINE {
+                                walk4<decltype(K)::value>(f, roots[t], r0, r1, r2, r3, n0, n1, n2, n3);
+                            });
                             sum0 += static_cast<Acc>(leaf_value(leaf_values, n0));
                             sum1 += static_cast<Acc>(leaf_value(leaf_values, n1));
                             sum2 += static_cast<Acc>(leaf_value(leaf_values, n2));
@@ -221,15 +281,17 @@ namespace lignum {
                         Acc sum = static_cast<Acc>(out[i]);
                         for (size_t t = t_begin; t < trees_unrolled_end; t += 4) {
                             int32_t n0, n1, n2, n3;
-                            if (is_zero_missing(kinds, t, 4)) walk4_trees<true>(nodes, &roots[t], r, n0, n1, n2, n3);
-                            else                              walk4_trees<false>(nodes, &roots[t], r, n0, n1, n2, n3);
+                            with_kind<Mixed>(kind_of(kinds, t, 4), [&](auto K) LIGNUM_LAMBDA_INLINE {
+                                walk4_trees<decltype(K)::value>(f, &roots[t], r, n0, n1, n2, n3);
+                            });
                             sum += static_cast<Acc>(leaf_value(leaf_values, n0));
                             sum += static_cast<Acc>(leaf_value(leaf_values, n1));
                             sum += static_cast<Acc>(leaf_value(leaf_values, n2));
                             sum += static_cast<Acc>(leaf_value(leaf_values, n3));
                         }
                         for (size_t t = trees_unrolled_end; t < t_end; t++) {
-                            const int32_t leaf = is_zero_missing(kinds, t, 1) ? walk1<true>(nodes, roots[t], r) : walk1<false>(nodes, roots[t], r);
+                            int32_t leaf;
+                            with_kind<Mixed>(kind_of(kinds, t, 1), [&](auto K) LIGNUM_LAMBDA_INLINE { leaf = walk1<decltype(K)::value>(f, roots[t], r); });
                             sum += static_cast<Acc>(leaf_value(leaf_values, leaf));
                         }
                         out[i] = static_cast<double>(sum);
@@ -238,7 +300,7 @@ namespace lignum {
 
                 // Multi-output version of accumulate(): each leaf goes to its tree's output.
                 void accumulate_multi(size_t i_begin, size_t i_end, size_t t_begin, size_t t_end, double* __restrict__ out) const {
-                    const KNode* __restrict__ nodes = m_.k_nodes;
+                    const Forest f = forest();
                     const int32_t* __restrict__ roots = m_.tree_offsets;
                     const uint8_t* __restrict__ kinds = m_.tree_kinds;
                     const uint16_t* __restrict__ outputs = m_.tree_outputs;
@@ -255,8 +317,9 @@ namespace lignum {
                         const double *r0 = row(i), *r1 = row(i + 1), *r2 = row(i + 2), *r3 = row(i + 3);
                         for (size_t t = t_begin; t < t_end; t++) {
                             int32_t n0, n1, n2, n3;
-                            if (is_zero_missing(kinds, t, 1)) walk4<true>(nodes, roots[t], r0, r1, r2, r3, n0, n1, n2, n3);
-                            else                              walk4<false>(nodes, roots[t], r0, r1, r2, r3, n0, n1, n2, n3);
+                            with_kind<Mixed>(kind_of(kinds, t, 1), [&](auto K) LIGNUM_LAMBDA_INLINE {
+                                walk4<decltype(K)::value>(f, roots[t], r0, r1, r2, r3, n0, n1, n2, n3);
+                            });
                             add(i, t, n0);
                             add(i + 1, t, n1);
                             add(i + 2, t, n2);
@@ -268,15 +331,18 @@ namespace lignum {
                         const double* r = row(i);
                         for (size_t t = t_begin; t < trees_unrolled_end; t += 4) {
                             int32_t n0, n1, n2, n3;
-                            if (is_zero_missing(kinds, t, 4)) walk4_trees<true>(nodes, &roots[t], r, n0, n1, n2, n3);
-                            else                              walk4_trees<false>(nodes, &roots[t], r, n0, n1, n2, n3);
+                            with_kind<Mixed>(kind_of(kinds, t, 4), [&](auto K) LIGNUM_LAMBDA_INLINE {
+                                walk4_trees<decltype(K)::value>(f, &roots[t], r, n0, n1, n2, n3);
+                            });
                             add(i, t, n0);
                             add(i, t + 1, n1);
                             add(i, t + 2, n2);
                             add(i, t + 3, n3);
                         }
                         for (size_t t = trees_unrolled_end; t < t_end; t++) {
-                            add(i, t, is_zero_missing(kinds, t, 1) ? walk1<true>(nodes, roots[t], r) : walk1<false>(nodes, roots[t], r));
+                            int32_t leaf;
+                            with_kind<Mixed>(kind_of(kinds, t, 1), [&](auto K) LIGNUM_LAMBDA_INLINE { leaf = walk1<decltype(K)::value>(f, roots[t], r); });
+                            add(i, t, leaf);
                         }
                     }
                 }
@@ -378,10 +444,10 @@ namespace lignum {
         void run_any(const Model& model, const double* X, size_t n_samples, size_t n_features, double* out,
                      int n_jobs, Strategy strategy, bool raw_score) {
             if (model.float32) {
-                if (model.has_zero_missing) run_outputs<float, true>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+                if (model.has_special_trees) run_outputs<float, true>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
                 else                        run_outputs<float, false>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
             } else {
-                if (model.has_zero_missing) run_outputs<double, true>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+                if (model.has_special_trees) run_outputs<double, true>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
                 else                        run_outputs<double, false>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
             }
         }

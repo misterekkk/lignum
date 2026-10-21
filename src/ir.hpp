@@ -13,15 +13,17 @@ namespace lignum {
     //
     //     go right  <=>  isnan(x) ? default_right : (x >= threshold)
     //
-    // with one exception that cannot be folded into a threshold: LightGBM's
+    // with two exceptions that cannot be folded into a threshold: LightGBM's
     // missing_type=Zero, where |x| <= kZeroThreshold must also follow the default
-    // direction (`zero_is_missing`).
+    // direction (`zero_is_missing`), and categorical splits (`categorical`).
     struct TempBinNode {
         bool is_leaf = false;
         double threshold_or_value = 0.0;
         int32_t feature_id = -1;
         int32_t default_dir = 0;        // 0 = left, 1 = right
         bool zero_is_missing = false;
+        bool categorical = false;           // LightGBM "==": go left iff int(x) is in `categories`
+        std::vector<uint32_t> categories;
         std::unique_ptr<TempBinNode> left;
         std::unique_ptr<TempBinNode> right;
     };

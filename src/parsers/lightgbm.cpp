@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace lignum {
 
@@ -23,6 +24,24 @@ namespace lignum {
                 if (t >= kZeroThreshold || t < -kZeroThreshold) return std::nextafter(t, INFINITY);
                 if (t >= 0.0) return std::nextafter(kZeroThreshold, INFINITY);  // band -> 0 <= t: left
                 return -kZeroThreshold;                                         // band -> 0 > t: right
+            }
+
+            // Categorical thresholds are strings such as "1||3||5".
+            std::vector<uint32_t> parse_categories(simdjson::dom::element threshold) {
+                std::vector<uint32_t> categories;
+                if (threshold.is_string()) {
+                    std::string_view text = threshold.get_string().value();
+                    size_t start = 0;
+                    while (start <= text.size()) {
+                        size_t end = text.find("||", start);
+                        if (end == std::string_view::npos) end = text.size();
+                        if (end > start) categories.push_back(static_cast<uint32_t>(std::stoul(std::string(text.substr(start, end - start)))));
+                        start = end + 2;
+                    }
+                } else {
+                    categories.push_back(static_cast<uint32_t>(threshold.get_int64().value()));
+                }
+                return categories;
             }
 
             std::unique_ptr<TempBinNode> parse_lgbm_node(simdjson::dom::object obj) {
@@ -42,7 +61,14 @@ namespace lignum {
                     decision_type = dec_type_elem.get_string().value();
                 }
                 if (decision_type == "==") {
-                    throw std::runtime_error("Native string-based categorical splits ('==') are not supported yet.");
+                    // LightGBM 4: NaN and values <= -1 go right, anything else is truncated to an
+                    // integer category and goes left if it is in the set (verified empirically).
+                    node->categorical = true;
+                    node->default_dir = 1;
+                    node->categories = parse_categories(obj["threshold"]);
+                    node->left = parse_lgbm_node(obj["left_child"].get_object());
+                    node->right = parse_lgbm_node(obj["right_child"].get_object());
+                    return node;
                 }
 
                 std::string_view missing_type = "NaN";
