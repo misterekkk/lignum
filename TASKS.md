@@ -2,7 +2,7 @@
 
 Ordered roadmap. Each stage ends with: all tests green, bit-exact parity, benchmark vs the previous stage.
 
-## Stage 0 — Cleanup and correctness (in progress, branch `dev/v0.2`)
+## Stage 0 — Cleanup and correctness (done, branch `dev/v0.2`)
 
 - [x] Archive the categorical-splits attempt (`dev/new-features`), tag `v0.1-with-R`
 - [x] Drop the R package; new layout (`include/lignum`, `src`, `python`, `tests/{cpp,python}`)
@@ -16,7 +16,8 @@ Ordered roadmap. Each stage ends with: all tests green, bit-exact parity, benchm
 - [x] Validate `n_features`; binary format 0.2 with size validation
 - [x] XGBoost parser: O(n) instead of O(n²) array access
 - [x] Parity test suite with `assert_array_equal`
-- [ ] Port from `dev/new-features`: C API (`c_api.h/.cpp`), categorical benchmark scripts
+- [x] C API (`include/lignum/c_api.h`): load/save/predict with strategy/num_features, thread-local errors; shared `liblignum` exports only the C API
+- [ ] Categorical benchmark data (Stage 3; scripts on `dev/new-features`)
 - [x] One benchmark suite (`benchmarks/bench.py`): native, TL2cgen (default and tuned), GTIL, lleaves, ONNX Runtime; throughput, latency, prep time, bit-exactness. Baseline: `benchmarks/results/2026-10-21-m4-baseline.md`
 
 Benchmark at the end of Stage 0 vs `main` (M4, 1M rows × 20 features, 1000 trees, depth 6):

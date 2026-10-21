@@ -76,6 +76,14 @@ leaves, tree kinds.
 Loading validates the version and the file size, then maps the file read-only. Older versions are
 rejected; re-export from JSON.
 
+## APIs
+
+- C++: `include/lignum/lignum.hpp` (`lignum::load`) and `model.hpp` (`Model::predict`, `Strategy`).
+- C: `include/lignum/c_api.h`, built as the shared `liblignum` (`LIGNUM_BUILD_C_LIBRARY`, on by
+  default outside Python builds). Only `Lignum*` symbols are exported; errors are reported through
+  return codes and a thread-local `LignumGetLastError()`.
+- Python: `python/bindings.cpp` (nanobind) + `python/lignum/__init__.py`.
+
 ## Known limitations
 
 See [TASKS.md](TASKS.md): no categorical splits, no multiclass, only row-major float64 input.

@@ -3,6 +3,12 @@ project(lignum LANGUAGES CXX)
 
 option(LIGNUM_BUILD_TESTS "Build the GoogleTest suite" OFF)
 option(LIGNUM_NATIVE "Tune for the build machine (-march/-mcpu=native). Never enable for distributed wheels." OFF)
+if(SKBUILD)
+    set(_lignum_c_default OFF)
+else()
+    set(_lignum_c_default ON)
+endif()
+option(LIGNUM_BUILD_C_LIBRARY "Build the shared library exposing the C API (include/lignum/c_api.h)" ${_lignum_c_default})
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,6 +24,7 @@ endif()
 # ---------------------------------------------------------------------------
 add_library(lignum STATIC
     src/builder.cpp
+    src/c_api.cpp
     src/io.cpp
     src/load.cpp
     src/model.cpp
@@ -25,6 +32,9 @@ add_library(lignum STATIC
     src/parsers/xgboost.cpp
     extern/simdjson/simdjson.cpp
 )
+
+# Only the C API is exported from shared objects; C++ internals stay hidden.
+set_target_properties(lignum PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 
 target_include_directories(lignum
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -67,6 +77,22 @@ include(CheckIPOSupported)
 check_ipo_supported(RESULT LIGNUM_IPO_SUPPORTED OUTPUT _ipo_msg LANGUAGES CXX)
 if(LIGNUM_IPO_SUPPORTED)
     set_property(TARGET lignum PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
+# ---------------------------------------------------------------------------
+# Shared library with the C API
+# ---------------------------------------------------------------------------
+if(LIGNUM_BUILD_C_LIBRARY)
+    add_library(lignum_c SHARED src/c_api.cpp)
+    set_target_properties(lignum_c PROPERTIES OUTPUT_NAME lignum CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+    target_compile_definitions(lignum_c PRIVATE LIGNUM_EXPORTS PUBLIC LIGNUM_SHARED)
+    target_link_libraries(lignum_c PRIVATE lignum)
+    target_include_directories(lignum_c PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    include(GNUInstallDirs)
+    install(TARGETS lignum_c LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(FILES include/lignum/c_api.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/lignum)
 endif()
 
 # ---------------------------------------------------------------------------
