@@ -171,10 +171,26 @@ namespace lignum {
                         out[i + 2] = static_cast<double>(sum2);
                         out[i + 3] = static_cast<double>(sum3);
                     }
+                    // Leftover rows: interleave four trees of the same row instead. Leaves are
+                    // still added in tree order, so the result does not change.
+                    const size_t trees_unrolled_end = t_begin + ((t_end - t_begin) / 4) * 4;
                     for (size_t i = unrolled_end; i < i_end; i++) {
                         const double* r = row(i);
                         Acc sum = static_cast<Acc>(out[i]);
-                        for (size_t t = t_begin; t < t_end; t++) {
+                        for (size_t t = t_begin; t < trees_unrolled_end; t += 4) {
+                            int32_t n0 = roots[t], n1 = roots[t + 1], n2 = roots[t + 2], n3 = roots[t + 3];
+                            while (n0 >= 0 || n1 >= 0 || n2 >= 0 || n3 >= 0) {
+                                if (n0 >= 0) n0 = step<ZeroMissing>(nodes[n0], r);
+                                if (n1 >= 0) n1 = step<ZeroMissing>(nodes[n1], r);
+                                if (n2 >= 0) n2 = step<ZeroMissing>(nodes[n2], r);
+                                if (n3 >= 0) n3 = step<ZeroMissing>(nodes[n3], r);
+                            }
+                            sum += static_cast<Acc>(leaf_value(leaf_values, n0));
+                            sum += static_cast<Acc>(leaf_value(leaf_values, n1));
+                            sum += static_cast<Acc>(leaf_value(leaf_values, n2));
+                            sum += static_cast<Acc>(leaf_value(leaf_values, n3));
+                        }
+                        for (size_t t = trees_unrolled_end; t < t_end; t++) {
                             sum += static_cast<Acc>(leaf_value(leaf_values, walk1<ZeroMissing>(nodes, roots[t], r)));
                         }
                         out[i] = static_cast<double>(sum);

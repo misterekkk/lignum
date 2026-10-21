@@ -48,7 +48,7 @@ Small batches are the weak spot:
 - [x] Row blocks sized from `n_samples / n_threads` (capped at `N_BLOCK`)
 - [x] Tree-parallel path (per-tree leaf buffer, rows sum in order): measured, lost everywhere, removed
 - [x] Hot traversal moved to force-inlined free functions over local pointers (single thread back to 4.9 µs/row, large batch 0.78 → 0.73 s)
-- [ ] Single-row single-thread cost: 10.4 µs vs lleaves 8.3 µs / ONNX Runtime 8.8 µs — profile (Python call overhead vs traversal)
+- [x] Single-row cost: Python overhead is < 1 µs; traversal was L2-latency bound with one dependent chain. Leftover rows now interleave four trees of the same row: 9.7 → 8.0 µs in C++ (lleaves 8.3 µs, ONNX Runtime 8.8 µs)
 - [ ] Measure lignum with `LIGNUM_NATIVE=ON` to compare fairly with lleaves (host-tuned)
 
 Result (`benchmarks/results/2026-10-21-m4-stage1b.md`): 1M rows 0.73 s (LightGBM) / 0.72 s (XGBoost),

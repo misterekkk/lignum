@@ -39,7 +39,8 @@ comparison is ignored.
   - `Rows`: OpenMP over blocks sized `n_samples / (2 * threads)`, rounded to 4, capped at `N_BLOCK`.
   - `Auto`: `Serial` below 8 rows or with one thread, `Rows` otherwise (thresholds from
     `benchmarks/batch_sweep.py`).
-- Four rows are interleaved to hide memory latency.
+- Four rows are interleaved to hide memory latency; leftover rows (fewer than four, e.g. a single
+  row) interleave four trees instead. Leaves are still added in tree order.
 - Per KNode the three comparisons are evaluated speculatively and the child is selected with
   `children[(r << 1) | (r ? c : l)]`, which removes the dependency between the two levels.
 - Template parameters: accumulator type (`double` for LightGBM, `float` for XGBoost) and whether
