@@ -18,7 +18,14 @@ on:
         required: false
         default: "--only lightgbm,lightgbm-cat --rows 300000 --trees 500 --repeats 5 --latency-budget 1"
 
+concurrency:
+  group: bench-lleaves-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
+  # Compile flags of the experimental kernel variant measured next to the default build
+  # (empty = skip). Current: branchy traversal, see LIGNUM_BRANCHY in src/model.cpp.
+  EXPERIMENT_CXX_FLAGS: "-DLIGNUM_BRANCHY"
   BENCH_ARGS: ${{ github.event.inputs.args || '--only lightgbm,lightgbm-cat --rows 300000 --trees 500 --repeats 5 --latency-budget 1' }}
 
 jobs:
@@ -53,6 +60,14 @@ jobs:
       - name: lignum (host-tuned build)
         run: python benchmarks/bench.py --engines lignum $BENCH_ARGS
 
+      - name: Rebuild lignum with the experimental variant
+        if: env.EXPERIMENT_CXX_FLAGS != ''
+        run: CMAKE_ARGS="-DCMAKE_CXX_FLAGS='$EXPERIMENT_CXX_FLAGS'" python -m pip install --force-reinstall --no-deps .
+
+      - name: lignum (experimental variant)
+        if: env.EXPERIMENT_CXX_FLAGS != ''
+        run: python benchmarks/bench.py --engines lignum $BENCH_ARGS
+
       - name: Summary
         run: |
           python - <<'EOF'
@@ -60,14 +75,15 @@ jobs:
           for f in sorted(glob.glob("benchmarks/results/2*.md")):
               if "-m4-" in f:
                   continue
-              build = "generic" if "lleaves" in open(f).read() else "native"
+              runs = [g for g in sorted(glob.glob("benchmarks/results/2*.md")) if "-m4-" not in g]
+              build = ["generic+lleaves", "native", "experiment"][runs.index(f)] if len(runs) <= 3 else f
               section = None
               for line in open(f):
                   if line.startswith("## "):
                       section = line[3:].strip()
                   m = re.match(r"\| (lignum|lleaves) \| [^|]* \| ([\d.]+) \|[^|]*\| ([\d.]+) \| ([\d.,]+) \| ([\d.,]+) \| ([\d.,]+) \| ([\d.,]+) \|", line)
                   if m:
-                      print(f"{section:14s} {m.group(1):8s} [{build:7s}] batch {m.group(2)} s | 1 thread {m.group(3)} s | "
+                      print(f"{section:14s} {m.group(1):8s} [{build:15s}] batch {m.group(2)} s | 1 thread {m.group(3)} s | "
                             f"1 row {m.group(5)} µs (1 thr) | 100 rows {m.group(6)} µs, {m.group(7)} µs (1 thr)")
           EOF
 

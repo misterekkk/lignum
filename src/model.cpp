@@ -129,10 +129,19 @@ namespace lignum {
         // tree_kind of the tree, so numeric trees compile to plain threshold comparisons.
         template <uint8_t Kind>
         LIGNUM_INLINE int32_t step(const KNode& kn, const double* __restrict__ row, const uint32_t* __restrict__ bitsets) {
+        #ifdef LIGNUM_BRANCHY
+            // Experimental: branch on the root comparison like compiled code, so the CPU can
+            // speculate down the predicted path; only the taken child's comparison is evaluated.
+            if (slot_dir<Kind>(kn, 0, row, bitsets)) {
+                return kn.children[2 | slot_dir<Kind>(kn, 2, row, bitsets)];
+            }
+            return kn.children[slot_dir<Kind>(kn, 1, row, bitsets)];
+        #else
             int32_t r = slot_dir<Kind>(kn, 0, row, bitsets);
             int32_t l = slot_dir<Kind>(kn, 1, row, bitsets);
             int32_t c = slot_dir<Kind>(kn, 2, row, bitsets);
             return kn.children[(r << 1) | (r ? c : l)];
+        #endif
         }
 
         struct Forest {
