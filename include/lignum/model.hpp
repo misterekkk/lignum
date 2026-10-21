@@ -20,6 +20,13 @@ namespace lignum {
         constexpr uint8_t Log1pExp = 3;
     } // namespace transform
 
+    // How predict() spreads work across threads. All strategies return identical results.
+    enum class Strategy : uint8_t {
+        Auto,    // pick from the batch size and thread count
+        Serial,  // everything on the calling thread; best for one or a few rows
+        Rows,    // threads take blocks of rows, sized so every thread gets work
+    };
+
     // Bits of KNode::dirs.
     namespace dir_bits {
         constexpr uint8_t DefaultRight = 1 << 0;   // where missing values go
@@ -73,16 +80,11 @@ namespace lignum {
             Model() = default;
 
             // Throws std::invalid_argument if n_features is smaller than the model requires.
-            void predict(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds, int n_jobs = -1) const;
-            void predict_raw(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds, int n_jobs = -1) const;
+            void predict(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds,
+                         int n_jobs = -1, Strategy strategy = Strategy::Auto) const;
+            void predict_raw(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds,
+                             int n_jobs = -1, Strategy strategy = Strategy::Auto) const;
             void save(const std::string& filepath) const;
-
-        private:
-            template <typename Acc, bool ZeroMissing, bool RawScore>
-            void predict_impl(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds, int n_jobs) const noexcept;
-
-            template <bool RawScore>
-            void dispatch(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds, int n_jobs) const;
     };
 
 } // namespace lignum

@@ -97,3 +97,31 @@ TEST(LightGBM, SumsTreesInModelOrder) {
     auto model = lignum::load(write_temp("lgb_order.json", json), "lightgbm");
     EXPECT_EQ(predict_raw(model, {0.0}, 1)[0], (0.0 + 0.1) + 0.2 + 0.3);
 }
+
+TEST(LightGBM, AllStrategiesAgree) {
+    const std::string json = R"({"objective": "binary sigmoid:1", "tree_info": [
+        {"tree_structure": {"split_feature": 0, "threshold": 0.0, "decision_type": "<=", "default_left": true, "missing_type": "NaN",
+          "left_child": {"split_feature": 1, "threshold": 0.5, "decision_type": "<=", "default_left": false, "missing_type": "NaN",
+                         "left_child": {"leaf_value": -0.3}, "right_child": {"leaf_value": 0.1}},
+          "right_child": {"leaf_value": 0.7}}},
+        {"tree_structure": {"split_feature": 1, "threshold": -0.25, "decision_type": "<=", "default_left": true, "missing_type": "NaN",
+          "left_child": {"leaf_value": 0.05}, "right_child": {"leaf_value": -0.15}}}]})";
+    auto model = lignum::load(write_temp("lgb_strategies.json", json), "lightgbm");
+
+    std::vector<double> X;
+    for (int i = 0; i < 37; i++) {
+        X.push_back(std::sin(i * 0.7));
+        X.push_back(i % 5 == 0 ? NaN : std::cos(i * 1.3));
+    }
+    const size_t n = X.size() / 2;
+
+    std::vector<double> expected(n);
+    model.predict(X.data(), n, 2, expected.data(), 1, lignum::Strategy::Serial);
+    for (auto strategy : {lignum::Strategy::Auto, lignum::Strategy::Rows}) {
+        for (int n_jobs : {1, 2, 4, -1}) {
+            std::vector<double> got(n);
+            model.predict(X.data(), n, 2, got.data(), n_jobs, strategy);
+            EXPECT_EQ(got, expected);
+        }
+    }
+}

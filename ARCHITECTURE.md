@@ -33,13 +33,18 @@ comparison is ignored.
 
 ## Kernel (src/model.cpp)
 
-- Rows are processed in blocks of `N_BLOCK` (parallel over blocks with OpenMP), trees in tiles of
-  `T_BLOCK` so a tile of trees stays in cache while a block of rows walks it.
+- `Kernel<Acc, ZeroMissing>` predicts a block of rows: trees in tiles of `T_BLOCK` so a tile of
+  trees stays in cache while the block walks it. Strategies only decide how blocks are scheduled:
+  - `Serial`: blocks of `N_BLOCK` on the calling thread, no OpenMP region.
+  - `Rows`: OpenMP over blocks sized `n_samples / (2 * threads)`, rounded to 4, capped at `N_BLOCK`.
+  - `Auto`: `Serial` below 8 rows or with one thread, `Rows` otherwise (thresholds from
+    `benchmarks/batch_sweep.py`).
 - Four rows are interleaved to hide memory latency.
 - Per KNode the three comparisons are evaluated speculatively and the child is selected with
   `children[(r << 1) | (r ? c : l)]`, which removes the dependency between the two levels.
-- Template parameters: accumulator type (`double` for LightGBM, `float` for XGBoost), whether any
-  split uses zero-as-missing, and raw vs transformed output.
+- Template parameters: accumulator type (`double` for LightGBM, `float` for XGBoost) and whether
+  any split uses zero-as-missing. The traversal (`step`, `walk4`, `walk1`) is force-inlined and works
+  on local copies of the model pointers; going through `Model&` members cost ~7-13%.
 - Leaves are added to a running sum loaded from `out_preds[i]`, in model order, so floating point
   results are identical to the source library.
 

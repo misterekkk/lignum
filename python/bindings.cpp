@@ -7,9 +7,21 @@
 namespace nb = nanobind;
 using namespace lignum;
 
+namespace {
+
+    Strategy parse_strategy(const std::string& name) {
+        if (name == "auto") return Strategy::Auto;
+        if (name == "serial") return Strategy::Serial;
+        if (name == "rows") return Strategy::Rows;
+        throw std::invalid_argument("strategy must be one of 'auto', 'serial', 'rows'; got '" + name + "'.");
+    }
+
+} // namespace
+
 NB_MODULE(_core, m) {
     nb::class_<Model>(m, "Model")
-        .def("predict", [](const Model& self, nb::ndarray<double, nb::c_contig, nb::device::cpu> X, bool raw_score, int n_jobs) {
+        .def("predict", [](const Model& self, nb::ndarray<double, nb::c_contig, nb::device::cpu> X, bool raw_score, int n_jobs, const std::string& strategy_name) {
+            const Strategy strategy = parse_strategy(strategy_name);
             if (X.ndim() != 2) {
                 throw std::invalid_argument("Input array must be 2D.");
             }
@@ -27,9 +39,9 @@ NB_MODULE(_core, m) {
                 nb::gil_scoped_release release;
 
                 if (!raw_score) {
-                    self.predict(X.data(), n_samples, n_features, out_data, n_jobs);
+                    self.predict(X.data(), n_samples, n_features, out_data, n_jobs, strategy);
                 } else {
-                    self.predict_raw(X.data(), n_samples, n_features, out_data, n_jobs);
+                    self.predict_raw(X.data(), n_samples, n_features, out_data, n_jobs, strategy);
                 }
             }
             
@@ -38,6 +50,7 @@ NB_MODULE(_core, m) {
         nb::arg("X"),
         nb::arg("raw_score") = false,
         nb::arg("n_jobs") = -1,
+        nb::arg("strategy") = "auto",
         "Returns model prediction for input data.")
         
         .def("save", &Model::save, nb::arg("filepath"), "Saves lignum format model to binary.");

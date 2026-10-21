@@ -26,7 +26,7 @@ Benchmark at the end of Stage 0 vs `main` (M4, 1M rows × 20 features, 1000 tree
 | LightGBM binary | 0.73 s | 0.73 s | — |
 | LightGBM `zero_as_missing` | 0.73 s (wrong results) | 0.88 s | extra check per split; fixed by Stage 1 |
 | XGBoost binary:logistic | 0.78 s | 0.80 s | float32 accumulation, required for parity |
-| LightGBM, 100 rows | 343 µs | ~360 µs | unexplained ~5%; not flags, LTO or OpenMP — revisit in Stage 5 |
+| LightGBM, 100 rows | 343 µs | ~360 µs | superseded by Stage 1b: 161 µs |
 
 ## Stage 1 — Tree kinds and outputs
 
@@ -43,10 +43,16 @@ Small batches are the weak spot:
 - 100 rows fit in one `N_BLOCK` (256 on Apple), so they run on a single thread: 516 µs vs 235 µs (tuned TL2cgen) and 314 µs (lleaves).
 - Per-row single-thread cost at 1 row (10.4 µs) trails lleaves (8.3 µs).
 
-- [ ] Skip the parallel region for tiny inputs (re-measure: an earlier attempt was slower at 100 rows because the main Python thread ran on a slower core)
-- [ ] Size row blocks from `n_samples / n_threads` instead of a fixed `N_BLOCK`
-- [ ] Tree-parallel path for small batches that stays bit-exact: threads write per-tree leaf values to a buffer, then each row sums them in model order
+- [x] `Strategy` {Auto, Serial, Rows} in C++ and `strategy=` in Python; all bit-identical (tested)
+- [x] Serial path for tiny inputs; `Auto` uses it below 8 rows (`benchmarks/batch_sweep.py`)
+- [x] Row blocks sized from `n_samples / n_threads` (capped at `N_BLOCK`)
+- [x] Tree-parallel path (per-tree leaf buffer, rows sum in order): measured, lost everywhere, removed
+- [x] Hot traversal moved to force-inlined free functions over local pointers (single thread back to 4.9 µs/row, large batch 0.78 → 0.73 s)
+- [ ] Single-row single-thread cost: 10.4 µs vs lleaves 8.3 µs / ONNX Runtime 8.8 µs — profile (Python call overhead vs traversal)
 - [ ] Measure lignum with `LIGNUM_NATIVE=ON` to compare fairly with lleaves (host-tuned)
+
+Result (`benchmarks/results/2026-10-21-m4-stage1b.md`): 1M rows 0.73 s (LightGBM) / 0.72 s (XGBoost),
+1 row 10.4 µs (was 29), 100 rows 161 µs (was 516; tuned TL2cgen 207–235, lleaves 314).
 
 ## Stage 2 — Multiclass
 
@@ -72,7 +78,7 @@ Small batches are the weak spot:
 - [ ] Arrow C Data / C Stream Interface input (no libarrow dependency)
 - [ ] Column-major accessor in the kernel; benchmark vs row-major
 - [ ] float32 inputs, dictionary columns as categories, validity bitmaps
-- [ ] Re-check latency with Arrow input (see Stage 1b)
+- [ ] Re-check latency with Arrow input
 
 ## Stage 6 — PyPI
 

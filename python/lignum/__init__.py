@@ -27,7 +27,7 @@ class Model:
     def __init__(self, _c_model):
         self._c_model = _c_model
 
-    def predict(self, X: np.ndarray, raw_score: bool = False, n_jobs: int = -1) -> np.ndarray:
+    def predict(self, X: np.ndarray, raw_score: bool = False, n_jobs: int = -1, strategy: str = "auto") -> np.ndarray:
         """
         Predict values for the given input data.
 
@@ -42,6 +42,11 @@ class Model:
             Whether to output raw scores (leaf values) instead of transformed predictions.
         n_jobs : int, default=-1
             Number of OpenMP threads to use. `-1` means using all available logical cores.
+        strategy : {'auto', 'serial', 'rows'}, default='auto'
+            How the work is spread across threads. All strategies return identical results;
+            only speed differs. `'serial'` runs on the calling thread (lowest latency for a
+            few rows), `'rows'` splits rows between threads. `'auto'` uses `'serial'` below
+            8 rows or with one thread, `'rows'` otherwise.
 
         Returns
         -------
@@ -61,7 +66,7 @@ class Model:
         ```
         """
         X_arr = np.ascontiguousarray(X, dtype=np.float64)
-        return self._c_model.predict(X_arr, raw_score, n_jobs)
+        return self._c_model.predict(X_arr, raw_score, n_jobs, strategy)
 
     def save(self, filepath: str) -> None:
         """

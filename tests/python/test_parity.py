@@ -176,3 +176,31 @@ def test_small_batches(tmp_path, data, n_rows):
     X = data["X_nan"][:n_rows]
     expected = booster.predict(X, raw_score=True) if n_rows else np.empty(0)
     np.testing.assert_array_equal(model.predict(X, raw_score=True), expected)
+
+
+@pytest.mark.parametrize("fmt", ["lightgbm", "xgboost"])
+@pytest.mark.parametrize("strategy", ["auto", "serial", "rows"])
+@pytest.mark.parametrize("n_jobs", [1, 3, -1])
+def test_strategies_are_bit_identical(tmp_path, data, fmt, strategy, n_jobs):
+    y = (data["y"] > 0).astype(float)
+    if fmt == "lightgbm":
+        booster = lgb.train({"objective": "binary", "verbose": -1}, lgb.Dataset(data["X_nan"], y), num_boost_round=40)
+        model = lgb_to_lignum(booster, tmp_path)
+        reference = lambda X: booster.predict(X)
+    else:
+        booster = xgb.train({"objective": "binary:logistic", "max_depth": 5}, xgb.DMatrix(data["X_nan"], y), num_boost_round=40)
+        path = tmp_path / "xgb.json"
+        booster.save_model(str(path))
+        model = lg.load(str(path), format="xgboost")
+        reference = lambda X: booster.predict(xgb.DMatrix(X))
+
+    for n_rows in [1, 3, 7, 8, 13, 100, 1000, N_ROWS]:
+        X = data["X_nan"][:n_rows]
+        np.testing.assert_array_equal(model.predict(X, n_jobs=n_jobs, strategy=strategy), reference(X))
+
+
+def test_rejects_unknown_strategy(tmp_path, data):
+    booster = lgb.train({"objective": "regression", "verbose": -1}, lgb.Dataset(data["X"], data["y"]), num_boost_round=2)
+    model = lgb_to_lignum(booster, tmp_path)
+    with pytest.raises(ValueError, match="strategy must be one of"):
+        model.predict(data["X"][:5], strategy="fastest")

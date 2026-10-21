@@ -28,6 +28,12 @@
     #endif
 #endif
 
+#if defined(_MSC_VER)
+    #define LIGNUM_INLINE __forceinline
+#else
+    #define LIGNUM_INLINE inline __attribute__((always_inline))
+#endif
+
 namespace lignum {
 
     namespace {
@@ -62,182 +68,200 @@ namespace lignum {
             }
         }
 
+        int resolve_threads(int n_jobs) {
+            #ifdef _OPENMP
+                const int max_threads = omp_get_max_threads();
+                return (n_jobs <= 0 || n_jobs > max_threads) ? max_threads : n_jobs;
+            #else
+                (void)n_jobs;
+                return 1;
+            #endif
+        }
+
+        size_t round_up(size_t x, size_t multiple) {
+            return (x + multiple - 1) / multiple * multiple;
+        }
+
+        // One KNode = two tree levels. All three comparisons are evaluated, then the
+        // grandchild is picked without a dependency between the two levels.
+        template <bool ZeroMissing>
+        LIGNUM_INLINE int32_t step(const KNode& kn, const double* __restrict__ row) {
+            int32_t r = cmp_dir<ZeroMissing>(row[kn.features[0]], kn.thresholds[0], kn.dirs[0]);
+            int32_t l = cmp_dir<ZeroMissing>(row[kn.features[1]], kn.thresholds[1], kn.dirs[1]);
+            int32_t c = cmp_dir<ZeroMissing>(row[kn.features[2]], kn.thresholds[2], kn.dirs[2]);
+            return kn.children[(r << 1) | (r ? c : l)];
+        }
+
+        // Four rows walk the same tree interleaved to hide memory latency.
+        template <bool ZeroMissing>
+        LIGNUM_INLINE void walk4(const KNode* __restrict__ nodes, int32_t root,
+                                 const double* r0, const double* r1, const double* r2, const double* r3,
+                                 int32_t& n0, int32_t& n1, int32_t& n2, int32_t& n3) {
+            n0 = n1 = n2 = n3 = root;
+            while (n0 >= 0 || n1 >= 0 || n2 >= 0 || n3 >= 0) {
+                if (n0 >= 0) n0 = step<ZeroMissing>(nodes[n0], r0);
+                if (n1 >= 0) n1 = step<ZeroMissing>(nodes[n1], r1);
+                if (n2 >= 0) n2 = step<ZeroMissing>(nodes[n2], r2);
+                if (n3 >= 0) n3 = step<ZeroMissing>(nodes[n3], r3);
+            }
+        }
+
+        template <bool ZeroMissing>
+        LIGNUM_INLINE int32_t walk1(const KNode* __restrict__ nodes, int32_t node, const double* row) {
+            while (node >= 0) node = step<ZeroMissing>(nodes[node], row);
+            return node;
+        }
+
+        LIGNUM_INLINE double leaf_value(const double* __restrict__ leaves, int32_t node) {
+            return leaves[(-node) - 1];
+        }
+
+        // Tree traversal shared by all strategies. Leaves are always added to a row's running
+        // sum (kept in out_preds between tiles) in model order, exactly like the source library,
+        // so every strategy produces bit-identical results.
+        //
+        // A tree-parallel strategy (threads fill a per-tree leaf buffer, rows sum it in order) was
+        // measured and lost to Serial below 8 rows and to Rows above, so it is not offered.
+        template <typename Acc, bool ZeroMissing>
+        class Kernel {
+            public:
+                Kernel(const Model& model, const double* X, size_t n_features, bool raw_score)
+                    : m_(model), X_(X), n_features_(n_features), raw_score_(raw_score) {}
+
+                // Rows [i_begin, i_end): base score, all trees in tiles of T_BLOCK, transform.
+                void predict_rows(size_t i_begin, size_t i_end, double* __restrict__ out) const {
+                    for (size_t i = i_begin; i < i_end; i++) out[i] = static_cast<double>(base());
+                    for (size_t t_start = 0; t_start < m_.n_offsets; t_start += T_BLOCK) {
+                        accumulate(i_begin, i_end, t_start, std::min(t_start + T_BLOCK, m_.n_offsets), out);
+                    }
+                    finish(i_begin, i_end, out);
+                }
+
+            private:
+                const Model& m_;
+                const double* X_;
+                size_t n_features_;
+                bool raw_score_;
+
+                Acc base() const { return static_cast<Acc>(m_.base_score); }
+                const double* row(size_t i) const { return &X_[i * n_features_]; }
+
+                // Adds trees [t_begin, t_end) to the running sums of rows [i_begin, i_end).
+                void accumulate(size_t i_begin, size_t i_end, size_t t_begin, size_t t_end, double* __restrict__ out) const {
+                    const KNode* __restrict__ nodes = m_.k_nodes;
+                    const int32_t* __restrict__ roots = m_.tree_offsets;
+                    const double* __restrict__ leaf_values = m_.leaf_values;
+                    const size_t unrolled_end = i_begin + ((i_end - i_begin) / 4) * 4;
+                    for (size_t i = i_begin; i < unrolled_end; i += 4) {
+                        const double *r0 = row(i), *r1 = row(i + 1), *r2 = row(i + 2), *r3 = row(i + 3);
+                        Acc sum0 = static_cast<Acc>(out[i]);
+                        Acc sum1 = static_cast<Acc>(out[i + 1]);
+                        Acc sum2 = static_cast<Acc>(out[i + 2]);
+                        Acc sum3 = static_cast<Acc>(out[i + 3]);
+                        for (size_t t = t_begin; t < t_end; t++) {
+                            int32_t n0, n1, n2, n3;
+                            walk4<ZeroMissing>(nodes, roots[t], r0, r1, r2, r3, n0, n1, n2, n3);
+                            sum0 += static_cast<Acc>(leaf_value(leaf_values, n0));
+                            sum1 += static_cast<Acc>(leaf_value(leaf_values, n1));
+                            sum2 += static_cast<Acc>(leaf_value(leaf_values, n2));
+                            sum3 += static_cast<Acc>(leaf_value(leaf_values, n3));
+                        }
+                        out[i] = static_cast<double>(sum0);
+                        out[i + 1] = static_cast<double>(sum1);
+                        out[i + 2] = static_cast<double>(sum2);
+                        out[i + 3] = static_cast<double>(sum3);
+                    }
+                    for (size_t i = unrolled_end; i < i_end; i++) {
+                        const double* r = row(i);
+                        Acc sum = static_cast<Acc>(out[i]);
+                        for (size_t t = t_begin; t < t_end; t++) {
+                            sum += static_cast<Acc>(leaf_value(leaf_values, walk1<ZeroMissing>(nodes, roots[t], r)));
+                        }
+                        out[i] = static_cast<double>(sum);
+                    }
+                }
+
+                void finish(size_t i_begin, size_t i_end, double* __restrict__ out) const {
+                    if (raw_score_ || m_.transform == transform::Identity) return;
+                    for (size_t i = i_begin; i < i_end; i++) {
+                        if constexpr (std::is_same_v<Acc, float>) {
+                            out[i] = static_cast<double>(apply_transform(static_cast<float>(out[i]), m_.transform));
+                        } else {
+                            out[i] = apply_transform(out[i], m_.transform, m_.sigmoid);
+                        }
+                    }
+                }
+        };
+
+        template <typename Acc, bool ZeroMissing>
+        void run_serial(const Kernel<Acc, ZeroMissing>& kernel, size_t n_samples, double* out) {
+            for (size_t i_start = 0; i_start < n_samples; i_start += N_BLOCK) {
+                kernel.predict_rows(i_start, std::min<size_t>(i_start + N_BLOCK, n_samples), out);
+            }
+        }
+
+        template <typename Acc, bool ZeroMissing>
+        void run_rows(const Kernel<Acc, ZeroMissing>& kernel, size_t n_samples, double* out, int n_threads) {
+            // Enough blocks for every thread (two each, for balance across P/E cores), but never
+            // larger than N_BLOCK, which keeps a tile of trees hot in cache for the whole block.
+            const size_t per_thread = (n_samples + 2 * n_threads - 1) / (2 * n_threads);
+            const size_t block = std::clamp<size_t>(round_up(per_thread, 4), 4, N_BLOCK);
+
+            #pragma omp parallel for schedule(dynamic) num_threads(n_threads)
+            for (omp_iterator_t i_start = 0; i_start < static_cast<omp_iterator_t>(n_samples); i_start += block) {
+                kernel.predict_rows(i_start, std::min<size_t>(i_start + block, n_samples), out);
+            }
+        }
+
+        // Below ~8 rows waking the thread pool costs more than the work (measured on an M4:
+        // 4 rows 27 us serial vs 36 us parallel; 8 rows 47 us vs 40 us).
+        constexpr size_t kMinRowsForThreads = 8;
+
+        Strategy choose_strategy(size_t n_samples, int n_threads) {
+            if (n_threads <= 1 || n_samples < kMinRowsForThreads) return Strategy::Serial;
+            return Strategy::Rows;
+        }
+
+        template <typename Acc, bool ZeroMissing>
+        void run(const Model& model, const double* X, size_t n_samples, size_t n_features, double* out,
+                 int n_jobs, Strategy strategy, bool raw_score) {
+            const Kernel<Acc, ZeroMissing> kernel(model, X, n_features, raw_score);
+            const int n_threads = resolve_threads(n_jobs);
+            if (strategy == Strategy::Auto) strategy = choose_strategy(n_samples, n_threads);
+
+            switch (strategy) {
+                case Strategy::Serial: run_serial(kernel, n_samples, out); break;
+                default:               run_rows(kernel, n_samples, out, n_threads); break;
+            }
+        }
+
+        void dispatch(const Model& model, const double* X, size_t n_samples, size_t n_features, double* out,
+                      int n_jobs, Strategy strategy, bool raw_score) {
+            if (n_features < model.n_features) {
+                throw std::invalid_argument("Input has " + std::to_string(n_features) + " features, but the model requires at least " +
+                                            std::to_string(model.n_features) + ".");
+            }
+            if (n_samples == 0) return;
+
+            if (model.float32) {
+                if (model.has_zero_missing) run<float, true>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+                else                        run<float, false>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+            } else {
+                if (model.has_zero_missing) run<double, true>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+                else                        run<double, false>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+            }
+        }
+
     } // namespace
 
-    template <typename Acc, bool ZeroMissing, bool RawScore>
-    void Model::predict_impl(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds, int n_jobs) const noexcept {
-
-        int32_t n_threads = 1;
-        #ifdef _OPENMP
-            int32_t max_num_threads = omp_get_max_threads();
-            if (n_jobs <= 0 || n_jobs > max_num_threads) {
-                n_threads = max_num_threads;
-            } else {
-                n_threads = n_jobs;
-            }
-        #endif
-        // Leaves are summed onto out_preds tree by tree, in model order, exactly like the
-        // source library; tiling only changes which rows/trees are visited when.
-        const Acc base = static_cast<Acc>(base_score);
-
-        #pragma omp parallel for schedule(dynamic) num_threads(n_threads)
-        for (omp_iterator_t i_start = 0; i_start < static_cast<omp_iterator_t>(n_samples); i_start += N_BLOCK) {
-            size_t i_end = std::min<size_t>(i_start + N_BLOCK, n_samples);
-
-            for (size_t i = i_start; i < i_end; i++) {
-                out_preds[i] = static_cast<double>(base);
-            }
-
-            for (size_t t_start = 0; t_start < n_offsets; t_start += T_BLOCK) {
-                size_t t_end = std::min(t_start + T_BLOCK, n_offsets);
-                size_t unrolled_end = i_start + ((i_end - i_start) / 4) * 4;
-
-                for (size_t i = i_start; i < unrolled_end; i += 4) {
-
-                    const double* row0 = &X[i * n_features];
-                    const double* row1 = &X[(i + 1) * n_features];
-                    const double* row2 = &X[(i + 2) * n_features];
-                    const double* row3 = &X[(i + 3) * n_features];
-
-                    Acc sum0 = static_cast<Acc>(out_preds[i]);
-                    Acc sum1 = static_cast<Acc>(out_preds[i + 1]);
-                    Acc sum2 = static_cast<Acc>(out_preds[i + 2]);
-                    Acc sum3 = static_cast<Acc>(out_preds[i + 3]);
-
-                    for (size_t t = t_start; t < t_end; t++) {
-                        int32_t node0 = tree_offsets[t];
-                        int32_t node1 = tree_offsets[t];
-                        int32_t node2 = tree_offsets[t];
-                        int32_t node3 = tree_offsets[t];
-
-                        while (node0 >= 0 || node1 >= 0 || node2 >= 0 || node3 >= 0) {
-                            if (node0 >= 0) {
-                                const KNode &kn0 = k_nodes[node0];
-
-                                double xr = row0[kn0.features[0]];
-                                double xl = row0[kn0.features[1]];
-                                double xc = row0[kn0.features[2]];
-
-                                int32_t r = cmp_dir<ZeroMissing>(xr, kn0.thresholds[0], kn0.dirs[0]);
-                                int32_t l = cmp_dir<ZeroMissing>(xl, kn0.thresholds[1], kn0.dirs[1]);
-                                int32_t c = cmp_dir<ZeroMissing>(xc, kn0.thresholds[2], kn0.dirs[2]);
-
-                                node0 = kn0.children[(r << 1) | (r ? c : l)];
-                            }
-
-                            if (node1 >= 0) {
-                                const KNode &kn1 = k_nodes[node1];
-
-                                double xr = row1[kn1.features[0]];
-                                double xl = row1[kn1.features[1]];
-                                double xc = row1[kn1.features[2]];
-
-                                int32_t r = cmp_dir<ZeroMissing>(xr, kn1.thresholds[0], kn1.dirs[0]);
-                                int32_t l = cmp_dir<ZeroMissing>(xl, kn1.thresholds[1], kn1.dirs[1]);
-                                int32_t c = cmp_dir<ZeroMissing>(xc, kn1.thresholds[2], kn1.dirs[2]);
-
-                                node1 = kn1.children[(r << 1) | (r ? c : l)];
-                            }
-
-                            if (node2 >= 0) {
-                                const KNode &kn2 = k_nodes[node2];
-
-                                double xr = row2[kn2.features[0]];
-                                double xl = row2[kn2.features[1]];
-                                double xc = row2[kn2.features[2]];
-
-                                int32_t r = cmp_dir<ZeroMissing>(xr, kn2.thresholds[0], kn2.dirs[0]);
-                                int32_t l = cmp_dir<ZeroMissing>(xl, kn2.thresholds[1], kn2.dirs[1]);
-                                int32_t c = cmp_dir<ZeroMissing>(xc, kn2.thresholds[2], kn2.dirs[2]);
-
-                                node2 = kn2.children[(r << 1) | (r ? c : l)];
-                            }
-
-                            if (node3 >= 0) {
-                                const KNode &kn3 = k_nodes[node3];
-
-                                double xr = row3[kn3.features[0]];
-                                double xl = row3[kn3.features[1]];
-                                double xc = row3[kn3.features[2]];
-
-                                int32_t r = cmp_dir<ZeroMissing>(xr, kn3.thresholds[0], kn3.dirs[0]);
-                                int32_t l = cmp_dir<ZeroMissing>(xl, kn3.thresholds[1], kn3.dirs[1]);
-                                int32_t c = cmp_dir<ZeroMissing>(xc, kn3.thresholds[2], kn3.dirs[2]);
-
-                                node3 = kn3.children[(r << 1) | (r ? c : l)];
-                            }
-                        }
-                        sum0 += static_cast<Acc>(leaf_values[(-node0) - 1]);
-                        sum1 += static_cast<Acc>(leaf_values[(-node1) - 1]);
-                        sum2 += static_cast<Acc>(leaf_values[(-node2) - 1]);
-                        sum3 += static_cast<Acc>(leaf_values[(-node3) - 1]);
-                    }
-                    out_preds[i] = static_cast<double>(sum0);
-                    out_preds[i + 1] = static_cast<double>(sum1);
-                    out_preds[i + 2] = static_cast<double>(sum2);
-                    out_preds[i + 3] = static_cast<double>(sum3);
-                }
-
-                for (size_t i = unrolled_end; i < i_end; i++) {
-                    const double* row = &X[i * n_features];
-                    Acc sum = static_cast<Acc>(out_preds[i]);
-                    for (size_t t = t_start; t < t_end; t++) {
-                        int32_t node = tree_offsets[t];
-                        while (node >= 0) {
-                            const KNode &kn = k_nodes[node];
-
-                            double xr = row[kn.features[0]];
-                            double xl = row[kn.features[1]];
-                            double xc = row[kn.features[2]];
-
-                            int32_t r = cmp_dir<ZeroMissing>(xr, kn.thresholds[0], kn.dirs[0]);
-                            int32_t l = cmp_dir<ZeroMissing>(xl, kn.thresholds[1], kn.dirs[1]);
-                            int32_t c = cmp_dir<ZeroMissing>(xc, kn.thresholds[2], kn.dirs[2]);
-
-                            node = kn.children[(r << 1) | (r ? c : l)];
-                        }
-                        sum += static_cast<Acc>(leaf_values[(-node) - 1]);
-                    }
-                    out_preds[i] = static_cast<double>(sum);
-                }
-            }
-            if constexpr (!RawScore) {
-                if (transform != transform::Identity) {
-                    for (size_t i = i_start; i < i_end; i++) {
-                        if constexpr (std::is_same_v<Acc, float>) {
-                            out_preds[i] = static_cast<double>(apply_transform(static_cast<float>(out_preds[i]), transform));
-                        } else {
-                            out_preds[i] = apply_transform(out_preds[i], transform, sigmoid);
-                        }
-                    }
-                }
-            }
-        }
+    void Model::predict(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds,
+                        int n_jobs, Strategy strategy) const {
+        dispatch(*this, X, n_samples, n_features, out_preds, n_jobs, strategy, false);
     }
 
-    template <bool RawScore>
-    void Model::dispatch(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds, int n_jobs) const {
-        if (n_features < this->n_features) {
-            throw std::invalid_argument("Input has " + std::to_string(n_features) + " features, but the model requires at least " +
-                                        std::to_string(this->n_features) + ".");
-        }
-        if (n_samples == 0) return;
-
-        if (float32) {
-            if (has_zero_missing) predict_impl<float, true, RawScore>(X, n_samples, n_features, out_preds, n_jobs);
-            else                  predict_impl<float, false, RawScore>(X, n_samples, n_features, out_preds, n_jobs);
-        } else {
-            if (has_zero_missing) predict_impl<double, true, RawScore>(X, n_samples, n_features, out_preds, n_jobs);
-            else                  predict_impl<double, false, RawScore>(X, n_samples, n_features, out_preds, n_jobs);
-        }
-    }
-
-    void Model::predict(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds, int n_jobs) const {
-        dispatch<false>(X, n_samples, n_features, out_preds, n_jobs);
-    }
-
-    void Model::predict_raw(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds, int n_jobs) const {
-        dispatch<true>(X, n_samples, n_features, out_preds, n_jobs);
+    void Model::predict_raw(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds,
+                            int n_jobs, Strategy strategy) const {
+        dispatch(*this, X, n_samples, n_features, out_preds, n_jobs, strategy, true);
     }
 
 } // namespace lignum
