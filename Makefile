@@ -1,4 +1,4 @@
-.PHONY: venv py-build py-test cpp-build cpp-test test bench docs clean
+.PHONY: venv bench-deps py-build py-test cpp-build cpp-test test bench bench-quick docs clean
 
 PYTHON ?= .venv/bin/python
 CPP_BUILD_DIR ?= build/cpp
@@ -6,6 +6,10 @@ CPP_BUILD_DIR ?= build/cpp
 venv:
 	uv venv --python 3.12 .venv
 	uv pip install --python $(PYTHON) numpy pandas scikit-learn lightgbm xgboost pytest nanobind scikit-build-core pyarrow ninja
+
+# Competitor engines for benchmarks/bench.py (lleaves 1.3 needs llvmlite < 0.45).
+bench-deps:
+	uv pip install --python $(PYTHON) treelite tl2cgen lleaves "llvmlite<0.45" onnxruntime onnxmltools onnxconverter-common
 
 py-build:
 	uv pip install --python $(PYTHON) --no-build-isolation -e .
@@ -22,11 +26,12 @@ cpp-test: cpp-build
 
 test: cpp-test py-test
 
-# Benchmarks use a machine-tuned build; never ship it.
+# Compares lignum with native LightGBM/XGBoost, TL2cgen, GTIL, lleaves and ONNX Runtime (see bench-deps).
 bench:
-	CMAKE_ARGS="-DLIGNUM_NATIVE=ON" uv pip install --python $(PYTHON) --no-build-isolation -e .
-	$(PYTHON) benchmarks/bench_lightgbm.py
-	$(PYTHON) benchmarks/bench_xgboost.py
+	$(PYTHON) benchmarks/bench.py
+
+bench-quick:
+	$(PYTHON) benchmarks/bench.py --quick
 
 docs:
 	rm -rf site/
@@ -34,4 +39,4 @@ docs:
 	$(PYTHON) -m mkdocs build
 
 clean:
-	rm -rf build/ .pytest_cache/ benchmarks/bench_model_* site/
+	rm -rf build/ .pytest_cache/ benchmarks/.cache site/

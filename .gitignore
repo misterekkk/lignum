@@ -115,4 +115,4 @@ test_lignum
 site/
 .venv/
 *.npy
-benchmarks/bench_model_*
+benchmarks/bench_model_*benchmarks/.cache/

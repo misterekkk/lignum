@@ -17,7 +17,7 @@ Ordered roadmap. Each stage ends with: all tests green, bit-exact parity, benchm
 - [x] XGBoost parser: O(n) instead of O(n²) array access
 - [x] Parity test suite with `assert_array_equal`
 - [ ] Port from `dev/new-features`: C API (`c_api.h/.cpp`), categorical benchmark scripts
-- [ ] Rework benchmark scripts (shared data/model generation, report best+median, baseline comparison)
+- [x] One benchmark suite (`benchmarks/bench.py`): native, TL2cgen (default and tuned), GTIL, lleaves, ONNX Runtime; throughput, latency, prep time, bit-exactness. Baseline: `benchmarks/results/2026-10-21-m4-baseline.md`
 
 Benchmark at the end of Stage 0 vs `main` (M4, 1M rows × 20 features, 1000 trees, depth 6):
 
@@ -33,6 +33,20 @@ Benchmark at the end of Stage 0 vs `main` (M4, 1M rows × 20 features, 1000 tree
 - [ ] `tree_kind[]` and `tree_output[]` in `Model` and the binary format
 - [ ] Kernel dispatches per tree, in model order; only trees with `ZeroIsMissing` splits use that path
 - [ ] No result changes, no regression
+
+## Stage 1b — Small-batch latency (from the baseline benchmark)
+
+Large batches: lignum is the fastest engine measured (0.78 s vs lleaves 0.85 s, tuned TL2cgen 1.29 s).
+Small batches are the weak spot:
+
+- 1 row with all threads costs ~29 µs vs ~10 µs with one thread: the OpenMP region dominates.
+- 100 rows fit in one `N_BLOCK` (256 on Apple), so they run on a single thread: 516 µs vs 235 µs (tuned TL2cgen) and 314 µs (lleaves).
+- Per-row single-thread cost at 1 row (10.4 µs) trails lleaves (8.3 µs).
+
+- [ ] Skip the parallel region for tiny inputs (re-measure: an earlier attempt was slower at 100 rows because the main Python thread ran on a slower core)
+- [ ] Size row blocks from `n_samples / n_threads` instead of a fixed `N_BLOCK`
+- [ ] Tree-parallel path for small batches that stays bit-exact: threads write per-tree leaf values to a buffer, then each row sums them in model order
+- [ ] Measure lignum with `LIGNUM_NATIVE=ON` to compare fairly with lleaves (host-tuned)
 
 ## Stage 2 — Multiclass
 
@@ -58,7 +72,7 @@ Benchmark at the end of Stage 0 vs `main` (M4, 1M rows × 20 features, 1000 tree
 - [ ] Arrow C Data / C Stream Interface input (no libarrow dependency)
 - [ ] Column-major accessor in the kernel; benchmark vs row-major
 - [ ] float32 inputs, dictionary columns as categories, validity bitmaps
-- [ ] Small-batch / single-row latency (investigate the 100-row gap above)
+- [ ] Re-check latency with Arrow input (see Stage 1b)
 
 ## Stage 6 — PyPI
 
