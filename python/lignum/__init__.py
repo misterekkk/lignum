@@ -50,8 +50,10 @@ class Model:
 
         Returns
         -------
-        preds : ndarray, shape (n_samples,)
-            The predicted values.
+        preds : ndarray, shape (n_samples,) or (n_samples, n_classes)
+            The predicted values. Multiclass models return one column per class
+            (probabilities, or margins with `raw_score=True`), except XGBoost
+            `multi:softmax`, which returns the predicted class index.
 
         Examples
         --------
@@ -67,6 +69,16 @@ class Model:
         """
         X_arr = np.ascontiguousarray(X, dtype=np.float64)
         return self._c_model.predict(X_arr, raw_score, n_jobs, strategy)
+
+    @property
+    def n_outputs(self) -> int:
+        """Number of model outputs: the number of classes for multiclass models, otherwise 1."""
+        return self._c_model.n_outputs
+
+    @property
+    def n_features(self) -> int:
+        """Minimum number of columns the input must have."""
+        return self._c_model.n_features
 
     def save(self, filepath: str) -> None:
         """

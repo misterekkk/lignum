@@ -38,7 +38,12 @@ LIGNUM_API int LignumModelSave(LignumModelHandle handle, const char* filepath);
 /* Minimum number of columns X must have. */
 LIGNUM_API int LignumModelNumFeatures(LignumModelHandle handle, size_t* out_n_features);
 
-/* X is row-major float64 [n_samples x n_features]; out_preds holds n_samples values.
+/* Values per row written by LignumModelPredict: the number of classes for multiclass models,
+ * except XGBoost multi:softmax (transformed) which writes one class index; otherwise 1. */
+LIGNUM_API int LignumModelOutputWidth(LignumModelHandle handle, int raw_score, size_t* out_width);
+
+/* X is row-major float64 [n_samples x n_features]; out_preds holds n_samples x width values
+ * (see LignumModelOutputWidth), row-major.
  * n_jobs <= 0 uses all threads; strategy is one of LIGNUM_STRATEGY_*. */
 LIGNUM_API int LignumModelPredict(LignumModelHandle handle,
                                   const double* X,

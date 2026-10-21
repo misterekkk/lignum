@@ -49,6 +49,10 @@ comparison is ignored.
   on local copies of the model pointers; going through `Model&` members cost ~7-13%.
 - Leaves are added to a running sum loaded from `out_preds[i]`, in model order, so floating point
   results are identical to the source library.
+- Multiclass (`Multi` template parameter): row i's K outputs live in `out[i*K .. i*K+K)`; each tree
+  adds its leaf to `out[i*K + tree_outputs[t]]`, still in model order. Softmax runs per row after the
+  last tile. XGBoost `multi:softmax` (argmax) is computed from raw margins in a temporary buffer,
+  because narrowing K columns to one in place would race between threads.
 
 ## Split semantics
 
@@ -63,16 +67,18 @@ Every split is normalised to: **go right ⇔ `isnan(x) ? default_right : x >= th
 | XGBoost | left iff `float(x) < t` (t is float32), NaN → `default_left` | threshold = smallest double that rounds to ≥ `t` in float32 |
 
 XGBoost also accumulates and transforms in float32, and converts `base_score` to margin space with
-float32 `log`/logit (`binary:logitraw` uses `base_score` as is).
+float32 `log`/logit (`binary:logitraw` uses `base_score` as is; multiclass models store a vector of
+per-class base scores already in margin space). XGBoost's softmax takes the max and `expf` in float,
+sums in double and divides by `float(sum)`; LightGBM's softmax is all double.
 
 Verified bit-exact by `tests/python/test_parity.py` on inputs with NaNs, zeros, values in the zero
 band and values placed exactly on every split threshold.
 
-## Binary format (version 0.3)
+## Binary format (version 0.4)
 
-64-byte header (`magic "LIGNUM"`, version, transform, flags {float32, zero-missing}, base_score,
-sigmoid, n_features, section sizes), followed by 64-byte aligned sections: nodes, tree offsets,
-leaves, tree kinds.
+64-byte header (`magic "LIGNUM"`, version, transform, flags {float32, zero-missing}, sigmoid,
+n_features, n_outputs, section sizes), followed by 64-byte aligned sections: nodes, tree offsets,
+leaves, tree kinds, base scores, and tree outputs (multiclass only).
 Loading validates the version and the file size, then maps the file read-only. Older versions are
 rejected; re-export from JSON.
 
@@ -86,4 +92,4 @@ rejected; re-export from JSON.
 
 ## Known limitations
 
-See [TASKS.md](TASKS.md): no categorical splits, no multiclass, only row-major float64 input.
+See [TASKS.md](TASKS.md): no categorical splits, no multi-target / vector-leaf models, only row-major float64 input.

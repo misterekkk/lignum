@@ -1,5 +1,6 @@
 #include "test_util.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <string>
@@ -123,5 +124,41 @@ TEST(LightGBM, AllStrategiesAgree) {
             model.predict(X.data(), n, 2, got.data(), n_jobs, strategy);
             EXPECT_EQ(got, expected);
         }
+    }
+}
+
+TEST(LightGBM, MulticlassSoftmaxPerRow) {
+    // Two iterations of three classes: tree t belongs to class t % 3.
+    const std::string json = R"({"objective": "multiclass num_class:3", "num_class": 3, "num_tree_per_iteration": 3, "tree_info": [
+        {"tree_structure": {"split_feature": 0, "threshold": 0.0, "decision_type": "<=", "default_left": true, "missing_type": "NaN",
+                            "left_child": {"leaf_value": 0.5}, "right_child": {"leaf_value": -0.5}}},
+        {"tree_structure": {"leaf_value": 0.25}},
+        {"tree_structure": {"leaf_value": -0.25}},
+        {"tree_structure": {"leaf_value": 0.125}},
+        {"tree_structure": {"leaf_value": 0.0625}},
+        {"tree_structure": {"split_feature": 0, "threshold": 1.0, "decision_type": "<=", "default_left": false, "missing_type": "NaN",
+                            "left_child": {"leaf_value": 0.0}, "right_child": {"leaf_value": 1.0}}}]})";
+    auto model = lignum::load(write_temp("lgb_multi.json", json), "lightgbm");
+    ASSERT_EQ(model.n_outputs, 3u);
+    ASSERT_EQ(model.output_width(true), 3u);
+
+    const std::vector<double> X = {-1.0, 2.0, NaN};
+    std::vector<double> raw(9), prob(9);
+    model.predict_raw(X.data(), 3, 1, raw.data(), 1);
+    model.predict(X.data(), 3, 1, prob.data(), 1);
+
+    const std::vector<double> expected_raw = {
+        0.5 + 0.125, 0.25 + 0.0625, -0.25 + 0.0,
+        -0.5 + 0.125, 0.25 + 0.0625, -0.25 + 1.0,
+        0.5 + 0.125, 0.25 + 0.0625, -0.25 + 1.0,
+    };
+    EXPECT_EQ(raw, expected_raw);
+    for (size_t i = 0; i < 3; i++) {
+        const double* r = &expected_raw[i * 3];
+        const double m = std::max({r[0], r[1], r[2]});
+        const double e0 = std::exp(r[0] - m), e1 = std::exp(r[1] - m), e2 = std::exp(r[2] - m), sum = e0 + e1 + e2;
+        EXPECT_EQ(prob[i * 3 + 0], e0 / sum);
+        EXPECT_EQ(prob[i * 3 + 1], e1 / sum);
+        EXPECT_EQ(prob[i * 3 + 2], e2 / sum);
     }
 }

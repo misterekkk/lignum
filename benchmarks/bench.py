@@ -46,13 +46,24 @@ N_THREADS = os.cpu_count() or 1
 
 @dataclass
 class Workload:
-    name: str               # "lightgbm" | "xgboost"
+    name: str               # "lightgbm" | "xgboost" | "lightgbm-multi" | "xgboost-multi"
     X: np.ndarray           # benchmark data (C-contiguous float64, 5% NaN)
     X_train: np.ndarray     # rows the model was trained on (hit split thresholds exactly)
     X_holdout: np.ndarray   # rows not used for training
     model_json: Path        # JSON dump for lignum
     model_native: Path      # native text/json file for the other engines
     booster: object
+    n_classes: int = 1      # > 1: multiclass softmax, predictions are (n, n_classes)
+
+    @property
+    def family(self) -> str:
+        return self.name.split("-")[0]
+
+    def columns(self, out) -> np.ndarray:
+        """Normalises an engine's output to (n,) for binary or (n, n_classes) for multiclass."""
+        out = np.asarray(out, dtype=np.float64)
+        n = out.shape[0]
+        return out.reshape(n, -1)[:, -1] if self.n_classes == 1 else out.reshape(n, self.n_classes)
 
 
 def make_data(n_rows: int, n_features: int) -> tuple[np.ndarray, np.ndarray]:
@@ -95,6 +106,36 @@ def build_workloads(args) -> list[Workload]:
         booster = lgb.Booster(model_file=str(txt))
         workloads.append(Workload("lightgbm", X, X_train, X_holdout, js, txt, booster))
 
+    n_classes = 10
+    y_multi = None
+    if any(name.endswith("-multi") for name in args.only):
+        # Every feature contributes (like the binary task), so no handful of features dominates the splits.
+        weights = np.random.default_rng(7).normal(size=X_train.shape[1])
+        Z = np.nan_to_num(X_train)
+        score = Z @ weights + np.sin(Z[:, 0] * Z[:, 1]) + 0.5 * np.abs(Z[:, 2])
+        y_multi = np.digitize(score, np.quantile(score, np.linspace(0, 1, n_classes + 1)[1:-1]))
+
+    if "lightgbm-multi" in args.only:
+        txt, js = cache / "lgb_multi.txt", cache / "lgb_multi.json"
+        if not txt.exists():
+            params = {"objective": "multiclass", "num_class": n_classes, "max_depth": args.depth,
+                      "num_leaves": 2 ** args.depth - 1, "learning_rate": 0.1, "verbose": -1, "seed": 42}
+            booster = lgb.train(params, lgb.Dataset(X_train, y_multi), num_boost_round=args.trees // n_classes)
+            booster.save_model(str(txt))
+            js.write_text(json.dumps(booster.dump_model()))
+        booster = lgb.Booster(model_file=str(txt))
+        workloads.append(Workload("lightgbm-multi", X, X_train, X_holdout, js, txt, booster, n_classes))
+
+    if "xgboost-multi" in args.only:
+        js = cache / "xgb_multi.json"
+        if not js.exists():
+            params = {"objective": "multi:softprob", "num_class": n_classes, "max_depth": args.depth,
+                      "learning_rate": 0.1, "tree_method": "hist", "seed": 42}
+            booster = xgb.train(params, xgb.DMatrix(X_train, y_multi), num_boost_round=args.trees // n_classes)
+            booster.save_model(str(js))
+        booster = xgb.Booster(model_file=str(js))
+        workloads.append(Workload("xgboost-multi", X, X_train, X_holdout, js, js, booster, n_classes))
+
     if "xgboost" in args.only:
         js = cache / "xgb.json"
         if not js.exists():
@@ -116,7 +157,7 @@ Predict = Callable[[np.ndarray, int], np.ndarray]
 
 
 def engine_native(w: Workload, tmp: Path) -> Predict:
-    if w.name == "lightgbm":
+    if w.family == "lightgbm":
         return lambda X, n: w.booster.predict(X, num_threads=n)
 
     boosters = {}
@@ -134,7 +175,7 @@ def engine_native(w: Workload, tmp: Path) -> Predict:
 def engine_lignum(w: Workload, tmp: Path) -> Predict:
     import lignum
 
-    model = lignum.load(str(w.model_json), format=w.name)
+    model = lignum.load(str(w.model_json), format=w.family)
     return lambda X, n: model.predict(X, n_jobs=n)
 
 
@@ -143,7 +184,7 @@ def engine_lignum_bin(w: Workload, tmp: Path) -> Predict:
 
     path = tmp / f"{w.name}.bin"
     if not path.exists():
-        lignum.load(str(w.model_json), format=w.name).save(str(path))
+        lignum.load(str(w.model_json), format=w.family).save(str(path))
     model = lignum.load(str(path))
     return lambda X, n: model.predict(X, n_jobs=n)
 
@@ -151,7 +192,7 @@ def engine_lignum_bin(w: Workload, tmp: Path) -> Predict:
 def _treelite_model(w: Workload):
     import treelite
 
-    if w.name == "lightgbm":
+    if w.family == "lightgbm":
         return treelite.frontend.load_lightgbm_model(str(w.model_native))
     return treelite.frontend.load_xgboost_model(str(w.model_native))
 
@@ -173,7 +214,7 @@ def _tl2cgen(w: Workload, tmp: Path, params: dict, tag: str) -> Predict:
     def predict(X, n):
         if n not in predictors:
             predictors[n] = tl2cgen.Predictor(str(libpath), nthread=n)
-        return np.asarray(predictors[n].predict(tl2cgen.DMatrix(X)), dtype=np.float64).reshape(len(X), -1)[:, -1]
+        return w.columns(predictors[n].predict(tl2cgen.DMatrix(X)))
 
     return predict
 
@@ -190,16 +231,16 @@ def engine_gtil(w: Workload, tmp: Path) -> Predict:
     import treelite
 
     model = _treelite_model(w)
-    return lambda X, n: np.asarray(treelite.gtil.predict(model, X, nthread=n), dtype=np.float64).reshape(len(X), -1)[:, -1]
+    return lambda X, n: w.columns(treelite.gtil.predict(model, X, nthread=n))
 
 
 def engine_lleaves(w: Workload, tmp: Path) -> Predict:
-    if w.name != "lightgbm":
+    if w.family != "lightgbm":
         raise NotSupported("lleaves only supports LightGBM")
     import lleaves
 
     model = lleaves.Model(model_file=str(w.model_native))
-    model.compile(cache=str(tmp / "lleaves.o"))
+    model.compile(cache=str(tmp / f"{w.name}_lleaves.o"))
     return lambda X, n: model.predict(X, n_jobs=n)
 
 
@@ -210,7 +251,7 @@ def engine_onnxruntime(w: Workload, tmp: Path) -> Predict:
 
     n_features = w.X.shape[1]
     initial_types = [("input", FloatTensorType([None, n_features]))]
-    if w.name == "lightgbm":
+    if w.family == "lightgbm":
         onx = onnxmltools.convert_lightgbm(w.booster, initial_types=initial_types, zipmap=False, target_opset=15)
     else:
         import xgboost as xgb
@@ -229,8 +270,7 @@ def engine_onnxruntime(w: Workload, tmp: Path) -> Predict:
             so.log_severity_level = 3  # the converted classifier declares a fixed label shape; ORT warns every call
             sessions[n] = ort.InferenceSession(payload, so, providers=["CPUExecutionProvider"])
         out = sessions[n].run(None, {"input": X.astype(np.float32)})
-        probs = out[1]
-        return np.asarray(probs, dtype=np.float64)[:, -1]
+        return w.columns(out[1])
 
     return predict
 
@@ -297,9 +337,10 @@ def time_latency(predict: Predict, X: np.ndarray, n: int, budget_s: float) -> fl
 
 
 def compare(got: np.ndarray, ref: np.ndarray) -> tuple[int, float]:
-    got = np.asarray(got, dtype=np.float64).ravel()
-    ref = np.asarray(ref, dtype=np.float64).ravel()
-    return int(np.sum(got != ref)), float(np.max(np.abs(got - ref)))
+    """Rows where any output differs from the reference, and the max abs difference."""
+    got = np.asarray(got, dtype=np.float64).reshape(len(ref), -1)
+    ref = np.asarray(ref, dtype=np.float64).reshape(len(ref), -1)
+    return int(np.sum(np.any(got != ref, axis=1))), float(np.max(np.abs(got - ref)))
 
 
 def run_engine(w: Workload, engine: str, args, tmp: Path, reference: dict) -> Result:
@@ -380,7 +421,8 @@ def render(results: list[Result], env: dict, args) -> str:
         f"# Benchmark {env['date']}",
         "",
         f"- lignum commit `{env['commit']}`, {env['cpu']}, {env['threads']} threads, Python {env['python']}",
-        f"- {args.rows:,} rows × {args.features} features (5% NaN), {args.trees} trees, max depth {args.depth}, binary classification",
+        f"- {args.rows:,} rows × {args.features} features (5% NaN), {args.trees} trees, max depth {args.depth}; "
+        f"binary classification, and 10-class softmax ({args.trees // 10} iterations × 10 trees) for `*-multi`",
         "- versions: " + ", ".join(f"{k} {v}" for k, v in env["versions"].items() if v),
         "",
         "Batch = full data set, all threads (best / median of repeats); 1 thread is normalised to the full data set.",
@@ -416,7 +458,7 @@ def main():
     parser.add_argument("--depth", type=int, default=6)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--latency-budget", type=float, default=2.0, help="seconds per latency measurement")
-    parser.add_argument("--only", default="lightgbm,xgboost")
+    parser.add_argument("--only", default="lightgbm,xgboost,lightgbm-multi,xgboost-multi")
     parser.add_argument("--engines", default=",".join(ENGINES))
     parser.add_argument("--quick", action="store_true", help="100k rows, 200 trees, fewer repeats")
     parser.add_argument("--verbose", action="store_true")

@@ -71,12 +71,25 @@ namespace lignum {
                 return std::stoi(std::string(elem.get_string().value()));
             }
 
-            float read_base_score(simdjson::dom::element params) {
+            // base_score is "[v]" or, for multi-output models, "[v0,v1,...]".
+            std::vector<float> read_base_scores(simdjson::dom::element params) {
                 auto elem = params["base_score"];
-                if (elem.error() != simdjson::SUCCESS) return 0.5f;
+                if (elem.error() != simdjson::SUCCESS) return {0.5f};
                 std::string text(elem.get_string().value());
-                text.erase(std::remove_if(text.begin(), text.end(), [](char c) { return c == '[' || c == ']'; }), text.end());
-                return std::stof(text);
+                std::replace(text.begin(), text.end(), '[', ' ');
+                std::replace(text.begin(), text.end(), ']', ' ');
+                std::replace(text.begin(), text.end(), ',', ' ');
+                std::vector<float> values;
+                size_t pos = 0;
+                while (pos < text.size()) {
+                    size_t used = 0;
+                    const auto start = text.find_first_not_of(' ', pos);
+                    if (start == std::string::npos) break;
+                    values.push_back(std::stof(text.substr(start), &used));
+                    pos = start + used;
+                }
+                if (values.empty()) throw std::runtime_error("Invalid base_score.");
+                return values;
             }
 
         } // namespace
@@ -90,34 +103,44 @@ namespace lignum {
             info.precision = Precision::Float32;
 
             simdjson::dom::element params = doc["learner"]["learner_model_param"];
-            if (read_int_param(params, "num_class", 0) > 1 || read_int_param(params, "num_target", 1) > 1) {
-                throw std::runtime_error("Multiclass and multi-target models are not supported yet.");
+            if (read_int_param(params, "num_target", 1) > 1) {
+                throw std::runtime_error("Multi-target models are not supported yet.");
             }
+            const int n_outputs = std::max(1, read_int_param(params, "num_class", 0));
 
-            // XGBoost converts base_score to margin space in float32 arithmetic.
-            const float base_score = read_base_score(params);
-            float base_margin = base_score;
-            info.transform = transform::Identity;
+            std::vector<float> base_scores = read_base_scores(params);
+            if (base_scores.size() == 1 && n_outputs > 1) base_scores.assign(static_cast<size_t>(n_outputs), base_scores[0]);
+            if (base_scores.size() != static_cast<size_t>(n_outputs)) {
+                throw std::runtime_error("base_score has " + std::to_string(base_scores.size()) + " values for " +
+                                         std::to_string(n_outputs) + " outputs.");
+            }
 
             auto objective_elem = doc["learner"]["objective"]["name"];
             const std::string_view objective = objective_elem.error() == simdjson::SUCCESS ? objective_elem.get_string().value() : "";
 
-            // binary:logitraw keeps base_score as is (no logit) and applies no transform.
-            if (objective == "binary:logistic" || objective == "reg:logistic") {
-                if (!(base_score > 0.0f && base_score < 1.0f)) {
-                    throw std::runtime_error("base_score must be in (0, 1) for logistic objectives.");
+            // XGBoost converts base_score to margin space in float32 arithmetic.
+            // binary:logitraw keeps base_score as is (no logit) and applies no transform;
+            // multi:softprob / multi:softmax store it in margin space already.
+            info.transform = transform::Identity;
+            for (float& base_score : base_scores) {
+                if (objective == "binary:logistic" || objective == "reg:logistic") {
+                    if (!(base_score > 0.0f && base_score < 1.0f)) {
+                        throw std::runtime_error("base_score must be in (0, 1) for logistic objectives.");
+                    }
+                    base_score = -std::log(1.0f / base_score - 1.0f);
+                    info.transform = transform::Sigmoid;
+                } else if (objective == "count:poisson" || objective == "reg:gamma" || objective == "reg:tweedie" ||
+                           objective == "survival:cox" || objective == "survival:aft") {
+                    if (!(base_score > 0.0f)) {
+                        throw std::runtime_error("base_score must be positive for log-link objectives.");
+                    }
+                    base_score = std::log(base_score);
+                    info.transform = transform::Exp;
                 }
-                base_margin = -std::log(1.0f / base_score - 1.0f);
-                info.transform = transform::Sigmoid;
-            } else if (objective == "count:poisson" || objective == "reg:gamma" || objective == "reg:tweedie" ||
-                       objective == "survival:cox" || objective == "survival:aft") {
-                if (!(base_score > 0.0f)) {
-                    throw std::runtime_error("base_score must be positive for log-link objectives.");
-                }
-                base_margin = std::log(base_score);
-                info.transform = transform::Exp;
             }
-            info.base_score = base_margin;
+            if (objective == "multi:softprob") info.transform = transform::Softmax;
+            if (objective == "multi:softmax") info.transform = transform::Argmax;
+            info.base_scores.assign(base_scores.begin(), base_scores.end());
 
             auto trees_element = doc["learner"]["gradient_booster"]["model"]["trees"];
             if (trees_element.error() == simdjson::SUCCESS) {
@@ -131,6 +154,14 @@ namespace lignum {
 
                     forest.push_back(build_tree(read_tree_arrays(tree_obj), 0));
                 }
+            }
+
+            if (n_outputs > 1) {
+                for (int64_t output : doc["learner"]["gradient_booster"]["model"]["tree_info"].get_array()) {
+                    if (output < 0 || output >= n_outputs) throw std::runtime_error("tree_info refers to an unknown class.");
+                    info.tree_outputs.push_back(static_cast<uint16_t>(output));
+                }
+                if (info.tree_outputs.size() != forest.size()) throw std::runtime_error("tree_info does not match the number of trees.");
             }
 
             return forest;

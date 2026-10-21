@@ -49,19 +49,6 @@ def test_xgboost_objectives(tmp_path, base_data, objective, model_type, positive
     actual_out = lg_model.predict(X, raw_score=False)
     np.testing.assert_array_equal(actual_out, expected_out)
 
-def test_xgboost_rejects_multiclass(tmp_path, base_data):
-    X, _, _ = base_data
-    y_multi = np.random.randint(0, 3, 100).astype(np.float32)
-    
-    model = xgb.XGBClassifier(n_estimators=2, max_depth=2, objective="multi:softprob")
-    model.fit(X, y_multi)
-    
-    model_path = str(tmp_path / "xgb_multi.json")
-    model.save_model(model_path)
-    
-    with pytest.raises(RuntimeError, match="not supported"):
-        lg.load(model_path, format="xgboost")
-
 def test_xgboost_rejects_multitarget(tmp_path, base_data):
     X, _, _ = base_data
     y_multitarget = np.random.rand(100, 3).astype(np.float32)

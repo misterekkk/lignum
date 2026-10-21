@@ -49,7 +49,7 @@ namespace lignum {
         struct alignas(64) FileHeader {
             char magic[6] = {'L', 'I', 'G', 'N', 'U', 'M'}; 
             uint8_t version_major = 0;
-            uint8_t version_minor = 3;
+            uint8_t version_minor = 4;
 
             uint8_t os_id = LIGNUM_OS_ID;
             uint8_t arch_id = LIGNUM_ARCH_ID;
@@ -57,14 +57,15 @@ namespace lignum {
             uint8_t flags = 0;
             uint32_t endian_check = 0x12345678;
 
-            double base_score = 0.0;
+            double reserved0 = 0.0;
             uint64_t n_nodes = 0;
             uint64_t n_offsets = 0;
             uint64_t n_leaves = 0;
 
             double sigmoid = 1.0;
             uint32_t n_features = 0;
-            uint8_t padding[4] = {0};
+            uint16_t n_outputs = 1;
+            uint8_t padding[2] = {0};
         };
         static_assert(sizeof(FileHeader) == 64, "FileHeader must stay 64 bytes");
 
@@ -156,7 +157,7 @@ namespace lignum {
         if (!out) throw std::runtime_error("Can't save the file.");
 
         FileHeader header;
-        header.base_score = base_score;
+        header.n_outputs = static_cast<uint16_t>(n_outputs);
         header.sigmoid = sigmoid;
         header.transform = transform;
         header.flags = static_cast<uint8_t>((float32 ? header_flags::Float32 : 0) | (has_zero_missing ? header_flags::ZeroMissing : 0));
@@ -171,6 +172,10 @@ namespace lignum {
         padded_write(out, reinterpret_cast<const char*>(tree_offsets), n_offsets * sizeof(int32_t));
         padded_write(out, reinterpret_cast<const char*>(leaf_values), n_leaves * sizeof(double));
         padded_write(out, reinterpret_cast<const char*>(tree_kinds), n_offsets * sizeof(uint8_t));
+        padded_write(out, reinterpret_cast<const char*>(base_scores), n_outputs * sizeof(double));
+        if (n_outputs > 1) {
+            padded_write(out, reinterpret_cast<const char*>(tree_outputs), n_offsets * sizeof(uint16_t));
+        }
     }
 
     Model load_binary(const std::string& filepath) {
@@ -191,20 +196,24 @@ namespace lignum {
             throw std::runtime_error("Endianness mismatch.");
         }
 
-        if (header.version_major != 0 || header.version_minor != 3) {
+        if (header.version_major != 0 || header.version_minor != 4) {
             throw std::runtime_error("Unsupported lignum binary format version " + std::to_string(header.version_major) + "." +
                                      std::to_string(header.version_minor) + "; re-export the model from JSON.");
         }
 
         const size_t expected_size = sizeof(FileHeader) + align(header.n_nodes * sizeof(KNode)) +
                                      align(header.n_offsets * sizeof(int32_t)) + align(header.n_leaves * sizeof(double)) +
-                                     header.n_offsets * sizeof(uint8_t);
+                                     align(header.n_offsets * sizeof(uint8_t)) + align(header.n_outputs * sizeof(double)) +
+                                     (header.n_outputs > 1 ? header.n_offsets * sizeof(uint16_t) : 0);
+        if (header.n_outputs == 0) {
+            throw std::runtime_error("Binary file declares zero outputs.");
+        }
         if (binary_data->size < expected_size) {
             throw std::runtime_error("Binary file is truncated or corrupted.");
         }
 
         Model model;
-        model.base_score = header.base_score;
+        model.n_outputs = header.n_outputs;
         model.sigmoid = header.sigmoid;
         model.transform = header.transform;
         model.float32 = (header.flags & header_flags::Float32) != 0;
@@ -231,6 +240,12 @@ namespace lignum {
         }
         if (model.n_offsets > 0) {
             model.tree_kinds = reinterpret_cast<const uint8_t*>(binary_data->data + offset);
+            offset += align(model.n_offsets * sizeof(uint8_t));
+        }
+        model.base_scores = reinterpret_cast<const double*>(binary_data->data + offset);
+        offset += align(model.n_outputs * sizeof(double));
+        if (model.n_outputs > 1 && model.n_offsets > 0) {
+            model.tree_outputs = reinterpret_cast<const uint16_t*>(binary_data->data + offset);
         }
 
         return model;

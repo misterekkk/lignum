@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace lignum {
 
@@ -33,7 +34,8 @@ namespace lignum {
 
     // Model-wide metadata filled in by the parsers.
     struct ModelInfo {
-        double base_score = 0.0;
+        std::vector<double> base_scores{0.0};  // one per output (class), in margin space
+        std::vector<uint16_t> tree_outputs;     // output of every tree; empty when there is one output
         double sigmoid = 1.0;
         uint8_t transform = 2;
         Precision precision = Precision::Float64;

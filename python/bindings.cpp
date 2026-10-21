@@ -28,12 +28,15 @@ NB_MODULE(_core, m) {
 
             size_t n_samples = X.shape(0);
             size_t n_features = X.shape(1);
+            size_t width = self.output_width(raw_score);
 
-            double* out_data = new double[n_samples];
+            double* out_data = new double[n_samples * width];
 
             nb::capsule owner(out_data, [](void *p) noexcept { delete[] static_cast<double*>(p); });
 
-            nb::ndarray<nb::numpy, double, nb::c_contig, nb::device::cpu> out_preds(out_data, { n_samples }, owner);
+            // 1-D for single-output models (and argmax), 2-D (n_samples, n_outputs) otherwise.
+            size_t shape[2] = {n_samples, width};
+            nb::ndarray<nb::numpy, double, nb::c_contig, nb::device::cpu> out_preds(out_data, width == 1 ? 1 : 2, shape, owner);
 
             {
                 nb::gil_scoped_release release;
@@ -53,7 +56,9 @@ NB_MODULE(_core, m) {
         nb::arg("strategy") = "auto",
         "Returns model prediction for input data.")
         
-        .def("save", &Model::save, nb::arg("filepath"), "Saves lignum format model to binary.");
+        .def("save", &Model::save, nb::arg("filepath"), "Saves lignum format model to binary.")
+        .def_prop_ro("n_outputs", [](const Model& self) { return self.n_outputs; }, "Number of outputs (classes for multiclass models).")
+        .def_prop_ro("n_features", [](const Model& self) { return self.n_features; }, "Minimum number of input columns.");
     
     m.def("load", &lignum::load, nb::arg("filepath"), nb::arg("format") = "auto", "Loads the JSON or binary file format.");
 }

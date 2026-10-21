@@ -18,6 +18,8 @@ namespace lignum {
         constexpr uint8_t Exp = 1;
         constexpr uint8_t Identity = 2;
         constexpr uint8_t Log1pExp = 3;
+        constexpr uint8_t Softmax = 4;  // across outputs
+        constexpr uint8_t Argmax = 5;   // index of the largest margin (XGBoost multi:softmax); one output column
     } // namespace transform
 
     // How predict() spreads work across threads. All strategies return identical results.
@@ -62,7 +64,9 @@ namespace lignum {
             std::vector<KNode> k_nodes;
             std::vector<int32_t> tree_offsets;
             std::vector<uint8_t> tree_kinds;
+            std::vector<uint16_t> tree_outputs;
             std::vector<double> leaf_values;
+            std::vector<double> base_scores;
     };
 
     class Model {
@@ -71,13 +75,15 @@ namespace lignum {
             size_t n_nodes = 0;
 
             const int32_t* tree_offsets = nullptr;
-            const uint8_t* tree_kinds = nullptr;  // n_offsets entries, see tree_kind
+            const uint8_t* tree_kinds = nullptr;     // n_offsets entries, see tree_kind
+            const uint16_t* tree_outputs = nullptr;  // n_offsets entries when n_outputs > 1: output (class) of each tree
             size_t n_offsets = 0;
 
             const double* leaf_values = nullptr;
             size_t n_leaves = 0;
 
-            double base_score = 0.0;
+            const double* base_scores = nullptr;  // n_outputs entries, margin space
+            uint32_t n_outputs = 1;                // classes for multiclass models, otherwise 1
             double sigmoid = 1.0;
             uint8_t transform = transform::Identity;
             bool float32 = false;           // accumulate and transform in float32 (XGBoost semantics)
@@ -87,6 +93,12 @@ namespace lignum {
             std::shared_ptr<const Data> data;
 
             Model() = default;
+
+            // Values per row written by predict (raw_score=false) or predict_raw (raw_score=true).
+            // out_preds must hold n_samples * output_width(raw_score) doubles, row-major.
+            size_t output_width(bool raw_score) const {
+                return (!raw_score && transform == transform::Argmax) ? 1 : n_outputs;
+            }
 
             // Throws std::invalid_argument if n_features is smaller than the model requires.
             void predict(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds,

@@ -72,23 +72,26 @@ namespace lignum {
                 return node;
             }
 
+            double parse_sigmoid(std::string_view objective) {
+                const auto pos = objective.find("sigmoid:");
+                if (pos == std::string_view::npos) return 1.0;
+                return std::stod(std::string(objective.substr(pos + 8)));
+            }
+
             void parse_objective(std::string_view objective, ModelInfo& info) {
                 const std::string_view name = objective.substr(0, objective.find(' '));
 
-                if (name == "binary") {
-                    info.transform = transform::Sigmoid;
-                    const auto pos = objective.find("sigmoid:");
-                    if (pos != std::string_view::npos) {
-                        info.sigmoid = std::stod(std::string(objective.substr(pos + 8)));
-                    }
+                if (name == "binary" || name == "multiclassova" || name == "ovr" || name == "multiclass_ova" || name == "ova") {
+                    info.transform = transform::Sigmoid;  // per class for one-vs-all
+                    info.sigmoid = parse_sigmoid(objective);
+                } else if (name == "multiclass" || name == "softmax") {
+                    info.transform = transform::Softmax;
                 } else if (name == "cross_entropy" || name == "xentropy") {
                     info.transform = transform::Sigmoid;
                 } else if (name == "cross_entropy_lambda" || name == "xentlambda") {
                     info.transform = transform::Log1pExp;
                 } else if (name == "poisson" || name == "gamma" || name == "tweedie") {
                     info.transform = transform::Exp;
-                } else if (name == "multiclass" || name == "multiclassova" || name == "softmax" || name == "ovr") {
-                    throw std::runtime_error("Multiclass models are not supported yet.");
                 } else {
                     info.transform = transform::Identity;
                 }
@@ -101,13 +104,19 @@ namespace lignum {
             std::vector<std::unique_ptr<TempBinNode>> forest;
             simdjson::dom::element doc = parser.load(filepath);
 
-            auto num_class_elem = doc["num_class"];
-            if (num_class_elem.error() == simdjson::SUCCESS && num_class_elem.get_int64() > 1) {
-                throw std::runtime_error("Multiclass models are not supported yet.");
-            }
-
             info = ModelInfo{};
             info.precision = Precision::Float64;
+
+            int64_t n_outputs = 1;
+            auto per_iteration = doc["num_tree_per_iteration"];
+            if (per_iteration.error() == simdjson::SUCCESS) {
+                n_outputs = per_iteration.get_int64();
+            } else if (doc["num_class"].error() == simdjson::SUCCESS) {
+                n_outputs = doc["num_class"].get_int64();
+            }
+            if (n_outputs < 1 || n_outputs > 65535) {
+                throw std::runtime_error("Unsupported number of trees per iteration: " + std::to_string(n_outputs) + ".");
+            }
 
             auto obj_elem = doc["objective"];
             if (obj_elem.error() == simdjson::SUCCESS) {
@@ -117,6 +126,14 @@ namespace lignum {
             for (simdjson::dom::element tree_obj : doc["tree_info"]) {
                 simdjson::dom::object tree_structure = tree_obj["tree_structure"].get_object();
                 forest.push_back(parse_lgbm_node(tree_structure));
+            }
+
+            // Trees are stored iteration by iteration, one per class: tree t belongs to class t % K.
+            info.base_scores.assign(static_cast<size_t>(n_outputs), 0.0);
+            if (n_outputs > 1) {
+                for (size_t t = 0; t < forest.size(); t++) {
+                    info.tree_outputs.push_back(static_cast<uint16_t>(t % static_cast<size_t>(n_outputs)));
+                }
             }
 
             return forest;

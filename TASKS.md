@@ -62,10 +62,14 @@ Result (`benchmarks/results/2026-10-21-m4-stage1b.md`): 1M rows 0.73 s (LightGBM
 
 ## Stage 2 — Multiclass
 
-- [ ] LightGBM (`t % num_tree_per_iteration`) and XGBoost (`tree_info`)
-- [ ] `tree_outputs[]` (class per tree) in `Model` and the binary format
-- [ ] `n_samples × K` output, softmax / per-class sigmoid (`multiclassova`), per-class base score
-- [ ] Python returns 2-D for K > 1
+- [x] `tree_outputs[]` (class per tree) and `base_scores[]` in `Model` and the binary format (0.4)
+- [x] LightGBM (`t % num_tree_per_iteration`) and XGBoost (`tree_info`, vector `base_score`)
+- [x] `n_samples × K` output; softmax (LightGBM double; XGBoost float max/exp, double sum, float division — verified), per-class sigmoid (`multiclassova`, `sigmoid:`), XGBoost `multi:softmax` = argmax of margins
+- [x] Python returns 2-D for K > 1 (`Model.n_outputs`), C API `LignumModelOutputWidth`
+- [x] Parity tests: K = 3 and 10, both strategies, single rows, binary round trip
+- [x] Benchmark (`benchmarks/results/2026-10-21-m4-stage2-multi.md`): 10 classes × 100 iterations, 1M rows: lignum 0.77 s (LightGBM) / 0.75 s (XGBoost) vs lleaves 0.95 s, tuned TL2cgen 2.2–2.3 s; only lignum is bit-exact on both
+- [ ] Multi-output overhead: 0.77 s vs 0.71 s for a binary model of the same size (read-modify-write of `out[i*K + c]` per leaf); try per-block accumulators
+- [ ] Note: when a few features dominate the splits, compiled branchy code (lleaves) gets faster (0.66 s vs our 0.75 s, see `*-multi-4features.md`)
 
 ## Stage 3 — LightGBM categorical splits (exact semantics)
 

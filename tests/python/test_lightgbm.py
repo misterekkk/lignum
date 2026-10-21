@@ -53,22 +53,6 @@ def test_lightgbm_objectives(tmp_path, base_data, objective, model_type, positiv
     actual_out = lg_model.predict(X, raw_score=False)
     np.testing.assert_array_equal(actual_out, expected_out)
 
-def test_lightgbm_rejects_multiclass(tmp_path, base_data):
-    X, _, _ = base_data
-    y_multi = np.random.randint(0, 3, 100).astype(np.float32)
-    
-    model = lgb.LGBMClassifier(n_estimators=2, max_depth=2, objective="multiclass")
-    model.fit(X, y_multi)
-    
-    model_path = str(tmp_path / "lgb_multi.json")
-    model_dict = model.booster_.dump_model()
-    with open(model_path, "w") as f:
-        json.dump(model_dict, f)
-    
-    with pytest.raises(RuntimeError, match="Multiclass models are not supported yet"):
-        lg.load(model_path, format="lightgbm")
-
-
 def test_lightgbm_rejects_string_categorical(tmp_path):
     cats = ["A", "B", "C", "D", "E", "F"] * 100
     df = pd.DataFrame({

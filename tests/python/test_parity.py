@@ -204,3 +204,63 @@ def test_rejects_unknown_strategy(tmp_path, data):
     model = lgb_to_lignum(booster, tmp_path)
     with pytest.raises(ValueError, match="strategy must be one of"):
         model.predict(data["X"][:5], strategy="fastest")
+
+
+def multiclass_target(X, n_classes):
+    score = X[:, 0] + 0.5 * np.nan_to_num(X[:, 1])
+    return np.digitize(score, np.quantile(score, np.linspace(0, 1, n_classes + 1)[1:-1])).astype(int)
+
+
+@pytest.mark.parametrize("n_classes", [3, 10])
+@pytest.mark.parametrize("objective, extra", [("multiclass", {}), ("multiclassova", {}), ("multiclassova", {"sigmoid": 0.6})])
+def test_lightgbm_multiclass_bit_exact(tmp_path, data, n_classes, objective, extra):
+    X = data["X_nan"]
+    params = {"objective": objective, "num_class": n_classes, "num_leaves": 15, "verbose": -1, **extra}
+    booster = lgb.train(params, lgb.Dataset(X, multiclass_target(X, n_classes)), num_boost_round=25)
+    model = lgb_to_lignum(booster, tmp_path)
+    assert model.n_outputs == n_classes
+
+    X_test = stress_inputs(X, lgb_thresholds(booster), data["rng"])
+    for strategy in ["serial", "rows"]:
+        np.testing.assert_array_equal(model.predict(X_test, raw_score=True, strategy=strategy), booster.predict(X_test, raw_score=True))
+        np.testing.assert_array_equal(model.predict(X_test, strategy=strategy), booster.predict(X_test))
+    np.testing.assert_array_equal(model.predict(X_test[:1]), booster.predict(X_test[:1]))
+
+
+@pytest.mark.parametrize("n_classes", [3, 10])
+@pytest.mark.parametrize("objective", ["multi:softprob", "multi:softmax"])
+def test_xgboost_multiclass_bit_exact(tmp_path, data, n_classes, objective):
+    X = data["X_nan"]
+    params = {"objective": objective, "num_class": n_classes, "max_depth": 4}
+    booster = xgb.train(params, xgb.DMatrix(X, multiclass_target(X, n_classes)), num_boost_round=25)
+    path = tmp_path / "xgb.json"
+    booster.save_model(str(path))
+    model = lg.load(str(path), format="xgboost")
+    assert model.n_outputs == n_classes
+
+    X_test = stress_inputs(X, xgb_thresholds(path), data["rng"])
+    dtest = xgb.DMatrix(X_test)
+    for strategy in ["serial", "rows"]:
+        np.testing.assert_array_equal(model.predict(X_test, raw_score=True, strategy=strategy), booster.predict(dtest, output_margin=True))
+        np.testing.assert_array_equal(model.predict(X_test, strategy=strategy), booster.predict(dtest))
+    np.testing.assert_array_equal(model.predict(X_test[:1]), booster.predict(xgb.DMatrix(X_test[:1])))
+
+
+@pytest.mark.parametrize("fmt", ["lightgbm", "xgboost"])
+def test_multiclass_binary_roundtrip(tmp_path, data, fmt):
+    X = data["X_nan"]
+    y = multiclass_target(X, 4)
+    if fmt == "lightgbm":
+        booster = lgb.train({"objective": "multiclass", "num_class": 4, "verbose": -1}, lgb.Dataset(X, y), num_boost_round=10)
+        model = lgb_to_lignum(booster, tmp_path)
+    else:
+        booster = xgb.train({"objective": "multi:softprob", "num_class": 4, "max_depth": 3}, xgb.DMatrix(X, y), num_boost_round=10)
+        path = tmp_path / "xgb.json"
+        booster.save_model(str(path))
+        model = lg.load(str(path), format="xgboost")
+    bin_path = tmp_path / "model.bin"
+    model.save(str(bin_path))
+    restored = lg.load(str(bin_path))
+    assert restored.n_outputs == 4
+    np.testing.assert_array_equal(restored.predict(X), model.predict(X))
+    np.testing.assert_array_equal(restored.predict(X, raw_score=True), model.predict(X, raw_score=True))

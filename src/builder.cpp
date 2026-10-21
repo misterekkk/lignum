@@ -29,8 +29,16 @@ namespace lignum {
             data->tree_kinds.push_back(stats.tree_zero_missing ? tree_kind::ZeroMissing : tree_kind::Numeric);
         }
 
+        data->base_scores = info.base_scores;
+        data->tree_outputs = info.tree_outputs;
+        if (data->base_scores.empty() || (data->base_scores.size() > 1 && data->tree_outputs.size() != data->tree_offsets.size())) {
+            throw std::runtime_error("Inconsistent multi-output model.");
+        }
+
         Model model;
-        model.base_score = info.base_score;
+        model.n_outputs = static_cast<uint32_t>(data->base_scores.size());
+        model.base_scores = data->base_scores.data();
+        model.tree_outputs = model.n_outputs > 1 ? data->tree_outputs.data() : nullptr;
         model.sigmoid = info.sigmoid;
         model.transform = info.transform;
         model.float32 = info.precision == Precision::Float32;

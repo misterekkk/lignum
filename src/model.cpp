@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 #ifdef _MSC_VER
     using omp_iterator_t = ptrdiff_t;
@@ -30,8 +31,10 @@
 
 #if defined(_MSC_VER)
     #define LIGNUM_INLINE __forceinline
+    #define LIGNUM_LAMBDA_INLINE
 #else
     #define LIGNUM_INLINE inline __attribute__((always_inline))
+    #define LIGNUM_LAMBDA_INLINE __attribute__((always_inline))
 #endif
 
 namespace lignum {
@@ -137,17 +140,29 @@ namespace lignum {
         // measured and lost to Serial below 8 rows and to Rows above, so it is not offered.
         // `Mixed`: the model has trees of kind ZeroMissing. Only then does the kernel branch per
         // tree; numeric trees always take the plain traversal.
-        template <typename Acc, bool Mixed>
+        // `Multi`: the model has several outputs (classes). Row i's outputs live in
+        // out[i * K .. i * K + K), and each tree adds to its own output, still in model order.
+        template <typename Acc, bool Mixed, bool Multi>
         class Kernel {
             public:
                 Kernel(const Model& model, const double* X, size_t n_features, bool raw_score)
                     : m_(model), X_(X), n_features_(n_features), raw_score_(raw_score) {}
 
-                // Rows [i_begin, i_end): base score, all trees in tiles of T_BLOCK, transform.
+                // Rows [i_begin, i_end): base scores, all trees in tiles of T_BLOCK, transform.
                 void predict_rows(size_t i_begin, size_t i_end, double* __restrict__ out) const {
-                    for (size_t i = i_begin; i < i_end; i++) out[i] = static_cast<double>(base());
+                    if constexpr (Multi) {
+                        const size_t K = m_.n_outputs;
+                        for (size_t i = i_begin; i < i_end; i++) {
+                            for (size_t c = 0; c < K; c++) out[i * K + c] = static_cast<double>(static_cast<Acc>(m_.base_scores[c]));
+                        }
+                    } else {
+                        const double base = static_cast<double>(static_cast<Acc>(m_.base_scores[0]));
+                        for (size_t i = i_begin; i < i_end; i++) out[i] = base;
+                    }
                     for (size_t t_start = 0; t_start < m_.n_offsets; t_start += T_BLOCK) {
-                        accumulate(i_begin, i_end, t_start, std::min(t_start + T_BLOCK, m_.n_offsets), out);
+                        const size_t t_end = std::min(t_start + T_BLOCK, m_.n_offsets);
+                        if constexpr (Multi) accumulate_multi(i_begin, i_end, t_start, t_end, out);
+                        else                 accumulate(i_begin, i_end, t_start, t_end, out);
                     }
                     finish(i_begin, i_end, out);
                 }
@@ -157,8 +172,6 @@ namespace lignum {
                 const double* X_;
                 size_t n_features_;
                 bool raw_score_;
-
-                Acc base() const { return static_cast<Acc>(m_.base_score); }
 
                 // True if any of trees [t, t + count) needs the zero-as-missing traversal.
                 static LIGNUM_INLINE bool is_zero_missing(const uint8_t* kinds, size_t t, size_t count) {
@@ -170,6 +183,7 @@ namespace lignum {
                         return any & tree_kind::ZeroMissing;
                     }
                 }
+
                 const double* row(size_t i) const { return &X_[i * n_features_]; }
 
                 // Adds trees [t_begin, t_end) to the running sums of rows [i_begin, i_end).
@@ -222,27 +236,105 @@ namespace lignum {
                     }
                 }
 
-                void finish(size_t i_begin, size_t i_end, double* __restrict__ out) const {
-                    if (raw_score_ || m_.transform == transform::Identity) return;
-                    for (size_t i = i_begin; i < i_end; i++) {
-                        if constexpr (std::is_same_v<Acc, float>) {
-                            out[i] = static_cast<double>(apply_transform(static_cast<float>(out[i]), m_.transform));
-                        } else {
-                            out[i] = apply_transform(out[i], m_.transform, m_.sigmoid);
+                // Multi-output version of accumulate(): each leaf goes to its tree's output.
+                void accumulate_multi(size_t i_begin, size_t i_end, size_t t_begin, size_t t_end, double* __restrict__ out) const {
+                    const KNode* __restrict__ nodes = m_.k_nodes;
+                    const int32_t* __restrict__ roots = m_.tree_offsets;
+                    const uint8_t* __restrict__ kinds = m_.tree_kinds;
+                    const uint16_t* __restrict__ outputs = m_.tree_outputs;
+                    const double* __restrict__ leaf_values = m_.leaf_values;
+                    const size_t K = m_.n_outputs;
+
+                    auto add = [&](size_t i, size_t t, int32_t node) LIGNUM_LAMBDA_INLINE {
+                        double& slot = out[i * K + outputs[t]];
+                        slot = static_cast<double>(static_cast<Acc>(slot) + static_cast<Acc>(leaf_value(leaf_values, node)));
+                    };
+
+                    const size_t unrolled_end = i_begin + ((i_end - i_begin) / 4) * 4;
+                    for (size_t i = i_begin; i < unrolled_end; i += 4) {
+                        const double *r0 = row(i), *r1 = row(i + 1), *r2 = row(i + 2), *r3 = row(i + 3);
+                        for (size_t t = t_begin; t < t_end; t++) {
+                            int32_t n0, n1, n2, n3;
+                            if (is_zero_missing(kinds, t, 1)) walk4<true>(nodes, roots[t], r0, r1, r2, r3, n0, n1, n2, n3);
+                            else                              walk4<false>(nodes, roots[t], r0, r1, r2, r3, n0, n1, n2, n3);
+                            add(i, t, n0);
+                            add(i + 1, t, n1);
+                            add(i + 2, t, n2);
+                            add(i + 3, t, n3);
                         }
+                    }
+                    const size_t trees_unrolled_end = t_begin + ((t_end - t_begin) / 4) * 4;
+                    for (size_t i = unrolled_end; i < i_end; i++) {
+                        const double* r = row(i);
+                        for (size_t t = t_begin; t < trees_unrolled_end; t += 4) {
+                            int32_t n0, n1, n2, n3;
+                            if (is_zero_missing(kinds, t, 4)) walk4_trees<true>(nodes, &roots[t], r, n0, n1, n2, n3);
+                            else                              walk4_trees<false>(nodes, &roots[t], r, n0, n1, n2, n3);
+                            add(i, t, n0);
+                            add(i, t + 1, n1);
+                            add(i, t + 2, n2);
+                            add(i, t + 3, n3);
+                        }
+                        for (size_t t = trees_unrolled_end; t < t_end; t++) {
+                            add(i, t, is_zero_missing(kinds, t, 1) ? walk1<true>(nodes, roots[t], r) : walk1<false>(nodes, roots[t], r));
+                        }
+                    }
+                }
+
+                void finish(size_t i_begin, size_t i_end, double* __restrict__ out) const {
+                    const uint8_t tr = m_.transform;
+                    if (raw_score_ || tr == transform::Identity || tr == transform::Argmax) return;
+
+                    const size_t K = Multi ? m_.n_outputs : 1;
+                    if (Multi && tr == transform::Softmax) {
+                        for (size_t i = i_begin; i < i_end; i++) softmax(&out[i * K], K);
+                        return;
+                    }
+                    for (size_t j = i_begin * K; j < i_end * K; j++) {
+                        if constexpr (std::is_same_v<Acc, float>) {
+                            out[j] = static_cast<double>(apply_transform(static_cast<float>(out[j]), tr));
+                        } else {
+                            out[j] = apply_transform(out[j], tr, m_.sigmoid);
+                        }
+                    }
+                }
+
+                // LightGBM: everything in double. XGBoost: max and exp in float, the sum in
+                // double, the division by float(sum) in float (verified bit-exact).
+                static void softmax(double* v, size_t K) {
+                    if constexpr (std::is_same_v<Acc, float>) {
+                        float wmax = static_cast<float>(v[0]);
+                        for (size_t c = 1; c < K; c++) wmax = std::max(wmax, static_cast<float>(v[c]));
+                        double wsum = 0.0;
+                        for (size_t c = 0; c < K; c++) {
+                            const float e = std::exp(static_cast<float>(v[c]) - wmax);
+                            v[c] = static_cast<double>(e);
+                            wsum += e;
+                        }
+                        const float fsum = static_cast<float>(wsum);
+                        for (size_t c = 0; c < K; c++) v[c] = static_cast<double>(static_cast<float>(v[c]) / fsum);
+                    } else {
+                        double wmax = v[0];
+                        for (size_t c = 1; c < K; c++) wmax = std::max(wmax, v[c]);
+                        double wsum = 0.0;
+                        for (size_t c = 0; c < K; c++) {
+                            v[c] = std::exp(v[c] - wmax);
+                            wsum += v[c];
+                        }
+                        for (size_t c = 0; c < K; c++) v[c] /= wsum;
                     }
                 }
         };
 
-        template <typename Acc, bool Mixed>
-        void run_serial(const Kernel<Acc, Mixed>& kernel, size_t n_samples, double* out) {
+        template <typename K>
+        void run_serial(const K& kernel, size_t n_samples, double* out) {
             for (size_t i_start = 0; i_start < n_samples; i_start += N_BLOCK) {
                 kernel.predict_rows(i_start, std::min<size_t>(i_start + N_BLOCK, n_samples), out);
             }
         }
 
-        template <typename Acc, bool Mixed>
-        void run_rows(const Kernel<Acc, Mixed>& kernel, size_t n_samples, double* out, int n_threads) {
+        template <typename K>
+        void run_rows(const K& kernel, size_t n_samples, double* out, int n_threads) {
             // Enough blocks for every thread (two each, for balance across P/E cores), but never
             // larger than N_BLOCK, which keeps a tile of trees hot in cache for the whole block.
             const size_t per_thread = (n_samples + 2 * n_threads - 1) / (2 * n_threads);
@@ -263,16 +355,34 @@ namespace lignum {
             return Strategy::Rows;
         }
 
-        template <typename Acc, bool Mixed>
+        template <typename Acc, bool Mixed, bool Multi>
         void run(const Model& model, const double* X, size_t n_samples, size_t n_features, double* out,
                  int n_jobs, Strategy strategy, bool raw_score) {
-            const Kernel<Acc, Mixed> kernel(model, X, n_features, raw_score);
+            const Kernel<Acc, Mixed, Multi> kernel(model, X, n_features, raw_score);
             const int n_threads = resolve_threads(n_jobs);
             if (strategy == Strategy::Auto) strategy = choose_strategy(n_samples, n_threads);
 
             switch (strategy) {
                 case Strategy::Serial: run_serial(kernel, n_samples, out); break;
                 default:               run_rows(kernel, n_samples, out, n_threads); break;
+            }
+        }
+
+        template <typename Acc, bool Mixed>
+        void run_outputs(const Model& model, const double* X, size_t n_samples, size_t n_features, double* out,
+                         int n_jobs, Strategy strategy, bool raw_score) {
+            if (model.n_outputs > 1) run<Acc, Mixed, true>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+            else                     run<Acc, Mixed, false>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+        }
+
+        void run_any(const Model& model, const double* X, size_t n_samples, size_t n_features, double* out,
+                     int n_jobs, Strategy strategy, bool raw_score) {
+            if (model.float32) {
+                if (model.has_zero_missing) run_outputs<float, true>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+                else                        run_outputs<float, false>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+            } else {
+                if (model.has_zero_missing) run_outputs<double, true>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+                else                        run_outputs<double, false>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
             }
         }
 
@@ -284,12 +394,18 @@ namespace lignum {
             }
             if (n_samples == 0) return;
 
-            if (model.float32) {
-                if (model.has_zero_missing) run<float, true>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
-                else                        run<float, false>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
-            } else {
-                if (model.has_zero_missing) run<double, true>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
-                else                        run<double, false>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+            if (raw_score || model.transform != transform::Argmax) {
+                run_any(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+                return;
+            }
+
+            // Argmax narrows K margins to one column, so it cannot be done in place.
+            const size_t K = model.n_outputs;
+            std::vector<double> margins(n_samples * K);
+            run_any(model, X, n_samples, n_features, margins.data(), n_jobs, strategy, true);
+            for (size_t i = 0; i < n_samples; i++) {
+                const double* row = &margins[i * K];
+                out[i] = static_cast<double>(std::max_element(row, row + K) - row);
             }
         }
 

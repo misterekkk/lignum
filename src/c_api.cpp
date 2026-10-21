@@ -54,6 +54,12 @@ int LignumModelNumFeatures(LignumModelHandle handle, size_t* out_n_features) {
     return 0;
 }
 
+int LignumModelOutputWidth(LignumModelHandle handle, int raw_score, size_t* out_width) {
+    if (!handle || !out_width) return fail("LignumModelOutputWidth: null argument.");
+    *out_width = as_model(handle)->output_width(raw_score != 0);
+    return 0;
+}
+
 int LignumModelPredict(LignumModelHandle handle, const double* X, size_t n_samples, size_t n_features,
                        int raw_score, int n_jobs, int strategy, double* out_preds) {
     if (!handle) return fail("LignumModelPredict: null handle.");
