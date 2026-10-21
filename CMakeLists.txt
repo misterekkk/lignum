@@ -33,8 +33,9 @@ add_library(lignum STATIC
     extern/simdjson/simdjson.cpp
 )
 
-# Only the C API is exported from shared objects; C++ internals stay hidden.
-set_target_properties(lignum PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+# Only the C API is exported from shared objects; C++ internals stay hidden. The static archive gets
+# its own file name: on Windows the shared library's import library is lignum.lib.
+set_target_properties(lignum PROPERTIES OUTPUT_NAME lignum_static CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 
 target_include_directories(lignum
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
