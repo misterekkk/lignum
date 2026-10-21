@@ -52,7 +52,11 @@ non-bitset slots read a valid address).
   (the model has trees that are not plain numeric). With `Mixed`, the traversal is specialised per
   tree from `tree_kinds[]` (bits `ZeroMissing`, `Categorical`); otherwise there is no per-tree branch.
 - In categorical trees each slot branches on its kind (structural, predictable) and the categorical
-  test itself is branch-free (`cat_dir`), because NaN/range/category branches depend on the data. The traversal (`step`, `walk4`, `walk1`) is force-inlined and works
+  test itself is branch-free (`cat_dir`), because NaN/range/category branches depend on the data.
+- Two step variants: branch-free (all three comparisons, default for numeric trees in 4-row walks) and
+  branchy (branch on the root comparison, evaluate only the taken child). Branchy is used for leftover
+  rows (fewer than four, e.g. one row) everywhere and for 4-row walks of categorical trees except on
+  Apple (`LIGNUM_BRANCHY_TAIL`, `LIGNUM_BRANCHY_CAT`); choices measured on x86-64, aarch64 and M4. The traversal (`step`, `walk4`, `walk1`) is force-inlined and works
   on local copies of the model pointers; going through `Model&` members cost ~7-13%.
 - Leaves are added to a running sum loaded from `out_preds[i]`, in model order, so floating point
   results are identical to the source library.

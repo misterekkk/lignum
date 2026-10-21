@@ -124,19 +124,24 @@ namespace lignum {
             return cmp_dir<(Kind & tree_kind::ZeroMissing) != 0>(x, kn.thresholds[k], kn.dirs[k]);
         }
 
-        // Experimental traversal choices (see TASKS.md); off by default.
-        //   LIGNUM_BRANCHY_CAT:  branchy steps in trees with categorical splits (4-row walks too)
-        //   LIGNUM_BRANCHY_TAIL: branchy steps for leftover rows (fewer than four, e.g. one row)
-        #ifdef LIGNUM_BRANCHY_CAT
-            constexpr bool kBranchyCat = true;
-        #else
-            constexpr bool kBranchyCat = false;
+        // Where the branchy traversal is used (measured, see TASKS.md "Branchy traversal"):
+        //   LIGNUM_BRANCHY_TAIL (default 1): leftover rows (fewer than four, e.g. a single row);
+        //     faster everywhere (one row: -16..-18% on x86-64/aarch64 Linux, -16% on M4).
+        //   LIGNUM_BRANCHY_CAT (default 1, 0 on Apple): 4-row walks in trees with categorical
+        //     splits; -17% on x86-64, -14% on aarch64 Linux, but ~+20% on M4.
+        // Override with -DLIGNUM_BRANCHY_TAIL=0/1 and -DLIGNUM_BRANCHY_CAT=0/1.
+        #ifndef LIGNUM_BRANCHY_TAIL
+            #define LIGNUM_BRANCHY_TAIL 1
         #endif
-        #ifdef LIGNUM_BRANCHY_TAIL
-            constexpr bool kBranchyTail = true;
-        #else
-            constexpr bool kBranchyTail = false;
+        #ifndef LIGNUM_BRANCHY_CAT
+            #if defined(__APPLE__)
+                #define LIGNUM_BRANCHY_CAT 0
+            #else
+                #define LIGNUM_BRANCHY_CAT 1
+            #endif
         #endif
+        constexpr bool kBranchyTail = LIGNUM_BRANCHY_TAIL != 0;
+        constexpr bool kBranchyCat = LIGNUM_BRANCHY_CAT != 0;
 
         template <uint8_t Kind>
         constexpr bool branchy_rows = kBranchyCat && (Kind & tree_kind::Categorical) != 0;

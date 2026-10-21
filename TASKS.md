@@ -118,7 +118,28 @@ on x86-64 lleaves beats lignum on large LightGBM batches (0.45 s vs 0.72 s; cate
 on aarch64 Linux too (0.33 vs 0.44 s). lignum still wins vs TL2cgen (1.5×), native libraries, small
 batches (100 rows: 268 µs vs 403 TL2cgen / 668 lleaves) and is the only bit-exact engine.
 
+### Branchy traversal (CI `bench-lleaves.yml`, 300k rows, 500 trees, 4 threads)
+
+The default step evaluates all three comparisons of a KNode branch-free. A branchy step (branch on the
+root comparison, evaluate only the taken child) does two comparisons and lets the CPU speculate:
+
+| | default | branchy everywhere | hybrid (kept) |
+|---|---:|---:|---:|
+| x86-64 numeric batch | **0.76–0.84 s** | 1.12 s | 0.83 s |
+| x86-64 categorical batch | 2.71–2.76 s | 2.23 s | **2.28 s** |
+| x86-64 one row (numeric / categorical) | 7.6 / 18.7 µs | 4.8 / 10.1 µs | **6.2 / 13.2 µs** |
+| aarch64 numeric batch | **0.44 s** | 0.60 s | 0.44 s |
+| aarch64 categorical batch | 1.59 s | 1.39 s | **1.37 s** |
+| M4 one row (numeric / categorical) | 7.9 / 17.6 µs | — | **6.6 / 13.2 µs** |
+
+Kept: branchy for leftover rows everywhere, branchy in categorical trees except on Apple (M4 is ~20%
+slower there). Rejected on M4: prefetching a node's children (+30%).
+
+Flags do not explain the gap to lleaves: `LIGNUM_NATIVE=ON` gives ~3% on x86-64 and nothing on aarch64.
+
 Weak spots:
+- [ ] Categorical comparison cost: convert categorical features to integer codes once per row block instead of in every categorical slot
+- [ ] Exact input binning: per-feature bin index (uint16) computed once per row; integer comparisons, 3 tree levels per 64-byte node, half the model size. Biggest expected win for large batches on servers
 - [ ] Large LightGBM batches on x86-64 / Linux aarch64 vs lleaves (host-tuned): measure `LIGNUM_NATIVE=ON` on the same runner, then profile the kernel on x86 (register pressure of 4-way interleave with 16 GPRs, N_BLOCK/T_BLOCK)
 - [ ] Shallow trees: a depth-3 tree costs 73% of a depth-6 one (per-tree overhead: root, loop, leaf load, sum; the last KNode level is half empty). Ideas: single-level node for the last odd level, fixed-depth unrolled traversal for complete trees, several trees per loop iteration
 - [ ] Single row on large models (5000 trees, ~6.5 MB): 39 µs vs 23–25 µs (TL2cgen) — memory-latency bound

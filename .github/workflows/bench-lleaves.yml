@@ -24,8 +24,8 @@ concurrency:
 
 env:
   # Compile flags of the experimental kernel variant measured next to the default build
-  # (empty = skip). Current: branchy steps only in categorical trees and for leftover/single rows.
-  EXPERIMENT_CXX_FLAGS: "-DLIGNUM_BRANCHY_CAT -DLIGNUM_BRANCHY_TAIL"
+  # (empty = skip).
+  EXPERIMENT_CXX_FLAGS: ""
   BENCH_ARGS: ${{ github.event.inputs.args || '--only lightgbm,lightgbm-cat --rows 300000 --trees 500 --repeats 5 --latency-budget 1' }}
 
 jobs:
