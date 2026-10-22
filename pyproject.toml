@@ -3,8 +3,8 @@ requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
-# The import name stays `lignum`; "lignum" on PyPI belongs to another project (see HANDOFF.md).
-name = "lignum"
+# Installed as `pylignum`, imported as `lignum` ("lignum" on PyPI belongs to another project).
+name = "pylignum"
 dynamic = ["version"]
 description = "Bit-exact, fast inference for LightGBM and XGBoost models: interpreter, compiled trees, Arrow input"
 readme = "python/README.md"
@@ -32,6 +32,8 @@ dependencies = [
 
 [project.urls]
 Repository = "https://github.com/misterekkk/lignum"
+Documentation = "https://misterekkk.github.io/lignum/"
+Issues = "https://github.com/misterekkk/lignum/issues"
 
 [project.optional-dependencies]
 test = [

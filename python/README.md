@@ -1,61 +1,53 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/misterekkk/lignum/dev/v0.2/docs/assets/logo.svg" width="96" alt="lignum logo">
+</p>
+
 # lignum
 
-Python bindings for the `lignum` ultra-fast decision tree inference engine. This package leverages `nanobind` and `scikit-build-core` to expose a high-performance C++ prediction pipeline directly to NumPy.
-
-## Key Features
-
-* **Instant Loading:** Bypasses standard JSON parsing overhead by utilizing memory-mapped files (`mmap`) for custom `.bin` models.
-* **NumPy Integration:** Built from the ground up to support C-contiguous `float64` NumPy arrays, maximizing CPU cache efficiency.
-* **Multi-threaded Inference:** Native OpenMP parallelization scales predictions seamlessly across available CPU cores.
-
-## Installation
-
-### Prerequisites
-* C++20 compliant compiler (GCC, Clang, or MSVC)
-* CMake (>= 3.18)
-* Python (>= 3.8)
-
-### Installing from Source
-From the root directory of the repository, run:
+Fast inference for LightGBM and XGBoost models, with predictions that are **bit-identical** to the
+library that trained them.
 
 ```bash
-pip install .
-
+pip install pylignum
 ```
-
-For local development and running benchmarks, install in editable mode with development dependencies:
-
-```bash
-pip install -e .
-
-```
-
-## Quick Start
 
 ```python
-import numpy as np
 import lignum
 
-# 1. Load a model (supports 'lightgbm', 'xgboost', 'binary', or 'auto')
-model = lignum.load("model_lightgbm.json", format="lightgbm")
-
-# 2. Prepare C-contiguous float64 input data for optimal performance
-X = np.random.randn(1000, 50).astype(np.float64)
-X = np.ascontiguousarray(X)
-
-# 3. Generate predictions using all CPU cores
-preds = model.predict(X, n_jobs=-1)
-
-# 4. Save to highly optimized Lignum binary format for production
-model.save("lignum_model.bin")
-
+model = lignum.load("model.txt")    # LightGBM model.txt / JSON, XGBoost .json / .ubj
+preds = model.predict(X)            # numpy array, or Arrow data (pyarrow, polars, ...)
 ```
 
-## Running Tests
+The package is installed as `pylignum` and imported as `lignum`.
 
-To verify the installation and core functionality, run `pytest` from the repository root:
+## What it does
 
-```bash
-pytest tests/python -v
+- **Exact.** Raw scores and probabilities equal `booster.predict(...)` bit for bit, including NaN,
+  zero-as-missing and categorical splits, for LightGBM and XGBoost (XGBoost's float32 arithmetic
+  included).
+- **Fast to start.** `model.save("model.bin")` writes a binary file that loads by memory mapping in
+  well under a millisecond.
+- **Fast to predict.** A cache-friendly interpreter for any batch size, and an optional compiled
+  mode that turns the trees into native code with the system C compiler in a few seconds:
 
-```
+  ```python
+  model.compile(library="model.so")                       # once, where a compiler is available
+  model = lignum.load("model.bin", compiled="model.so")   # production: no compiler needed
+  ```
+
+  `model.autotune(X_sample)` measures both on your data and uses each where it is faster.
+- **Arrow input without copies.** `predict` reads pyarrow tables and batches, polars data frames and
+  any object with the Arrow PyCapsule interface directly; dictionary columns are categories.
+- **C API** for services in other languages (`include/lignum/c_api.h`), with Arrow input as well.
+
+## Requirements
+
+Python 3.10 or newer, numpy. Wheels are available for Linux (x86_64, aarch64), macOS 15+ (arm64,
+x86_64) and Windows (x64); other platforms build from source with a C++20 compiler. The compiled mode
+needs a C compiler at compile time only (cc on Linux and macOS; Visual Studio, MinGW gcc or clang on
+Windows).
+
+## Links
+
+- Source and issues: https://github.com/misterekkk/lignum
+- Documentation: https://misterekkk.github.io/lignum/

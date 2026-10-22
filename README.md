@@ -1,4 +1,10 @@
+<p align="center"><img src="docs/assets/logo.svg" width="112" alt="lignum logo"></p>
+
 # Lignum: Ultra-Fast Decision Tree Inference
+
+```bash
+pip install pylignum   # imported as `import lignum`
+```
 
 [![Tests](https://github.com/misterekkk/lignum/actions/workflows/tests.yml/badge.svg)](https://github.com/misterekkk/lignum/actions/workflows/tests.yml)
 [![Deploy Documentation](https://github.com/misterekkk/lignum/actions/workflows/docs.yml/badge.svg)](https://github.com/misterekkk/lignum/actions/workflows/docs.yml)

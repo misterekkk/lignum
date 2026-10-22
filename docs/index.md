@@ -13,6 +13,12 @@ The `lignum` package bypasses the bottlenecks of standard parsers by providing a
 
 ## Installation
 
+```bash
+pip install pylignum   # the package is imported as `lignum`
+```
+
+To build from source:
+
 You can install the package directly from the source using `pip`. 
 
 ```bash
