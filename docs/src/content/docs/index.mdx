@@ -1,0 +1,41 @@
+---
+title: lignum
+description: Bit-exact, fast inference for LightGBM and XGBoost models.
+template: splash
+hero:
+  tagline: Fast inference for LightGBM and XGBoost, with predictions that equal the library that trained the model, bit for bit.
+  image:
+    file: ../../../assets/logo.svg
+  actions:
+    - text: Get started
+      link: guides/getting-started/
+      icon: right-arrow
+    - text: Benchmarks
+      link: benchmarks/
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+```bash
+pip install pylignum
+```
+
+<CardGrid>
+  <Card title="Exact" icon="approve-check">
+    Raw scores and probabilities equal `booster.predict(...)` bit for bit: NaN handling, LightGBM's
+    zero-as-missing, categorical splits and XGBoost's float32 arithmetic included.
+  </Card>
+  <Card title="Fast to predict" icon="rocket">
+    A cache-friendly interpreter for any batch size, and a compiled mode that turns the trees into
+    native code in a few seconds, faster than lleaves on most real data sets.
+  </Card>
+  <Card title="Fast to start" icon="seti:pipeline">
+    `model.save("model.bin")` writes a file that maps into memory in well under a millisecond;
+    compiled trees ship next to it, so production needs no compiler.
+  </Card>
+  <Card title="Arrow in, no copies" icon="list-format">
+    `predict` reads pyarrow, polars and any Arrow PyCapsule data directly, and C or C++ services pass
+    Arrow record batches through the C API.
+  </Card>
+</CardGrid>

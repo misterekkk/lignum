@@ -3,18 +3,21 @@
 ## Pipeline
 
 ```
-JSON model ──parser──▶ TempBinNode forest (IR) ──Builder──▶ Model ──predict──▶ scores
-(LightGBM / XGBoost)   src/ir.hpp                src/builder.cpp   src/model.cpp
-                                                     │
-                                       Model::save ──┴──▶ .bin ──mmap──▶ Model (zero-copy)
-                                                         src/io.cpp
+model file ──parser──▶ TempBinNode forest (IR) ──Builder──▶ Model ──predict──▶ scores
+                       src/ir.hpp                 src/builder.cpp   src/model.cpp
+                                                      │
+                                        Model::save ──┼──▶ .bin ──mmap──▶ Model (zero-copy)
+                                                      │                   src/io.cpp
+                                     compile_forest ──┴──▶ C ──cc──▶ shared library (src/compiled.cpp)
 ```
 
-- **Parsers** (`src/parsers/`) read the library's JSON with simdjson and emit a library-neutral binary
-  tree. All library-specific semantics are resolved here (see "Split semantics").
+- **Parsers** (`src/parsers/`) read LightGBM `model.txt` (`lightgbm_text.cpp`) and `dump_model()`
+  JSON, XGBoost JSON and UBJSON (`ubjson.cpp` rewrites it as JSON) into a library-neutral binary
+  tree. `src/load.cpp` recognises the format from the file's first bytes. All library-specific
+  semantics are resolved here (see "Split semantics").
 - **Builder** packs two tree levels into one 64-byte `KNode` and stores leaves in a separate array.
 - **Model** is a view: raw pointers to nodes/offsets/leaves plus a `shared_ptr<Data>` owning the
-  memory, which is either `VectorData` (built from JSON) or `MmapData` (binary file).
+  memory, which is either `VectorData` (built from a model file) or `MmapData` (binary file).
 
 ## KNode
 
@@ -126,14 +129,42 @@ leaves, features, categorical bitsets and decision tables must be in range. This
 for the benchmark models. `tests/cpp/test_fuzz.cpp` corrupts files at random and runs under
 ASan/UBSan in CI. Older versions are rejected; re-export from JSON.
 
+## Compiled mode (src/compiled.*)
+
+`compile_forest` generates C from the `BinnedForest`: `lignum_bin` (numeric binning specialised per
+feature: constant cut tables, unrolled binary search, linear count for <= 8 cuts) and one
+`lignum_block_<b>` per block of 16 trees. A block walks a chunk of rows (~2 MB of codes, decision bits
+and sums, `LIGNUM_COMPILED_CHUNK_KB`) before the next block runs, adding leaves (from a per-block
+table) in model order. The `LIGNUM_COMPILED_LOCALS` most used features of a block are read once per
+row into locals (int16 codes: NaN = -1, so the NaN-left comparison needs no wrap), kept in registers
+by an empty asm; leaf pairs become selects. Categorical decision bits, threads and transforms stay in
+the kernel (`BinnedKernel` receives the compiled forest; `Model::compiled_min_rows` sends small
+batches to the interpreter). Sources are compiled in parallel (gcc/clang, or one `cl /LD /MP`
+command), linked, cached by source hash and loaded with dlopen / LoadLibrary. The library exports
+`lignum_abi` and `lignum_fingerprint` (FNV-1a of trees, cuts, leaves, outputs, precision), checked by
+`load_compiled`.
+
+## Arrow input (src/arrow.cpp, src/columns.hpp)
+
+`predict_arrow` takes a record batch through the Arrow C Data Interface (`include/lignum/arrow.h`).
+With the binned kernel, an `ArrowColumns` `ColumnSource` lets `BinnedKernel` bin each feature column
+of a chunk straight from the buffers (typed conversion into a small contiguous buffer, then one
+binning loop); the direct kernel gets row-major blocks converted in L1-sized tiles. Values convert
+exactly like numpy's `astype(float64)`; nulls (column or batch) are NaN; dictionary columns give
+their indices.
+
 ## APIs
 
-- C++: `include/lignum/lignum.hpp` (`lignum::load`) and `model.hpp` (`Model::predict`, `Strategy`).
+- C++: `include/lignum/lignum.hpp` (`lignum::load`, `predict_arrow`, `predict_arrow_stream`) and
+  `model.hpp` (`Model::predict`, `Strategy`).
 - C: `include/lignum/c_api.h`, built as the shared `liblignum` (`LIGNUM_BUILD_C_LIBRARY`, on by
-  default outside Python builds). Only `Lignum*` symbols are exported; errors are reported through
-  return codes and a thread-local `LignumGetLastError()`.
-- Python: `python/bindings.cpp` (nanobind) + `python/lignum/__init__.py`.
+  default outside Python builds): loading, prediction (row-major and Arrow), compiled mode. Only
+  `Lignum*` symbols are exported; errors are reported through return codes and a thread-local
+  `LignumGetLastError()`.
+- Python: `python/bindings.cpp` (nanobind, abi3 for Python >= 3.12) + `python/lignum/__init__.py`,
+  published as `pylignum`.
 
 ## Known limitations
 
-See [TASKS.md](TASKS.md): no multi-target / vector-leaf models, only row-major float64 input.
+See [TASKS.md](TASKS.md): no multi-target / vector-leaf models, no LightGBM linear trees or random
+forests (rejected at load time).

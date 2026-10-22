@@ -1,9 +1,9 @@
 """
-Lignum: A fast decision tree inference library.
+lignum: bit-exact, fast inference for LightGBM and XGBoost models.
 
-This module provides the core interface for loading and running predictions
-with compiled Lignum models. It bypasses standard parsers by using a native 
-C++ engine for direct JSON inference and mmap-based binary loading.
+`lignum.load(path)` reads LightGBM (`model.txt`, JSON) and XGBoost (JSON, UBJSON) models or lignum's
+own `.bin` file; `Model.predict` takes numpy arrays or Arrow data. Predictions equal the library's
+`predict` bit for bit, with the interpreter or with trees compiled to native code (`Model.compile`).
 """
 
 from __future__ import annotations
@@ -28,11 +28,10 @@ def _is_pandas(X) -> bool:
 
 class Model:
     """
-    Compiled Lignum decision tree model.
-    
-    This class wraps the underlying C++ model and provides a high-performance 
-    interface for inference. Instances of this class should generally be created 
-    using the `lignum.load()` function rather than instantiating directly.
+    A loaded LightGBM or XGBoost model.
+
+    Create it with `lignum.load()`. Predictions use the interpreter, or the compiled trees after
+    `compile()` / `load(..., compiled=...)`; both give the same, bit-identical results.
     """
 
     def __init__(self, _c_model):
@@ -285,7 +284,7 @@ class Model:
 def load(filepath: str, format: str = "auto", binned: bool = True,
          compiled: str | os.PathLike | None = None) -> Model:
     """
-    Load a trained model from a JSON or Lignum binary file.
+    Load a trained model: LightGBM or XGBoost files, or a lignum `.bin`.
 
     Parameters
     ----------

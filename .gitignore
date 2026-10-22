@@ -116,3 +116,8 @@ site/
 .venv/
 *.npy
 benchmarks/bench_model_*benchmarks/.cache/
+
+# The docs site (Starlight) needs its npm and TypeScript files.
+!docs/package.json
+!docs/package-lock.json
+!docs/tsconfig.json

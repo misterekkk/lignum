@@ -204,6 +204,10 @@ precomputed decision bits (-47%); evaluating all 7 slots speculatively (2x slowe
 - [x] Column-major binning straight from Arrow buffers (`ColumnSource`, binned kernel only): Arrow now matches the numpy path for the interpreter; Covertype compiled +2.5% (generic bin_of instead of the generated binning), Diabetes slightly faster (unused columns skipped)
 - [ ] Re-check latency with Arrow input on x86
 
+## Documentation
+
+- [x] Starlight site in `docs/` (guides, concepts, benchmarks, generated Python reference from docstrings via `docs/scripts/api_reference.py`), deployed to GitHub Pages from `main` by `.github/workflows/docs.yml`; replaces MkDocs
+
 ## Stage 6 — PyPI
 
 - [ ] cibuildwheel: manylinux_2_28 x86_64/aarch64, macOS arm64/x86_64, Windows x64

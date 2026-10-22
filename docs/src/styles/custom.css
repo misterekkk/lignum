@@ -1,0 +1,13 @@
+/* lignum's teal (the logo colour) as Starlight's accent, tuned per theme. */
+:root {
+  --sl-color-accent-low: #0b3a3e;
+  --sl-color-accent: #2a9ea3;
+  --sl-color-accent-high: #a6e3e2;
+}
+:root[data-theme='light'] {
+  --sl-color-accent-low: #cdeeee;
+  --sl-color-accent: #147e84;
+  --sl-color-accent-high: #0b4f57;
+}
+/* Benchmark tables: aligned digits. */
+.sl-markdown-content table td { font-variant-numeric: tabular-nums; }
