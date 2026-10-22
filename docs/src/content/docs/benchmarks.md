@@ -29,6 +29,45 @@ Milliseconds, best of 2 x 7 runs.
 
 Compiling the trees took 6-12 s; lleaves took 13-134 s.
 
+## Hetzner cloud servers (4 vCPU)
+
+Seconds, all threads / one thread, best of 5 runs. x86: dedicated vCPUs (CCX, AMD EPYC-Milan,
+2 cores with SMT); ARM: shared vCPUs (CAX, Ampere Altra, Neoverse-N1), so treat its numbers as
+less stable. Generic builds, as in the wheels.
+
+| Data set | interpreter | compiled | lleaves | LightGBM |
+|---|---:|---:|---:|---:|
+| **x86-64** | | | | |
+| California | 0.050 / 0.135 | **0.014 / 0.039** | 0.021 / 0.058 | 0.140 / 0.414 |
+| Covertype | 1.187 / 2.819 | **0.265** / 0.698 | 0.269 / **0.650** | 2.401 / 5.941 |
+| Adult | 0.111 / 0.353 | **0.026 / 0.085** | 0.037 / 0.124 | 0.294 / 0.942 |
+| Bank | 0.125 / 0.357 | **0.035 / 0.077** | 0.042 / 0.091 | 0.343 / 0.832 |
+| Diabetes | 0.484 / 1.397 | **0.151 / 0.499** | 0.803 / 2.072 | 1.830 / 5.917 |
+| **ARM** | | | | |
+| California | 0.053 / 0.209 | **0.012 / 0.045** | 0.020 / 0.075 | 0.362 / 1.037 |
+| Covertype | 1.256 / 4.551 | **0.245 / 0.938** | 0.298 / 1.073 | 6.602 / 16.213 |
+| Adult | 0.127 / 0.485 | **0.024 / 0.097** | 0.036 / 0.137 | 0.707 / 1.918 |
+| Bank | 0.138 / 0.506 | **0.033 / 0.101** | 0.037 / 0.115 | 0.981 / 2.513 |
+| Diabetes | 0.522 / 1.969 | **0.143 / 0.590** | 0.834 / 3.171 | 4.406 / 13.893 |
+
+Compiling the trees took 6-9 s on x86 and 9-12 s on ARM; lleaves took 34-269 s and 37-479 s.
+
+### Single row
+
+One row, one thread, on the dedicated x86 server: median / p99 in microseconds.
+
+| Data set | interpreter | compiled | lleaves | LightGBM |
+|---|---:|---:|---:|---:|
+| California | 9.6 / 19.2 | **2.9 / 3.5** | 9.8 / 30.0 | 38.8 / 69.8 |
+| Covertype | 8.3 / 15.2 | **2.9 / 3.6** | 7.8 / 19.0 | 32.0 / 67.0 |
+| Adult | 9.3 / 18.6 | **3.2 / 3.8** | 8.7 / 21.8 | 38.3 / 69.5 |
+| Bank | 8.8 / 17.0 | **3.0 / 3.8** | 7.8 / 20.9 | 36.9 / 65.4 |
+| Diabetes | 11.5 / 21.4 | **3.1 / 10.2** | 20.1 / 55.7 | 50.6 / 84.4 |
+
+lignum runs batches below 8 rows on the calling thread whatever `n_jobs` says. lleaves starts its
+threads on every call: with its default `n_jobs` a single row took 139-929 µs. On the ARM server
+the compiled trees took 7.0-7.5 µs per row (lleaves 15-125 µs).
+
 ## x86-64 and ARM (GitHub runners, 4 vCPU)
 
 Seconds, all threads / one thread. These are shared cloud machines: compare engines within a column,
@@ -61,10 +100,13 @@ it has categorical columns). Seconds, all threads / one thread, and microseconds
 
 ## Where lignum is not the fastest
 
-- **Covertype on one thread**: lleaves is about 5% faster on the M4 and equal on x86. Covertype has 54
-  features and 7 classes; binning the input costs time that lleaves does not spend.
+- **Covertype on one thread**: lleaves is about 5% faster on the M4, 7% on the EPYC-Milan server and
+  equal on the GitHub x86 runner. Covertype has 54 features and 7 classes; binning the input costs
+  time that lleaves does not spend. With all threads the compiled trees are equal or faster.
 - **Unpredictable data on x86**: on a synthetic model with independent random features, the
   interpreter beat the compiled trees on one x86 CPU (EPYC 9V45) for one thread and small batches.
+  On the Hetzner servers `autotune` keeps the interpreter below 256 rows for that model, and picks
+  the compiled trees from one row on for all five real data sets.
   [`autotune`](../guides/compiled/#interpreter-or-compiled-autotune) measures this on your data.
 - **Single rows from Python with Arrow**: pyarrow's export costs about 0.2 µs per column per call;
   pass a numpy row for the lowest latency.
@@ -79,3 +121,5 @@ python benchmarks/bench_arrow.py
 
 The scripts train and cache the models, check every engine against the library and write Markdown
 reports to `benchmarks/results/`. `.github/workflows/bench-lleaves.yml` runs them on x86-64 and ARM.
+`benchmarks/cloud.sh` does the whole run above on a fresh Ubuntu 24.04 server (x86-64 or ARM) and
+packs the reports.

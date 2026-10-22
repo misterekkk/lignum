@@ -69,12 +69,11 @@ mmap), niskie opóźnienie, wysoka przepustowość. Na PyPI jako **`pylignum`**,
   tabela benchmarków, link do strony. `python/README.md` (opis na PyPI) jest aktualny.
 3. **Strona**: przejrzeć treść z autorem, po scaleniu do `main` sprawdzić deploy. Lokalnie:
    `cd docs && npm install && python scripts/api_reference.py && npm run dev`.
-4. **Pomiary w chmurze (Hetzner)**: CCX23/CCX33 (dedykowane vCPU, AMD EPYC) — stabilne wyniki x86;
-   CAX (Ampere Altra, ARM, współdzielone vCPU) — sprawdzenie ARM. Na świeżym Ubuntu 24.04:
-   `curl -LsSf https://raw.githubusercontent.com/misterekkk/lignum/dev/v0.2/benchmarks/cloud.sh | bash`
-   (~30-40 min, raporty w `~/lignum-bench-*.tar.gz`, `scp` do domu). Serwer usunąć po testach
-   (wyłączony też jest rozliczany). Szczególnie ciekawe: `autotune` na modelu syntetycznym (na EPYC
-   9V45 interpreter wygrywał z kodem skompilowanym), p99 pojedynczego wiersza, build `LIGNUM_NATIVE`.
+4. ~~**Pomiary w chmurze (Hetzner)**~~ zrobione 2026-10-22 (commit `fe6363d`): CCX (EPYC-Milan,
+   dedykowane) i CAX (Neoverse-N1, współdzielone). Raporty w `benchmarks/results/hetzner/`, tabele
+   na stronie (`benchmarks.md`), wnioski w `TASKS.md`. Skrót: skompilowany wygrywa z lleaves wszędzie
+   poza Covertype na 1 wątku x86 (-7%); 1 wiersz 3 µs (p99 4-10) vs lleaves 8-20 µs; `LIGNUM_NATIVE`
+   daje 0-8% na x86, nic na ARM; `autotune` na modelu syntetycznym: interpreter do 256 wierszy.
 5. Ryzen autora (Windows): na razie bez WSL; tryb kompilowany działa natywnie (VS Build Tools z
    „Desktop development with C++”), lleaves / TL2cgen tylko na Linuksie.
 
