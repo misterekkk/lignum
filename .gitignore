@@ -16,7 +16,7 @@ Network Trash Folder
 Temporary Items
 .apdisk
 
-build/
+/build*/
 bin/
 obj/
 out/
