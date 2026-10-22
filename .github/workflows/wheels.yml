@@ -5,7 +5,7 @@ name: Wheels
 # needs the owner's approval).
 on:
   push:
-    branches: [dev/v0.2, main]
+    branches: [main, 'dev/**']
     paths:
       - 'src/**'
       - 'include/**'

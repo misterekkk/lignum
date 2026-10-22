@@ -6,7 +6,7 @@ name: Benchmark vs lleaves
 # Shared runners are noisy: compare lignum with lleaves within one job, not across runs.
 on:
   push:
-    branches: [dev/v0.2]
+    branches: [main, 'dev/**']
     paths:
       - 'src/**'
       - 'include/**'
