@@ -65,6 +65,30 @@ non-bitset slots read a valid address).
   last tile. XGBoost `multi:softmax` (argmax) is computed from raw margins in a temporary buffer,
   because narrowing K columns to one in place would race between threads.
 
+## Binned kernel (src/binned.*, default for batches of 8+ rows)
+
+Built from the KNode form at load time (or mapped from the binary file):
+
+- Every used feature becomes a *dense feature* with a 16-bit code per row, computed once per row
+  block before the tree walk:
+  - numeric: `bin(x)` = number of the feature's split thresholds `t` with `t <= x` (branch-free
+    binary search over sorted unique thresholds), so `x >= t_k` ⇔ `bin(x) >= k + 1` exactly;
+  - categorical: the integer category under LightGBM or XGBoost rules; NaN and invalid values get
+    codes that are never in a set;
+  - NaN: `0xFFFF`.
+- `BNode` (64 bytes) holds **three** tree levels: 7 slots (16-bit threshold or decision-bit index,
+  16-bit dense feature) and 8 subtrees. The walk compares only along the path (3 dependent integer
+  comparisons per node); evaluating all 7 speculatively was 2x slower.
+- NaN without a branch: `0xFFFF` is above every threshold (goes right); slots whose NaN goes left
+  add 1 to the code, which wraps `0xFFFF` to 0.
+- Categorical splits are decided before the walk: per categorical feature a table maps each
+  category to the decision bits of all of that feature's slots in the model; each row copies one
+  table row per feature into its decision buffer, and a categorical slot reads one bit from L1.
+- LightGBM zero-as-missing: both edges of the zero band are added as cuts, so the band is one bin;
+  flagged slots override the comparison for that bin (branch-free).
+- Results are identical to the KNode kernel; `load(..., binned=False)` disables it, and every
+  Python test runs with both kernels (`tests/python/conftest.py`).
+
 ## Split semantics
 
 Every split is normalised to: **go right ⇔ `isnan(x) ? default_right : x >= threshold`**.
@@ -87,13 +111,16 @@ sums in double and divides by `float(sum)`; LightGBM's softmax is all double.
 Verified bit-exact by `tests/python/test_parity.py` on inputs with NaNs, zeros, values in the zero
 band and values placed exactly on every split threshold.
 
-## Binary format (version 0.5)
+## Binary format (version 0.6)
 
 64-byte header (`magic "LIGNUM"`, version, transform, flags {float32, special trees}, sigmoid,
 n_features, n_outputs, n_cat_words, section sizes), followed by 64-byte aligned sections: nodes, tree offsets,
-leaves, tree kinds, base scores, tree outputs (multiclass only) and categorical bitsets.
-Loading validates the version and the file size, then maps the file read-only. Older versions are
-rejected; re-export from JSON.
+leaves, tree kinds, base scores, tree outputs (multiclass only), categorical bitsets and, when the
+`Binned` flag is set, a `BinnedFileHeader` followed by the binned kernel's sections (nodes, roots,
+tree kinds, dense features, cuts, zero bins, categorical decision tables).
+Loading validates the version and the file size, then maps the file read-only (0.02 ms for the
+benchmark models, binned kernel included). Indices stored inside nodes are not validated, so only
+load files you trust. Older versions are rejected; re-export from JSON.
 
 ## APIs
 

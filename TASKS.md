@@ -138,8 +138,23 @@ slower there). Rejected on M4: prefetching a node's children (+30%).
 Flags do not explain the gap to lleaves: `LIGNUM_NATIVE=ON` gives ~3% on x86-64 and nothing on aarch64.
 
 Weak spots:
-- [ ] Categorical comparison cost: convert categorical features to integer codes once per row block instead of in every categorical slot
-- [ ] Exact input binning: per-feature bin index (uint16) computed once per row; integer comparisons, 3 tree levels per 64-byte node, half the model size. Biggest expected win for large batches on servers
+- [x] Exact input binning: per-feature 16-bit codes once per row, integer comparisons, 3 tree levels per 64-byte node (`src/binned.*`); default for batches of 8+ rows, stored in the binary format (0.6)
+- [x] Categorical decisions precomputed per row (category -> decision bits table per feature); a categorical slot reads one bit from L1
+- [x] Zero-as-missing in the binned kernel (zero band = one bin, branch-free override)
+- [ ] Validate indices stored in mapped model files (untrusted files can index out of bounds)
+- [ ] Single rows: measure the binned kernel for 1-7 rows (currently they keep the KNode walk)
+
+### Binned kernel results (CI `bench-lleaves.yml`, 300k rows, 500 trees, 4 threads)
+
+| | KNode kernel | binned | lleaves |
+|---|---:|---:|---:|
+| x86-64 numeric batch / 1 thread | 0.83 / 2.43 s | 0.68 / 1.58 s | 0.56 / 1.81 s |
+| x86-64 categorical batch / 1 thread | 2.29 / 7.18 s | **1.22 / 3.68 s** | 2.03 / 4.97 s |
+| aarch64 numeric batch / 1 thread | 0.43 / 1.69 s | 0.34 / 1.33 s | 0.33 / 1.33 s |
+| aarch64 categorical batch / 1 thread | 1.37 / 5.42 s | **0.71 / 2.82 s** | 0.87 / 3.44 s |
+
+Kept trying on the way: categorical sets in a side table (-18..-22% on servers, +10% on M4) before
+precomputed decision bits (-47%); evaluating all 7 slots speculatively (2x slower).
 - [ ] Large LightGBM batches on x86-64 / Linux aarch64 vs lleaves (host-tuned): measure `LIGNUM_NATIVE=ON` on the same runner, then profile the kernel on x86 (register pressure of 4-way interleave with 16 GPRs, N_BLOCK/T_BLOCK)
 - [ ] Shallow trees: a depth-3 tree costs 73% of a depth-6 one (per-tree overhead: root, loop, leaf load, sum; the last KNode level is half empty). Ideas: single-level node for the last odd level, fixed-depth unrolled traversal for complete trees, several trees per loop iteration
 - [ ] Single row on large models (5000 trees, ~6.5 MB): 39 µs vs 23–25 µs (TL2cgen) — memory-latency bound
