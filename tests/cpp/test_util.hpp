@@ -11,10 +11,11 @@
 
 namespace lignum::test {
 
-    // Writes `content` to a fresh file in the system temp directory and returns its path.
+    // Writes `content` to a fresh file in the system temp directory and returns its path. Binary
+    // mode: on Windows text mode would turn every 0x0A byte of a binary model into \r\n.
     inline std::string write_temp(const std::string& name, const std::string& content) {
         auto path = std::filesystem::temp_directory_path() / ("lignum_test_" + name);
-        std::ofstream(path) << content;
+        std::ofstream(path, std::ios::binary) << content;
         return path.string();
     }
 
