@@ -115,13 +115,35 @@ endif()
 # Python extension (built by scikit-build-core)
 # ---------------------------------------------------------------------------
 if(SKBUILD)
-    find_package(Python 3.9 REQUIRED COMPONENTS Interpreter Development.Module)
+    # SKBUILD_SABI_COMPONENT is set when scikit-build-core builds an abi3 wheel (wheel.py-api).
+    find_package(Python 3.10 REQUIRED COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT})
     find_package(nanobind CONFIG REQUIRED)
 
-    nanobind_add_module(_core python/bindings.cpp)
+    # STABLE_ABI: one wheel for every Python >= 3.12 (ignored for older Pythons).
+    nanobind_add_module(_core STABLE_ABI python/bindings.cpp)
     target_include_directories(_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(_core PRIVATE lignum)
     install(TARGETS _core DESTINATION lignum)
+
+    # macOS wheels: LightGBM and XGBoost use Homebrew's libomp, and two copies of libomp in one
+    # process abort (OMP Error #15). So the extension looks for Homebrew's first and falls back to
+    # a copy shipped in the wheel (lignum/.dylibs), found through the same @rpath install name.
+    option(LIGNUM_BUNDLE_OPENMP "macOS: ship libomp in the wheel as a fallback for Homebrew's" OFF)
+    if(APPLE AND LIGNUM_BUNDLE_OPENMP AND OpenMP_CXX_FOUND)
+        set_target_properties(_core PROPERTIES
+            BUILD_WITH_INSTALL_RPATH ON
+            INSTALL_RPATH "/opt/homebrew/opt/libomp/lib;/usr/local/opt/libomp/lib;@loader_path/.dylibs")
+        find_library(LIGNUM_LIBOMP NAMES omp PATHS ${OpenMP_ROOT}/lib NO_DEFAULT_PATH REQUIRED)
+        get_filename_component(LIGNUM_LIBOMP_REAL ${LIGNUM_LIBOMP} REALPATH)
+        install(FILES ${LIGNUM_LIBOMP_REAL} DESTINATION lignum/.dylibs RENAME libomp.dylib)
+        # Reference libomp as @rpath/libomp.dylib (Homebrew's own install name is an absolute path).
+        add_custom_command(TARGET _core POST_BUILD
+            COMMAND install_name_tool -change ${LIGNUM_LIBOMP_REAL} @rpath/libomp.dylib $<TARGET_FILE:_core>
+            COMMAND install_name_tool -change ${LIGNUM_LIBOMP} @rpath/libomp.dylib $<TARGET_FILE:_core>
+            COMMAND install_name_tool -change /opt/homebrew/opt/libomp/lib/libomp.dylib @rpath/libomp.dylib $<TARGET_FILE:_core>
+            COMMAND install_name_tool -change /usr/local/opt/libomp/lib/libomp.dylib @rpath/libomp.dylib $<TARGET_FILE:_core>
+            VERBATIM)
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------

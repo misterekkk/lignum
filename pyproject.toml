@@ -3,18 +3,35 @@ requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
+# The import name stays `lignum`; "lignum" on PyPI belongs to another project (see HANDOFF.md).
 name = "lignum"
-version = "0.2.0.dev0"
-description = "Fast decision tree inference for LightGBM and XGBoost models via native C++ and mmap"
+dynamic = ["version"]
+description = "Bit-exact, fast inference for LightGBM and XGBoost models: interpreter, compiled trees, Arrow input"
 readme = "python/README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
     { name = "Kacper Piotrowski" }
 ]
-dependencies = [
-    "numpy>=1.20.0"
+keywords = ["lightgbm", "xgboost", "gradient boosting", "inference", "decision trees", "arrow"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+dependencies = [
+    "numpy>=1.21"
+]
+
+[project.urls]
+Repository = "https://github.com/misterekkk/lignum"
 
 [project.optional-dependencies]
 test = [
@@ -30,7 +47,38 @@ test = [
 cmake.version = ">=3.18"
 cmake.build-type = "Release"
 wheel.packages = ["python/lignum"]
+# abi3 wheels for Python >= 3.12 (one wheel for all later versions); older Pythons get their own.
+wheel.py-api = "cp312"
+metadata.version.provider = "scikit_build_core.metadata.regex"
+metadata.version.input = "python/lignum/__init__.py"
 sdist.exclude = ["benchmarks", "docs", ".github", "tests", "*.npy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
+
+[tool.cibuildwheel]
+# cp312 builds the abi3 wheel used by every later Python.
+build = "cp310-* cp311-* cp312-*"
+skip = "*-musllinux_* *-win32 *_i686"
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+build-verbosity = 1
+test-extras = ["test"]
+# The whole suite once per platform (abi3 wheel); older Pythons get an import and parity smoke test.
+test-command = "python {project}/tests/python/smoke.py && python -m pytest {project}/tests/python -q -x -p no:cacheprovider"
+test-skip = "cp310-* cp311-*"
+
+[tool.cibuildwheel.linux]
+# auditwheel bundles libgomp (GNU OpenMP tolerates several copies in one process).
+repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel}"
+
+[tool.cibuildwheel.macos]
+before-all = "brew install libomp"
+environment = { CMAKE_ARGS = "-DLIGNUM_BUNDLE_OPENMP=ON" }
+# libomp is shipped by CMake (with an rpath to Homebrew's first); delocate must not relocate it.
+repair-wheel-command = "delocate-listdeps --all {wheel} && cp {wheel} {dest_dir}"
+
+[tool.cibuildwheel.windows]
+before-build = "pip install delvewheel"
+# Bundles vcomp140.dll (MSVC's OpenMP runtime), which a plain Windows install may lack.
+repair-wheel-command = "delvewheel repair --add-path C:/Windows/System32 -w {dest_dir} {wheel}"
