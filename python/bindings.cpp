@@ -58,7 +58,10 @@ NB_MODULE(_core, m) {
         
         .def("save", &Model::save, nb::arg("filepath"), "Saves lignum format model to binary.")
         .def_prop_ro("n_outputs", [](const Model& self) { return self.n_outputs; }, "Number of outputs (classes for multiclass models).")
+        .def_prop_ro("uses_binned", [](const Model& self) { return self.binned != nullptr; },
+                     "Whether batches use the binned kernel (False when disabled or unsupported by the model).")
         .def_prop_ro("n_features", [](const Model& self) { return self.n_features; }, "Minimum number of input columns.");
     
-    m.def("load", &lignum::load, nb::arg("filepath"), nb::arg("format") = "auto", "Loads the JSON or binary file format.");
+    m.def("load", &lignum::load, nb::arg("filepath"), nb::arg("format") = "auto", nb::arg("binned") = true,
+          "Loads the JSON or binary file format.");
 }

@@ -68,7 +68,7 @@ namespace lignum {
     };
     static_assert(sizeof(KNode) == 64, "KNode must fill exactly one cache line");
 
-    struct BinnedForest;  // experimental binned representation (src/binned.hpp)
+    struct BinnedForest;  // binned representation (src/binned.hpp)
 
     class Data {
         public:
@@ -111,7 +111,7 @@ namespace lignum {
             uint32_t n_features = 0;        // minimum number of input columns
 
             std::shared_ptr<const Data> data;
-            std::shared_ptr<const BinnedForest> binned;  // experimental (LIGNUM_BINNED); null when unused
+            std::shared_ptr<const BinnedForest> binned;  // binned kernel for batches; null when disabled or unsupported
 
             Model() = default;
 

@@ -15,11 +15,11 @@ namespace {
     constexpr double Inf = std::numeric_limits<double>::infinity();
 
     // Category in `set` -> 1.0 (left), otherwise -> 2.0 (right).
-    lignum::Model categorical_stump(const std::string& name, const std::string& set) {
+    lignum::Model categorical_stump(const std::string& name, const std::string& set, bool binned = true) {
         const std::string json = R"({"objective": "regression", "tree_info": [{"tree_structure": {
             "split_feature": 0, "threshold": ")" + set + R"(", "decision_type": "==", "default_left": false, "missing_type": "None",
             "left_child": {"leaf_value": 1.0}, "right_child": {"leaf_value": 2.0}}}]})";
-        return lignum::load(write_temp(name, json), "lightgbm");
+        return lignum::load(write_temp(name, json), "lightgbm", binned);
     }
 
     // LightGBM 4: NaN and x <= -1 go right; otherwise int(x) (truncation) is the category.
@@ -36,11 +36,15 @@ namespace {
         2147483647.0, 2147483648.0, 4294967296.0, 1e12, -1e12,
     };
 
+    // Both kernels: binned (the probes are a batch of 8+ rows) and direct traversal.
     void check(const std::string& name, const std::string& set_text, const std::vector<int64_t>& set) {
-        auto model = categorical_stump(name, set_text);
         std::vector<double> want;
         for (double x : kProbes) want.push_back(expected(x, set));
-        EXPECT_EQ(predict_raw(model, kProbes, 1), want) << set_text;
+        for (bool binned : {true, false}) {
+            auto model = categorical_stump(name, set_text, binned);
+            EXPECT_EQ(model.binned != nullptr, binned);
+            EXPECT_EQ(predict_raw(model, kProbes, 1), want) << set_text << (binned ? " (binned)" : " (direct)");
+        }
     }
 
 } // namespace

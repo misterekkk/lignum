@@ -505,7 +505,7 @@ namespace lignum {
             }
         }
 
-        // ---- Experimental binned kernel (LIGNUM_BINNED, see src/binned.hpp) --------------------
+        // ---- Binned kernel (see src/binned.hpp) ----------------------------------------------
 
         // Number of cuts <= x (branch-free binary search); NaN -> kNanBin.
         LIGNUM_INLINE uint16_t bin_of(const double* __restrict__ cuts, uint32_t len, double x) {
@@ -728,7 +728,7 @@ namespace lignum {
             }
             if (n_samples == 0) return;
 
-            // Experimental binned path for batches; single rows keep the direct traversal.
+            // Batches use the binned kernel when available; a few rows keep the direct traversal.
             const bool binned = model.binned && n_samples >= kMinRowsForThreads;
             auto run_model = [&](double* dst, bool raw) {
                 if (binned) run_binned_any(model, X, n_samples, n_features, dst, n_jobs, strategy, raw);

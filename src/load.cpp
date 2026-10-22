@@ -31,10 +31,8 @@ namespace lignum {
 
     namespace {
 
-        Model with_binned(Model model) {
-        #if defined(LIGNUM_BINNED) && LIGNUM_BINNED
-            model.binned = build_binned(model);
-        #endif
+        Model with_binned(Model model, bool binned) {
+            if (binned) model.binned = build_binned(model);
             return model;
         }
 
@@ -42,8 +40,8 @@ namespace lignum {
 
     } // namespace
 
-    Model load(const std::string& filepath, const std::string& format) {
-        return with_binned(load_any(filepath, lower_case(format)));
+    Model load(const std::string& filepath, const std::string& format, bool binned) {
+        return with_binned(load_any(filepath, lower_case(format)), binned);
     }
 
     namespace {

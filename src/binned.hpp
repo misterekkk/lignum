@@ -8,8 +8,7 @@
 
 namespace lignum {
 
-    // Experimental "binned" representation (LIGNUM_BINNED). Every input value is mapped once per
-    // row to a 16-bit code:
+    // Binned representation. Every input value is mapped once per row to a 16-bit code:
     //
     //   numeric feature:      bin(x) = number of the feature's split thresholds t with t <= x,
     //                         so `x >= t_k` is exactly `bin(x) >= k + 1`

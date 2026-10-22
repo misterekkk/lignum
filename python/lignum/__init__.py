@@ -76,6 +76,11 @@ class Model:
         return self._c_model.n_outputs
 
     @property
+    def uses_binned(self) -> bool:
+        """Whether batches use the binned kernel (False when disabled or unsupported by the model)."""
+        return self._c_model.uses_binned
+
+    @property
     def n_features(self) -> int:
         """Minimum number of columns the input must have."""
         return self._c_model.n_features
@@ -101,7 +106,7 @@ class Model:
         self._c_model.save(str(filepath))
 
 
-def load(filepath: str, format: str = "auto") -> Model:
+def load(filepath: str, format: str = "auto", binned: bool = True) -> Model:
     """
     Load a trained model from a JSON or Lignum binary file.
 
@@ -112,6 +117,11 @@ def load(filepath: str, format: str = "auto") -> Model:
     format : {'auto', 'lignum', 'binary', 'lightgbm', 'xgboost'}, default='auto'
         Expected format of the model file. If set to 'auto', the function will 
         attempt to infer the format from the file contents.
+    binned : bool, default=True
+        Prepare the binned kernel used for batches of 8 or more rows: inputs are mapped
+        once per row to integer bin codes and categorical decisions are precomputed, so the
+        tree walk compares small integers. Results are identical either way; False keeps
+        only the direct traversal (lower memory use).
 
     Returns
     -------
@@ -134,5 +144,5 @@ def load(filepath: str, format: str = "auto") -> Model:
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
 
-    c_model = _core.load(str(filepath), format)
+    c_model = _core.load(str(filepath), format, binned)
     return Model(c_model)
