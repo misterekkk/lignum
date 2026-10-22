@@ -22,6 +22,8 @@ sudo apt-get update -qq
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential cmake git curl linux-tools-common >/dev/null
 command -v uv >/dev/null || { curl -LsSf https://astral.sh/uv/install.sh | sh; }
 export PATH="$HOME/.local/bin:$PATH"
+# uv's own Python 3.12 (with headers for the extension), whatever the image ships or lacks.
+export UV_PYTHON_PREFERENCE=only-managed
 
 if [ ! -d lignum ] && [ ! -f benchmarks/bench.py ]; then
     git clone -q https://github.com/misterekkk/lignum.git
@@ -41,6 +43,21 @@ uv pip install -q --python .venv/bin/python ".[test]" nanobind scikit-build-core
 uv pip install -q --python .venv/bin/python lleaves "llvmlite<0.45"
 make py-build >/dev/null
 PY=.venv/bin/python
+
+mkdir -p benchmarks/.cache   # target of the scp below
+# Data sets first, so a blocked download stops the run now and not after half an hour.
+# scikit-learn fetches California and Covertype from figshare, which often refuses cloud servers.
+if ! $PY -c "
+import sys; sys.path.insert(0, 'benchmarks')
+import datasets
+for name, load in datasets.LOADERS.items():
+    load(); print('data set', name, 'ok')
+"; then
+    echo
+    echo "A data set could not be downloaded. Copy them from a machine that has them, then run again:"
+    echo "  scp -r benchmarks/.cache/datasets root@<server-ip>:$PWD/benchmarks/.cache/"
+    exit 1
+fi
 
 OUT="$HOME/lignum-bench-$(hostname)-$(uname -m)-$(date +%Y%m%d-%H%M)"
 mkdir -p "$OUT"
