@@ -390,6 +390,7 @@ class Result:
     batch1_best_s: float | None = None
     lat1_us: float | None = None
     lat1_st_us: float | None = None
+    lat1_st_p99_us: float | None = None
     lat100_us: float | None = None
     lat100_st_us: float | None = None
     mismatch_bench: int | None = None
@@ -410,15 +411,19 @@ def time_batch(predict: Predict, X: np.ndarray, n: int, repeats: int) -> tuple[f
     return min(times), statistics.median(times)
 
 
-def time_latency(predict: Predict, X: np.ndarray, n: int, budget_s: float) -> float:
+def time_latency(predict: Predict, X: np.ndarray, n: int, budget_s: float, with_p99: bool = False):
+    """Median latency in µs (and p99 when with_p99)."""
     predict(X, n)
     times = []
     deadline = time.perf_counter() + budget_s
-    while len(times) < 50 or (time.perf_counter() < deadline and len(times) < 5000):
+    while len(times) < 50 or (time.perf_counter() < deadline and len(times) < 20000):
         t0 = time.perf_counter()
         predict(X, n)
         times.append(time.perf_counter() - t0)
-    return statistics.median(times) * 1e6
+    median = statistics.median(times) * 1e6
+    if not with_p99:
+        return median
+    return median, float(np.percentile(times, 99)) * 1e6
 
 
 def compare(got: np.ndarray, ref: np.ndarray) -> tuple[int, float]:
@@ -445,7 +450,7 @@ def run_engine(w: Workload, engine: str, args, tmp: Path, reference: dict) -> Re
 
         X1, X100 = np.ascontiguousarray(w.X[:1]), np.ascontiguousarray(w.X[:100])
         r.lat1_us = time_latency(predict, X1, N_THREADS, args.latency_budget)
-        r.lat1_st_us = time_latency(predict, X1, 1, args.latency_budget)
+        r.lat1_st_us, r.lat1_st_p99_us = time_latency(predict, X1, 1, args.latency_budget, with_p99=True)
         r.lat100_us = time_latency(predict, X100, N_THREADS, args.latency_budget)
         r.lat100_st_us = time_latency(predict, X100, 1, args.latency_budget)
     except NotSupported as e:
@@ -520,18 +525,18 @@ def render(results: list[Result], env: dict, args) -> str:
         lines += [
             f"## {model}",
             "",
-            "| engine | prep [s] | batch best [s] | batch median [s] | 1 thread [s] | 1 row [µs] | 1 row, 1 thr [µs] | 100 rows [µs] | 100 rows, 1 thr [µs] | mismatch bench | mismatch train | max abs diff |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| engine | prep [s] | batch best [s] | batch median [s] | 1 thread [s] | 1 row [µs] | 1 row, 1 thr [µs] | 100 rows [µs] | 100 rows, 1 thr [µs] | mismatch bench | mismatch train | max abs diff | 1 row, 1 thr p99 [µs] |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
         for r in (r for r in results if r.model == model):
             if r.error:
-                lines.append(f"| {r.engine} | {r.error} |" + " |" * 11)
+                lines.append(f"| {r.engine} | {r.error} |" + " |" * 12)
                 continue
             maxdiff = max(r.maxdiff_bench, r.maxdiff_train)
             lines.append(
                 f"| {r.engine} | {fmt(r.prep_s, 's')} | {fmt(r.batch_best_s, 's')} | {fmt(r.batch_median_s, 's')} | "
                 f"{fmt(r.batch1_best_s, 's')} | {fmt(r.lat1_us, 'us')} | {fmt(r.lat1_st_us, 'us')} | {fmt(r.lat100_us, 'us')} | "
-                f"{fmt(r.lat100_st_us, 'us')} | {r.mismatch_bench:,} | {r.mismatch_train:,} | {fmt(maxdiff, 'diff')} |"
+                f"{fmt(r.lat100_st_us, 'us')} | {r.mismatch_bench:,} | {r.mismatch_train:,} | {fmt(maxdiff, 'diff')} | {fmt(r.lat1_st_p99_us, 'us')} |"
             )
         lines.append("")
     return "\n".join(lines)
