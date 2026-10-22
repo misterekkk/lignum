@@ -13,7 +13,7 @@ export default defineConfig({
       logo: { src: './assets/logo.svg' },
       favicon: '/favicon.svg',
       social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/misterekkk/lignum' }],
-      editLink: { baseUrl: 'https://github.com/misterekkk/lignum/edit/dev/v0.2/docs/' },
+      editLink: { baseUrl: 'https://github.com/misterekkk/lignum/edit/main/docs/' },
       customCss: ['./src/styles/custom.css'],
       sidebar: [
         { label: 'Start', items: ['guides/getting-started'] },

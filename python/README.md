@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/misterekkk/lignum/dev/v0.2/docs/assets/logo.svg" width="96" alt="lignum logo">
+  <img src="https://raw.githubusercontent.com/misterekkk/lignum/main/docs/assets/logo.svg" width="96" alt="lignum logo">
 </p>
 
 # lignum
