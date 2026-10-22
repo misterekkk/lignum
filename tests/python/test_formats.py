@@ -125,3 +125,14 @@ def test_auto_detection_and_errors(tmp_path, data):
     truncated.write_bytes(truncated.read_bytes()[:200])
     with pytest.raises(RuntimeError, match="Malformed UBJSON"):
         lg.load(str(truncated))
+
+
+@pytest.mark.parametrize("params, message", [({"linear_tree": True}, "linear trees"),
+                                             ({"boosting": "rf", "bagging_fraction": 0.7, "bagging_freq": 1}, "random forest")])
+def test_unsupported_lightgbm_models_are_rejected(tmp_path, data, params, message):
+    # Predicting them with plain trees would be silently wrong, so both formats refuse them.
+    booster = lgb.train({"objective": "regression", "verbose": -1, **params}, lgb.Dataset(data["X"], data["y"]), num_boost_round=5)
+    txt, js = lightgbm_files(booster, tmp_path)
+    for path in (txt, js):
+        with pytest.raises(RuntimeError, match=message):
+            lg.load(str(path))

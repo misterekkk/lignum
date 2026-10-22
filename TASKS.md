@@ -193,7 +193,8 @@ precomputed decision bits (-47%); evaluating all 7 slots speculatively (2x slowe
 ## Model formats
 
 - [x] LightGBM `model.txt` (save_model) and XGBoost `.ubj` (UBJSON) besides the JSON files; `format="auto"` recognises every format by content. Text numbers parse through simdjson (exact, fast path), UBJSON is rewritten as JSON skipping training statistics. M4, parse only (binned=False): Covertype 500 trees JSON 13.8 / txt 7.2 ms, 5000 trees JSON 127 / txt 67 ms; XGBoost 3000 trees JSON 36 / ubj 63 ms; `.bin` 0.2-0.7 ms
-- [ ] LightGBM linear trees and random forest (boosting=rf: average_output) are rejected (text) — support or reject in JSON too
+- [x] LightGBM linear trees and random forests (boosting=rf) are rejected from both the text and the JSON format (the JSON path used to predict them silently wrong)
+- [ ] Support them if someone needs them: linear leaves = leaf_const + sum(coeff * x), leaf_value when a feature is NaN; rf averages over iterations
 
 ## Stage 5 — Zero-copy input streaming (inference only)
 

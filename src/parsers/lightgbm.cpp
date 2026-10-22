@@ -68,6 +68,10 @@ namespace lignum {
                 auto node = std::make_unique<TempBinNode>();
 
                 if (obj["left_child"].error() != simdjson::SUCCESS) {
+                    // Linear trees (linear_tree=true) add a linear model per leaf: not supported.
+                    if (obj["leaf_const"].error() == simdjson::SUCCESS || obj["leaf_coeff"].error() == simdjson::SUCCESS) {
+                        throw std::runtime_error("Malformed LightGBM model file: linear trees (linear_tree=true) are not supported.");
+                    }
                     node->is_leaf = true;
                     node->threshold_or_value = obj["leaf_value"].get_double();
                     return node;
@@ -156,6 +160,11 @@ namespace lignum {
             }
             if (n_outputs < 1 || n_outputs > 65535) {
                 throw std::runtime_error("Unsupported number of trees per iteration: " + std::to_string(n_outputs) + ".");
+            }
+
+            bool average_output = false;
+            if (doc["average_output"].get_bool().get(average_output) == simdjson::SUCCESS && average_output) {
+                throw std::runtime_error("Malformed LightGBM model file: random forest models (boosting=rf) are not supported yet.");
             }
 
             auto obj_elem = doc["objective"];
