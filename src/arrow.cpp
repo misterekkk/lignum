@@ -1,4 +1,5 @@
 #include <lignum/lignum.hpp>
+#include "columns.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -140,6 +141,24 @@ namespace lignum {
         #endif
         }
 
+        // The batch's feature columns as a ColumnSource for the binned kernel.
+        class ArrowColumns final : public ColumnSource {
+            public:
+                ArrowColumns(const std::vector<Column>& columns, const Column& rows) : columns_(columns), rows_(rows) {}
+
+                void read(size_t column, size_t begin, size_t count, double* dst) const override {
+                    fill(columns_[column], static_cast<int64_t>(begin), static_cast<int64_t>(count), dst, 1);
+                    if (!rows_.validity) return;
+                    for (size_t i = 0; i < count; i++) {
+                        if (!rows_.valid(rows_.offset + static_cast<int64_t>(begin + i))) dst[i] = std::numeric_limits<double>::quiet_NaN();
+                    }
+                }
+
+            private:
+                const std::vector<Column>& columns_;
+                const Column& rows_;
+        };
+
     } // namespace
 
     void predict_arrow(const Model& model, const ArrowSchema& schema, const ArrowArray& batch, double* out, bool raw_score,
@@ -172,6 +191,14 @@ namespace lignum {
         rows.offset = batch.offset;
         rows.validity = (batch.null_count != 0 && batch.n_buffers > 0) ? static_cast<const uint8_t*>(batch.buffers[0]) : nullptr;
 
+        // Binned kernel: bins straight from the columns, no row-major copy.
+        if (model.binned) {
+            const ArrowColumns source(columns, rows);
+            predict_columns(model, source, static_cast<size_t>(n), nf, out, raw_score, n_jobs, strategy);
+            return;
+        }
+
+        // Direct traversal: rows are converted to a row-major matrix block by block.
         const size_t width = model.output_width(raw_score);
         const int64_t tile_rows = std::max<int64_t>(8, static_cast<int64_t>(kTileBytes / (nf * sizeof(double))));
         // Converts rows [start, start + count) and predicts them with `jobs` threads.

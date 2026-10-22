@@ -1,6 +1,7 @@
 #include <lignum/model.hpp>
 
 #include "binned.hpp"
+#include "columns.hpp"
 #include "compiled.hpp"
 
 #include <algorithm>
@@ -635,9 +636,10 @@ namespace lignum {
         class BinnedKernel {
             public:
                 // compiled: the model's compiled trees to use, or null for the interpreter.
+                // columns: columnar input to bin instead of the row-major X (then X is null).
                 BinnedKernel(const Model& model, const BinnedForest& forest, const CompiledForest* compiled, const double* X,
-                             size_t n_features, bool raw_score)
-                    : m_(model), f_(forest), compiled_(compiled), X_(X), n_features_(n_features), raw_score_(raw_score) {}
+                             size_t n_features, bool raw_score, const ColumnSource* columns = nullptr)
+                    : m_(model), f_(forest), compiled_(compiled), columns_(columns), X_(X), n_features_(n_features), raw_score_(raw_score) {}
 
                 void predict_rows(size_t i_begin, size_t i_end, double* __restrict__ out) const {
                     const size_t nd = f_.n_features;
@@ -648,10 +650,11 @@ namespace lignum {
                     decision_buffer.resize((i_end - i_begin) * nw);
                     uint16_t* codes = buffer.data();
                     uint64_t* decisions = decision_buffer.data();
+                    if (columns_) bin_columns(i_begin, i_end, codes, decisions);
                     // Compiled trees come with their own binning of the numeric features.
-                    if (compiled_) compiled_->bin(&X_[i_begin * n_features_], n_features_, i_end - i_begin, codes);
+                    else if (compiled_) compiled_->bin(&X_[i_begin * n_features_], n_features_, i_end - i_begin, codes);
                     const bool numeric = !compiled_;
-                    for (size_t i = i_begin; i < i_end; i++) {
+                    for (size_t i = i_begin; i < i_end && !columns_; i++) {
                         const double* row = &X_[i * n_features_];
                         uint16_t* rc = &codes[(i - i_begin) * nd];
                         for (size_t j = 0; j < nd; j++) {
@@ -699,9 +702,45 @@ namespace lignum {
                 const Model& m_;
                 const BinnedForest& f_;
                 const CompiledForest* compiled_;
+                const ColumnSource* columns_;
                 const double* X_;
                 size_t n_features_;
                 bool raw_score_;
+
+                // Columnar input: each feature column of the chunk is read once into a small
+                // contiguous buffer and binned in one loop (same cuts, same codes as bin_of on
+                // rows), then the categorical decision bits are copied per row.
+                void bin_columns(size_t i_begin, size_t i_end, uint16_t* __restrict__ codes, uint64_t* __restrict__ decisions) const {
+                    const size_t nd = f_.n_features, nw = f_.decision_words, count = i_end - i_begin;
+                    thread_local std::vector<double> values;
+                    values.resize(count);
+                    for (size_t j = 0; j < nd; j++) {
+                        columns_->read(f_.feature_of[j], i_begin, count, values.data());
+                        const uint8_t kind = f_.feature_kind[j];
+                        if (kind == feature_kind::Numeric) {
+                            const uint32_t lo = f_.cut_offsets[j];
+                            const double* cuts = &f_.cuts[lo];
+                            const uint32_t len = f_.cut_offsets[j + 1] - lo;
+                            for (size_t i = 0; i < count; i++) codes[i * nd + j] = bin_of(cuts, len, values[i]);
+                        } else {
+                            const bool xgboost = kind == feature_kind::XGBoostCategory;
+                            for (size_t i = 0; i < count; i++) codes[i * nd + j] = category_code(values[i], xgboost);
+                        }
+                    }
+                    for (size_t i = 0; i < count; i++) {
+                        const uint16_t* rc = &codes[i * nd];
+                        uint64_t* rd = &decisions[i * nw];
+                        for (size_t k = 0; k < f_.n_cat_features; k++) {
+                            const BinnedCatFeature& cf = f_.cat_features[k];
+                            const uint16_t code = rc[cf.dense];
+                            if (code < cf.n_categories) {
+                                std::memcpy(rd + cf.row_offset, &f_.cat_tables[cf.table_offset + uint64_t{code} * cf.words], cf.words * sizeof(uint64_t));
+                            } else {
+                                std::memset(rd + cf.row_offset, 0, cf.words * sizeof(uint64_t));
+                            }
+                        }
+                    }
+                }
 
                 // Adds a leaf to the running sum of row i's output for tree t, in model order.
                 LIGNUM_INLINE void add(double* __restrict__ out, size_t i, size_t t, int32_t node) const {
@@ -777,10 +816,10 @@ namespace lignum {
 
         template <typename Acc, bool Multi>
         void run_binned(const Model& model, const double* X, size_t n_samples, size_t n_features, double* out,
-                        int n_jobs, Strategy strategy, bool raw_score) {
+                        int n_jobs, Strategy strategy, bool raw_score, const ColumnSource* columns) {
             // Compiled trees from compiled_min_rows rows on (see Model::compiled_min_rows).
             const CompiledForest* compiled = n_samples >= model.compiled_min_rows ? model.compiled.get() : nullptr;
-            const BinnedKernel<Acc, Multi> kernel(model, *model.binned, compiled, X, n_features, raw_score);
+            const BinnedKernel<Acc, Multi> kernel(model, *model.binned, compiled, X, n_features, raw_score, columns);
             const int n_threads = resolve_threads(n_jobs);
             if (strategy == Strategy::Auto) strategy = choose_strategy(n_samples, n_threads);
             if (compiled) {
@@ -802,14 +841,30 @@ namespace lignum {
         }
 
         void run_binned_any(const Model& model, const double* X, size_t n_samples, size_t n_features, double* out,
-                            int n_jobs, Strategy strategy, bool raw_score) {
+                            int n_jobs, Strategy strategy, bool raw_score, const ColumnSource* columns = nullptr) {
             const bool multi = model.n_outputs > 1;
             if (model.float32) {
-                if (multi) run_binned<float, true>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
-                else       run_binned<float, false>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+                if (multi) run_binned<float, true>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score, columns);
+                else       run_binned<float, false>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score, columns);
             } else {
-                if (multi) run_binned<double, true>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
-                else       run_binned<double, false>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+                if (multi) run_binned<double, true>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score, columns);
+                else       run_binned<double, false>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score, columns);
+            }
+        }
+
+        // Argmax (XGBoost multi:softmax) narrows K margins to one column, so it cannot be done in place.
+        template <typename Run>
+        void with_outputs(const Model& model, size_t n_samples, double* out, bool raw_score, Run run_model) {
+            if (raw_score || model.transform != transform::Argmax) {
+                run_model(out, raw_score);
+                return;
+            }
+            const size_t K = model.n_outputs;
+            std::vector<double> margins(n_samples * K);
+            run_model(margins.data(), true);
+            for (size_t i = 0; i < n_samples; i++) {
+                const double* row = &margins[i * K];
+                out[i] = static_cast<double>(std::max_element(row, row + K) - row);
             }
         }
 
@@ -823,27 +878,26 @@ namespace lignum {
 
             // Batches use the binned kernel when available; a few rows keep the direct traversal.
             const bool binned = model.binned && n_samples >= kMinRowsForBinned;
-            auto run_model = [&](double* dst, bool raw) {
+            with_outputs(model, n_samples, out, raw_score, [&](double* dst, bool raw) {
                 if (binned) run_binned_any(model, X, n_samples, n_features, dst, n_jobs, strategy, raw);
                 else        run_any(model, X, n_samples, n_features, dst, n_jobs, strategy, raw);
-            };
-
-            if (raw_score || model.transform != transform::Argmax) {
-                run_model(out, raw_score);
-                return;
-            }
-
-            // Argmax narrows K margins to one column, so it cannot be done in place.
-            const size_t K = model.n_outputs;
-            std::vector<double> margins(n_samples * K);
-            run_model(margins.data(), true);
-            for (size_t i = 0; i < n_samples; i++) {
-                const double* row = &margins[i * K];
-                out[i] = static_cast<double>(std::max_element(row, row + K) - row);
-            }
+            });
         }
 
     } // namespace
+
+    void predict_columns(const Model& model, const ColumnSource& source, size_t n_rows, size_t n_columns, double* out,
+                         bool raw_score, int n_jobs, Strategy strategy) {
+        if (!model.binned) throw std::logic_error("predict_columns needs the binned kernel.");
+        if (n_columns < model.n_features) {
+            throw std::invalid_argument("Input has " + std::to_string(n_columns) + " features, but the model requires at least " +
+                                        std::to_string(model.n_features) + ".");
+        }
+        if (n_rows == 0) return;
+        with_outputs(model, n_rows, out, raw_score, [&](double* dst, bool raw) {
+            run_binned_any(model, nullptr, n_rows, n_columns, dst, n_jobs, strategy, raw, &source);
+        });
+    }
 
     void Model::predict(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds,
                         int n_jobs, Strategy strategy) const {
