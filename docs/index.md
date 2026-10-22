@@ -68,7 +68,7 @@ fast_model = lignum.load("lignum_model.bin", format="binary")
 preds = fast_model.predict(X, n_jobs=-1)
 
 ```
-### Scenario C: Compiled mode (experimental, Linux and macOS)
+### Scenario C: Compiled mode (experimental)
 
 For the highest throughput, compile the trees to native code with the system C compiler. Predictions stay
 bit-identical to the source library; on real data the compiled trees are typically 2-4x faster than the
@@ -93,4 +93,8 @@ preds = model.predict(X)
 - Loading a library runs its native code: only load libraries you built or trust, as with pickle files.
 - `model.compile(fallback=True)` keeps the interpreter with a warning when no compiler is available.
 - Both modes stay available: `model.decompile()` returns to the interpreter, `model.uses_compiled` tells which
-  one predicts. The interpreter can be faster on data whose splits are hard to predict, so measure on your data.
+  one predicts. The interpreter can be faster on data whose splits are hard to predict, mostly for small batches:
+  `model.autotune(X_sample)` (or `compile(autotune=X_sample)`) times both on your data and sets
+  `model.compiled_min_rows`, the batch size from which the compiled trees are used.
+- On Windows, `compiler="auto"` uses `cl` (Visual Studio with C++ tools, found automatically), MinGW `gcc` or
+  `clang`; on Linux and macOS it uses `cc`.

@@ -171,6 +171,8 @@ synthetic data.
 - [x] CI (x86 EPYC 9V45, ARM Neoverse-N2, 4 vCPU, `benchmarks/results/ci/2026-10-22-gh-*-d6bce3f.md`): compiled beats lleaves on every model on ARM and on all but Covertype on x86 (0.246 vs 0.202 s); 1 row 2 µs (x86) / 4 µs (ARM); 0 mismatches
 - [x] Ship compiled libraries: `compile(library=...)`, `load(..., compiled=...)` / `load_compiled()`; the library records a model fingerprint (FNV-1a of trees, cuts, leaves, outputs, precision) and the generator ABI, mismatches raise; missing compiler gives a clear error, `compile(fallback=True)` keeps the interpreter. Attaching takes ~2 ms (Covertype, Diabetes)
 - [x] Compiled code size: leaf constants from a `.rodata` table instead of mov+3 movk+fmov (Covertype -11%); locals only for the most used features (LIGNUM_COMPILED_LOCALS, -6%)
+- [x] `autotune(X_sample)` / `compile(autotune=...)`: times interpreter and compiled at 1, 4, 16, ... rows and sets `compiled_min_rows` (M4: compiled wins from 1 row on California, Covertype, synthetic)
+- [x] Compiled mode on Windows (cl via vswhere/vcvarsall, MinGW gcc, clang; LoadLibrary) and in the C API (LignumModelCompile/LoadCompiled/Decompile/UsesCompiled)
 - [ ] Interpreter vs compiled by batch size: on M4 compiled wins from 1 row (warm caches, e.g. Diabetes 1 row 6 -> 3 us); check p99 single-row latency with cold code on x86 before choosing a threshold. CI: on the synthetic numeric model (unpredictable branches) the interpreter wins on x86 (1 thread 0.96 vs 1.39 s, 100 rows 169 vs 307 µs), so pick by measurement at compile time rather than by batch size
 
 ### Binned kernel results (CI `bench-lleaves.yml`, 300k rows, 500 trees, 4 threads)

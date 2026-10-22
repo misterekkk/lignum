@@ -92,6 +92,9 @@ NB_MODULE(_core, m) {
         }, nb::arg("library"), "Attaches a library built earlier by compile() for this model.")
         .def("decompile", [](Model& self) { self.compiled = nullptr; }, "Drops the compiled trees.")
         .def_prop_ro("uses_compiled", [](const Model& self) { return self.compiled != nullptr; })
+        .def_prop_rw("compiled_min_rows", [](const Model& self) { return self.compiled_min_rows; },
+                     [](Model& self, size_t rows) { self.compiled_min_rows = rows; },
+                     "Batches with fewer rows use the interpreter even when compiled.")
         .def("save", &Model::save, nb::arg("filepath"), "Saves lignum format model to binary.")
         .def_prop_ro("n_outputs", [](const Model& self) { return self.n_outputs; }, "Number of outputs (classes for multiclass models).")
         .def_prop_ro("uses_binned", [](const Model& self) { return self.binned != nullptr; },

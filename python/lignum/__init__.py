@@ -7,6 +7,9 @@ C++ engine for direct JSON inference and mmap-based binary loading.
 """
 
 import os
+import statistics
+import sys
+import time
 import warnings
 
 import numpy as np
@@ -78,7 +81,8 @@ class Model:
         return self._c_model.n_outputs
 
     def compile(self, compiler: str = "auto", flags: str = "", work_dir: str = "", jobs: int = 0,
-                block_trees: int = 16, library: str | os.PathLike | None = None, fallback: bool = False) -> dict:
+                block_trees: int = 16, library: str | os.PathLike | None = None, fallback: bool = False,
+                autotune: np.ndarray | None = None) -> dict:
         """
         Experimental: compile the trees to native code with the system C compiler.
 
@@ -104,6 +108,9 @@ class Model:
         fallback : bool, default=False
             When the compiler is missing or fails, warn and keep the interpreter instead of
             raising. The returned dict then has `compiled=False` and the `error`.
+        autotune : array, optional
+            Sample of the data to predict on; after compiling, `autotune(sample)` picks the
+            batch size from which the compiled trees are used (result under `autotune`).
 
         Returns
         -------
@@ -130,7 +137,81 @@ class Model:
             warnings.warn(f"lignum: compiled mode unavailable, using the interpreter ({error})", RuntimeWarning, stacklevel=2)
             return {"compiled": False, "error": str(error)}
         stats["compiled"] = True
+        if autotune is not None:
+            stats["autotune"] = self.autotune(autotune)
         return stats
+
+    def autotune(self, X: np.ndarray, n_jobs: int = -1, budget: float = 1.0) -> dict:
+        """
+        Measure the interpreter and the compiled trees on a sample and use each where it is faster.
+
+        Which one wins depends on the model, the data and the CPU: compiled code is usually faster,
+        but on data whose splits are hard to predict the branch-free interpreter can win, mostly
+        for small batches. Batches of 1, 4, 16, ... rows up to the sample size are timed with
+        both (about `budget` seconds in total), and `compiled_min_rows` is set to the smallest
+        size from which the compiled trees win at every larger size (`sys.maxsize`: never).
+        Predictions are identical either way.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            Representative rows (a few thousand are enough).
+        n_jobs : int, default=-1
+            Threads, as in `predict`.
+        budget : float, default=1.0
+            Approximate time to spend measuring, in seconds.
+
+        Returns
+        -------
+        dict
+            `compiled_min_rows` and `timings`: {rows: (interpreter_us, compiled_us)}, median per call.
+        """
+        if not self.uses_compiled:
+            raise RuntimeError("autotune needs compiled trees: call compile() or load(..., compiled=...) first.")
+        X = np.ascontiguousarray(X, dtype=np.float64)
+        sizes = []
+        n = 1
+        while n < len(X):
+            sizes.append(n)
+            n *= 4
+        sizes.append(len(X))
+        per_measurement = budget / (2 * len(sizes))
+
+        def median_us(batch, min_rows):
+            self._c_model.compiled_min_rows = min_rows
+            self.predict(batch, n_jobs=n_jobs)  # warm up
+            times = []
+            deadline = time.perf_counter() + per_measurement
+            while len(times) < 3 or (time.perf_counter() < deadline and len(times) < 10000):
+                t0 = time.perf_counter()
+                self.predict(batch, n_jobs=n_jobs)
+                times.append(time.perf_counter() - t0)
+            return statistics.median(times) * 1e6
+
+        timings = {}
+        try:
+            for rows in sizes:
+                batch = X[:rows]
+                timings[rows] = (median_us(batch, sys.maxsize), median_us(batch, 0))
+        finally:
+            self._c_model.compiled_min_rows = 0
+        threshold = sys.maxsize
+        for rows in reversed(sizes):
+            interpreter, compiled = timings[rows]
+            if compiled > interpreter:
+                break
+            threshold = rows
+        self._c_model.compiled_min_rows = threshold
+        return {"compiled_min_rows": threshold, "timings": timings}
+
+    @property
+    def compiled_min_rows(self) -> int:
+        """Batches with fewer rows use the interpreter even when compiled (set by `autotune`)."""
+        return self._c_model.compiled_min_rows
+
+    @compiled_min_rows.setter
+    def compiled_min_rows(self, rows: int) -> None:
+        self._c_model.compiled_min_rows = rows
 
     def load_compiled(self, library: str | os.PathLike) -> None:
         """

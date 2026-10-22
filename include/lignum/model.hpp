@@ -114,6 +114,7 @@ namespace lignum {
             std::shared_ptr<const Data> data;
             std::shared_ptr<const BinnedForest> binned;  // binned kernel for batches; null when disabled or unsupported
             std::shared_ptr<const CompiledForest> compiled;  // experimental: trees compiled to native code (needs binned)
+            size_t compiled_min_rows = 0;  // batches with fewer rows use the interpreter even when compiled
 
             Model() = default;
 

@@ -78,6 +78,12 @@ TEST(Compiled, ShippedLibraryGivesTheInterpretersPredictions) {
     EXPECT_EQ(production.compiled->blocks.size(), 2u);
     EXPECT_EQ(predict_raw(production, kRows, 2), predict_raw(interpreter, kRows, 2));
     EXPECT_EQ(predict_raw(model, kRows, 2), predict_raw(interpreter, kRows, 2));
+
+    // Below compiled_min_rows the interpreter runs; the results do not change.
+    production.compiled_min_rows = 4;
+    EXPECT_EQ(predict_raw(production, kRows, 2), predict_raw(interpreter, kRows, 2));
+    const std::vector<double> three(kRows.begin(), kRows.begin() + 6);
+    EXPECT_EQ(predict_raw(production, three, 2), predict_raw(interpreter, three, 2));
 }
 
 TEST(Compiled, RejectsALibraryOfAnotherModel) {

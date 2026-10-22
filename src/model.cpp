@@ -634,8 +634,10 @@ namespace lignum {
         template <typename Acc, bool Multi>
         class BinnedKernel {
             public:
-                BinnedKernel(const Model& model, const BinnedForest& forest, const double* X, size_t n_features, bool raw_score)
-                    : m_(model), f_(forest), X_(X), n_features_(n_features), raw_score_(raw_score) {}
+                // compiled: the model's compiled trees to use, or null for the interpreter.
+                BinnedKernel(const Model& model, const BinnedForest& forest, const CompiledForest* compiled, const double* X,
+                             size_t n_features, bool raw_score)
+                    : m_(model), f_(forest), compiled_(compiled), X_(X), n_features_(n_features), raw_score_(raw_score) {}
 
                 void predict_rows(size_t i_begin, size_t i_end, double* __restrict__ out) const {
                     const size_t nd = f_.n_features;
@@ -647,8 +649,8 @@ namespace lignum {
                     uint16_t* codes = buffer.data();
                     uint64_t* decisions = decision_buffer.data();
                     // Compiled trees come with their own binning of the numeric features.
-                    if (m_.compiled) m_.compiled->bin(&X_[i_begin * n_features_], n_features_, i_end - i_begin, codes);
-                    const bool numeric = !m_.compiled;
+                    if (compiled_) compiled_->bin(&X_[i_begin * n_features_], n_features_, i_end - i_begin, codes);
+                    const bool numeric = !compiled_;
                     for (size_t i = i_begin; i < i_end; i++) {
                         const double* row = &X_[i * n_features_];
                         uint16_t* rc = &codes[(i - i_begin) * nd];
@@ -681,9 +683,9 @@ namespace lignum {
                     for (size_t i = i_begin; i < i_end; i++) {
                         for (size_t c = 0; c < K; c++) out[i * K + c] = static_cast<double>(static_cast<Acc>(m_.base_scores[c]));
                     }
-                    if (m_.compiled) {
+                    if (compiled_) {
                         // Compiled trees: blocks in model order, each adding its trees to every row.
-                        for (const auto block : m_.compiled->blocks) block(codes, decisions, i_end - i_begin, &out[i_begin * K]);
+                        for (const auto block : compiled_->blocks) block(codes, decisions, i_end - i_begin, &out[i_begin * K]);
                         finish_rows<Acc, Multi>(m_, raw_score_, i_begin, i_end, out);
                         return;
                     }
@@ -696,6 +698,7 @@ namespace lignum {
             private:
                 const Model& m_;
                 const BinnedForest& f_;
+                const CompiledForest* compiled_;
                 const double* X_;
                 size_t n_features_;
                 bool raw_score_;
@@ -775,10 +778,12 @@ namespace lignum {
         template <typename Acc, bool Multi>
         void run_binned(const Model& model, const double* X, size_t n_samples, size_t n_features, double* out,
                         int n_jobs, Strategy strategy, bool raw_score) {
-            const BinnedKernel<Acc, Multi> kernel(model, *model.binned, X, n_features, raw_score);
+            // Compiled trees from compiled_min_rows rows on (see Model::compiled_min_rows).
+            const CompiledForest* compiled = n_samples >= model.compiled_min_rows ? model.compiled.get() : nullptr;
+            const BinnedKernel<Acc, Multi> kernel(model, *model.binned, compiled, X, n_features, raw_score);
             const int n_threads = resolve_threads(n_jobs);
             if (strategy == Strategy::Auto) strategy = choose_strategy(n_samples, n_threads);
-            if (model.compiled) {
+            if (compiled) {
                 // Compiled blocks walk a whole chunk of rows per block: larger chunks keep a
                 // block's branch history useful for longer, bounded so the chunk's codes,
                 // decision bits and sums stay in L2.
