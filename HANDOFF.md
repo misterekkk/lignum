@@ -80,6 +80,22 @@ raporty w `benchmarks/results/ci/2026-10-22-gh-*-d6bce3f.md`, 0 niezgodności bi
 | Adult | 0.090 / 0.288 | **0.028 / 0.097** | 0.034 / 0.115 | 0.080 / 0.316 | **0.016 / 0.068** | 0.025 / 0.099 |
 | Bank | 0.098 / 0.281 | **0.037 / 0.078** | 0.039 / 0.081 | 0.088 / 0.331 | **0.022 / 0.069** | 0.027 / 0.087 |
 
+Po `9ef1786` (tablice liści, lokalne tylko dla 16 / 10 najczęstszych cech; x86 to tym razem EPYC
+7763, inny procesor niż wyżej, więc porównywać tylko w obrębie kolumny; s, 4 wątki / 1 wątek):
+
+| model | x86 interpreter | x86 skompilowany | x86 lleaves | ARM interpreter | ARM skompilowany | ARM lleaves |
+|---|---:|---:|---:|---:|---:|---:|
+| syntetyczny numeryczny | 0.684 / 1.596 | **0.401 / 1.304** | 0.560 / 1.813 | 0.334 / 1.341 | **0.208 / 0.835** | 0.333 / 1.330 |
+| syntetyczny z kategoriami | 1.231 / 3.737 | **0.485 / 1.614** | 2.013 / 4.872 | 0.710 / 2.823 | **0.249 / 0.986** | 0.887 / 3.535 |
+| Diabetes | 0.556 / 1.584 | **0.180 / 0.555** | 1.210 / 2.680 | 0.315 / 1.225 | **0.096 / 0.373** | 0.628 / 2.472 |
+| Covertype | 1.372 / 3.286 | **0.326 / 0.795** | 0.367 / 0.795 | 0.736 / 2.776 | **0.173 / 0.659** | 0.205 / 0.719 |
+| California | 0.056 / 0.153 | **0.017 / 0.044** | 0.029 / 0.069 | 0.033 / 0.135 | **0.008 / 0.033** | 0.015 / 0.057 |
+| Adult | 0.129 / 0.399 | **0.031 / 0.098** | 0.048 / 0.151 | 0.079 / 0.315 | **0.016 / 0.067** | 0.025 / 0.100 |
+| Bank | 0.146 / 0.410 | **0.043 / 0.086** | 0.054 / 0.108 | 0.088 / 0.331 | **0.022 / 0.068** | 0.027 / 0.088 |
+
+Skompilowany jest najszybszy w każdym wierszu poza remisem na Covertype (x86, 1 wątek). Na x86
+`LIGNUM_COMPILED_LOCALS=16` daje to samo co 10 (raport `*-locals16.md`), więc zostaje 10.
+
 Pojedynczy wiersz (1 wątek): skompilowany 1.9-2.3 µs na x86 / 3.7-4.5 µs na ARM, interpreter 5-8 /
 7-11 µs, lleaves 6-15 / 10-62 µs. Wyjątek: syntetyczny numeryczny na x86 (niezależne cechy, skoki
 nieprzewidywalne) — bezskokowy interpreter wygrywa na 1 wątku (0.96 vs 1.39 s) i przy 100 wierszach

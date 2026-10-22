@@ -41,7 +41,8 @@ namespace lignum {
 
         // Features of a block held in locals (the most used ones); the rest read c[feature].
         // M4, Covertype, 1 thread: all (51) 445 ms, 24: 412, 16: 409, 8: 415. x86-64 has half the
-        // general registers, hence a smaller default there.
+        // general registers, hence a smaller default there (CI, EPYC 7763: 16 instead of 10 gives
+        // the same times, Covertype 0.795 -> 0.819 s on one thread).
         #ifndef LIGNUM_COMPILED_LOCALS
             #if defined(__x86_64__) || defined(_M_X64)
                 #define LIGNUM_COMPILED_LOCALS 10
