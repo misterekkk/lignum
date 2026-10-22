@@ -126,6 +126,31 @@ zamiast 23), `-O3`, `-mcpu=native`, bloki 8-64 (szybkość ta sama, kompilacja r
    (niezgodność = `RuntimeError`), `compile(fallback=True)` gdy brak kompilatora. Zostaje Windows
    (MSVC/clang-cl) i C API dla `load_compiled`.
 
+## Stan po 2026-10-22 (wieczór): Windows, C API, autotune, Arrow
+
+- **Windows**: tryb kompilowany działa (`compiler="auto"`: `cl` z PATH, potem Visual Studio przez
+  `vswhere` + `vcvarsall`, potem MinGW `gcc`, potem `clang`); biblioteki `.dll` przez `LoadLibrary`.
+  Testy C++ i Pythona w CI (`windows-latest`) obejmują tryb kompilowany. MSVC nie ma inline asm
+  na x64, więc `LIGNUM_KEEP` jest tam pusty (wolniej, nadal bit-exact).
+- **C API**: `LignumModelCompile`, `LignumModelLoadCompiled`, `LignumModelDecompile`,
+  `LignumModelUsesCompiled`, `LignumModelPredictArrow`.
+- **Biblioteka obok modelu**: `compile(library=...)`, `load(..., compiled=...)` (~2 ms), odcisk
+  modelu + ABI w bibliotece, `compile(fallback=True)`.
+- **autotune**: `model.autotune(X_sample)` / `compile(autotune=...)` ustawia `compiled_min_rows`
+  (od ilu wierszy kod skompilowany); na M4 wychodzi 1 (kompilowany zawsze szybszy).
+- **Arrow**: `predict()` przyjmuje obiekty z `__arrow_c_array__` / `__arrow_c_stream__` (pyarrow,
+  polars, ...), bez zależności od libarrow/pyarrow w rdzeniu; kolumny wg pozycji, typy numeryczne,
+  bool, null, słownikowe (kody kategorii), bitmapy ważności, offsety; bit-exact z macierzą float64.
+  Narzut vs gotowa macierz: Covertype kompilowany +6% (1 wątek) / +15% (10 wątków), reszta w
+  szumie; vs konwersja tabeli w numpy 3.2x szybciej.
+
+**Ryzen (Windows, bez WSL)**: potrzebny kompilator C++ do zbudowania Lignum i C do trybu
+kompilowanego — Visual Studio 2022 Build Tools z „Desktop development with C++” wystarczy (cl
+znajdzie się sam). Potem: `python -m pip install ".[test]"`, `python -m pytest tests/python`,
+`python benchmarks/bench.py --engines lignum,lignum-compiled --only lightgbm-real-covtype,...`.
+lleaves i TL2cgen nie działają natywnie na Windows, więc tam porównanie tylko lignum vs natywne
+biblioteki; z lleaves dalej przez WSL2/Linux.
+
 ## Co jeszcze otwarte (pełna lista w `TASKS.md`)
 
 - Pomiar na dedykowanej maszynie x86 (Ryzen autora): instrukcja w `benchmarks/README.md`
