@@ -115,7 +115,16 @@ test_lignum
 site/
 .venv/
 *.npy
-benchmarks/bench_model_*benchmarks/.cache/
+benchmarks/bench_model_*
+benchmarks/.cache/
+
+# Benchmark scripts write each run to benchmarks/results/; the reports worth keeping are moved into
+# its folders (one per machine and architecture), raw .md / .json / .txt included.
+/benchmarks/results/*
+!/benchmarks/results/*/
+!/benchmarks/results/README.md
+!/benchmarks/results/*/**/*.json
+!/benchmarks/results/*/**/*.txt
 
 # The docs site (Starlight) needs its npm and TypeScript files.
 !docs/package.json

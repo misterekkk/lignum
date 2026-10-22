@@ -2,7 +2,7 @@
 # One-shot benchmark run on a fresh Ubuntu 24.04 cloud server (e.g. Hetzner CCX / CAX):
 # installs the toolchain, builds lignum, runs the comparisons and packs the reports.
 #
-#   curl -LsSf https://raw.githubusercontent.com/misterekkk/lignum/dev/v0.2/benchmarks/cloud.sh | bash
+#   curl -LsSf https://raw.githubusercontent.com/misterekkk/lignum/main/benchmarks/cloud.sh | bash
 #   # or, from a clone: bash benchmarks/cloud.sh
 #
 # Result: ~/lignum-bench-<host>-<date>.tar.gz with the Markdown reports, CPU info and the commit.
@@ -14,7 +14,7 @@ set -euo pipefail
 # Everything runs inside main, so a `curl | bash` pipe cut short cannot run half a script.
 main() {
 
-BRANCH="${BRANCH:-dev/v0.2}"
+BRANCH="${BRANCH:-main}"
 TREES="${TREES:-500}"
 REAL="lightgbm-real-california,lightgbm-real-covtype,lightgbm-real-adult,lightgbm-real-bank,lightgbm-real-diabetes"
 

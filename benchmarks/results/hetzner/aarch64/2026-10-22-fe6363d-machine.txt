@@ -1,0 +1,30 @@
+Architecture:                            aarch64
+CPU op-mode(s):                          32-bit, 64-bit
+Byte Order:                              Little Endian
+CPU(s):                                  4
+On-line CPU(s) list:                     0-3
+Vendor ID:                               ARM
+BIOS Vendor ID:                          QEMU
+Model name:                              Neoverse-N1
+BIOS Model name:                         NotSpecified  CPU @ 2.0GHz
+BIOS CPU family:                         1
+Model:                                   1
+Thread(s) per core:                      1
+Core(s) per socket:                      4
+Socket(s):                               1
+Stepping:                                r3p1
+BogoMIPS:                                50.00
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-3
+
+4
+
+               total        used        free      shared  buff/cache   available
+Mem:           7.5Gi       567Mi       4.8Gi       4.9Mi       2.4Gi       7.0Gi
+Swap:             0B          0B          0B
+
+governor: n/a (VM)
+gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+no OMP_* / GOMP_* / KMP_* variables
+lignum commit fe6363d
+total 53 min

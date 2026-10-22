@@ -2,7 +2,8 @@
 
 `bench.py` compares lignum with native LightGBM/XGBoost, TL2cgen, Treelite GTIL, lleaves and ONNX
 Runtime: preparation time, large-batch throughput (all threads, one thread), latency for 1 and 100
-rows (median, and p99 for one row on one thread) and bit-exactness. Reports go to `results/`.
+rows (median, and p99 for one row on one thread) and bit-exactness. Reports go to `results/`; the
+ones kept in the repository are sorted by machine there (see `results/README.md`).
 
 ## Running on a cloud server
 
@@ -12,7 +13,7 @@ native; real and synthetic models), `bench_arrow.py`, the host-tuned build and `
 the reports into `~/lignum-bench-<host>-<date>.tar.gz`. About 30-40 minutes.
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/misterekkk/lignum/dev/v0.2/benchmarks/cloud.sh | bash
+curl -LsSf https://raw.githubusercontent.com/misterekkk/lignum/main/benchmarks/cloud.sh | bash
 ```
 
 ## Running on a dedicated machine
@@ -20,7 +21,7 @@ curl -LsSf https://raw.githubusercontent.com/misterekkk/lignum/dev/v0.2/benchmar
 Linux (or WSL2 on Windows; lleaves and TL2cgen are not supported natively on Windows):
 
 ```bash
-git clone https://github.com/misterekkk/lignum.git && cd lignum && git checkout dev/v0.2
+git clone https://github.com/misterekkk/lignum.git && cd lignum
 sudo apt install -y build-essential cmake            # compiler + CMake
 curl -LsSf https://astral.sh/uv/install.sh | sh     # uv (Python environments)
 make venv bench-deps                                 # .venv with lignum's test deps and the other engines
