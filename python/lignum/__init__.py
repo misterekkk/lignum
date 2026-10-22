@@ -75,6 +75,28 @@ class Model:
         """Number of model outputs: the number of classes for multiclass models, otherwise 1."""
         return self._c_model.n_outputs
 
+    def compile(self, compiler: str = "cc", flags: str = "-O2", work_dir: str = "", jobs: int = 0) -> dict:
+        """
+        Experimental: compile the trees to native code with the system C compiler.
+
+        Each tree becomes C code with constant thresholds; binning, threads and the summation of
+        leaves stay in lignum, so predictions are unchanged (bit-identical). Libraries are cached
+        by content in `work_dir` (default: a `lignum_compiled` folder in the temp directory).
+        Linux and macOS only.
+
+        Returns timings: codegen_ms, compile_ms, load_ms, source_bytes, cached, library.
+        """
+        return dict(self._c_model.compile(compiler, flags, str(work_dir), jobs))
+
+    def decompile(self) -> None:
+        """Go back to the interpreter."""
+        self._c_model.decompile()
+
+    @property
+    def uses_compiled(self) -> bool:
+        """Whether predictions use compiled trees."""
+        return self._c_model.uses_compiled
+
     @property
     def uses_binned(self) -> bool:
         """Whether batches use the binned kernel (False when disabled or unsupported by the model)."""

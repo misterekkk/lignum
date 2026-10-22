@@ -1,6 +1,7 @@
 #include <lignum/model.hpp>
 
 #include "binned.hpp"
+#include "compiled.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -668,6 +669,18 @@ namespace lignum {
                     const size_t K = Multi ? m_.n_outputs : 1;
                     for (size_t i = i_begin; i < i_end; i++) {
                         for (size_t c = 0; c < K; c++) out[i * K + c] = static_cast<double>(static_cast<Acc>(m_.base_scores[c]));
+                    }
+                    if (m_.compiled) {
+                        // Compiled trees: the generated code returns every tree's leaf for a row; the
+                        // sum stays here, in model order, so results are unchanged.
+                        thread_local std::vector<int32_t> leaves;
+                        leaves.resize(f_.n_trees);
+                        for (size_t i = i_begin; i < i_end; i++) {
+                            m_.compiled->eval(&codes[(i - i_begin) * nd], &decisions[(i - i_begin) * nw], leaves.data());
+                            for (size_t t = 0; t < f_.n_trees; t++) add(out, i, t, leaves[t]);
+                        }
+                        finish_rows<Acc, Multi>(m_, raw_score_, i_begin, i_end, out);
+                        return;
                     }
                     for (size_t t_start = 0; t_start < f_.n_trees; t_start += T_BLOCK) {
                         accumulate(codes, nd, decisions, nw, i_begin, i_end, t_start, std::min(t_start + T_BLOCK, f_.n_trees), out);

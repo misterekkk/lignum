@@ -5,6 +5,7 @@ placed exactly on every split threshold, which is where precision bugs show up.
 """
 
 import json
+import sys
 
 import lightgbm as lgb
 import numpy as np
@@ -264,3 +265,26 @@ def test_multiclass_binary_roundtrip(tmp_path, data, fmt):
     assert restored.n_outputs == 4
     np.testing.assert_array_equal(restored.predict(X), model.predict(X))
     np.testing.assert_array_equal(restored.predict(X, raw_score=True), model.predict(X, raw_score=True))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="compiled mode is POSIX-only")
+@pytest.mark.parametrize("fmt", ["lightgbm", "xgboost"])
+def test_compiled_mode_is_bit_identical(tmp_path, data, fmt, kernel):
+    if not kernel:
+        pytest.skip("compiled mode needs the binned kernel")
+    y = (data["y"] > 0).astype(float)
+    if fmt == "lightgbm":
+        booster = lgb.train({"objective": "binary", "verbose": -1}, lgb.Dataset(data["X_nan"], y), num_boost_round=30)
+        model = lgb_to_lignum(booster, tmp_path)
+        reference = lambda X: booster.predict(X)
+    else:
+        booster = xgb.train({"objective": "binary:logistic", "max_depth": 5}, xgb.DMatrix(data["X_nan"], y), num_boost_round=30)
+        path = tmp_path / "xgb.json"
+        booster.save_model(str(path))
+        model = lg.load(str(path), format="xgboost")
+        reference = lambda X: booster.predict(xgb.DMatrix(X))
+    model.compile(work_dir=str(tmp_path / "compiled"), jobs=2)
+    assert model.uses_compiled
+    X = stress_inputs(data["X_nan"], [], data["rng"])
+    np.testing.assert_array_equal(model.predict(X), reference(X))
+    np.testing.assert_array_equal(model.predict(X[:1]), reference(X[:1]))

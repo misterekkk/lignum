@@ -33,6 +33,7 @@ add_library(lignum STATIC
     src/binned.cpp
     src/builder.cpp
     src/c_api.cpp
+    src/compiled.cpp
     src/io.cpp
     src/load.cpp
     src/model.cpp
@@ -61,6 +62,8 @@ if(APPLE AND NOT OpenMP_ROOT AND NOT DEFINED ENV{OpenMP_ROOT})
         endif()
     endforeach()
 endif()
+
+target_link_libraries(lignum PRIVATE ${CMAKE_DL_LIBS})
 
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
@@ -113,6 +116,7 @@ if(SKBUILD)
     find_package(nanobind CONFIG REQUIRED)
 
     nanobind_add_module(_core python/bindings.cpp)
+    target_include_directories(_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(_core PRIVATE lignum)
     install(TARGETS _core DESTINATION lignum)
 endif()

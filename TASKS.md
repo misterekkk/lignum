@@ -165,6 +165,7 @@ order (gap stays ~4x shuffled), interleaving (sequential walks are slower). A br
 (`-DLIGNUM_BINNED_BRANCHY`) gives -18% on Covertype, -5% Diabetes, but +10-20% elsewhere and 2.2x on
 synthetic data.
 - [ ] Decide: optional compiled backend (code generation for maximum batch throughput) vs. interpreter-only positioning (latency, load time, exactness)
+- [x] Compiled mode prototype (`src/compiled.*`, `model.compile()`): bit-exact, 3.5-5 s to compile 500 trees; 1.4-2x over the interpreter on real data, best engine on Diabetes (0.065 vs lleaves 0.273 s) and synthetic categorical, still 2-3x behind lleaves on Covertype/California/Adult/Bank. Next: sum leaves in generated code, compare raw doubles instead of bins, inlining, -O3 (see HANDOFF.md)
 
 ### Binned kernel results (CI `bench-lleaves.yml`, 300k rows, 500 trees, 4 threads)
 

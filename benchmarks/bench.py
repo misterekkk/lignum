@@ -274,6 +274,14 @@ def engine_lignum_bin(w: Workload, tmp: Path) -> Predict:
     return lambda X, n: model.predict(X, n_jobs=n)
 
 
+def engine_lignum_compiled(w: Workload, tmp: Path) -> Predict:
+    import lignum
+
+    model = lignum.load(str(w.model_json), format=w.family)
+    model.compile(work_dir=str(tmp / "compiled"))
+    return lambda X, n: model.predict(X, n_jobs=n)
+
+
 def _treelite_model(w: Workload):
     import treelite
 
@@ -368,6 +376,7 @@ ENGINES: dict[str, Callable[[Workload, Path], Predict]] = {
     "native": engine_native,
     "lignum": engine_lignum,
     "lignum-bin": engine_lignum_bin,
+    "lignum-compiled": engine_lignum_compiled,
     "tl2cgen": engine_tl2cgen,
     "tl2cgen-tuned": engine_tl2cgen_tuned,
     "gtil": engine_gtil,

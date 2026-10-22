@@ -68,7 +68,8 @@ namespace lignum {
     };
     static_assert(sizeof(KNode) == 64, "KNode must fill exactly one cache line");
 
-    struct BinnedForest;  // binned representation (src/binned.hpp)
+    struct BinnedForest;    // binned representation (src/binned.hpp)
+    struct CompiledForest;  // experimental compiled trees (src/compiled.hpp)
 
     class Data {
         public:
@@ -112,6 +113,7 @@ namespace lignum {
 
             std::shared_ptr<const Data> data;
             std::shared_ptr<const BinnedForest> binned;  // binned kernel for batches; null when disabled or unsupported
+            std::shared_ptr<const CompiledForest> compiled;  // experimental: trees compiled to native code (needs binned)
 
             Model() = default;
 
