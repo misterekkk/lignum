@@ -5,6 +5,8 @@
 
 #include <stddef.h>
 
+#include "arrow.h"
+
 #if defined(_WIN32) && defined(LIGNUM_SHARED)
     #ifdef LIGNUM_EXPORTS
         #define LIGNUM_API __declspec(dllexport)
@@ -53,6 +55,19 @@ LIGNUM_API int LignumModelPredict(LignumModelHandle handle,
                                   int n_jobs,
                                   int strategy,
                                   double* out_preds);
+
+/* Arrow input (C Data Interface): `batch` is a record batch (struct array) described by
+ * `schema`; its first LignumModelNumFeatures columns are the features, by position. Columns may
+ * be float64, float32, integers, boolean or null; dictionary columns give their indices (category
+ * codes). Nulls are NaN; values convert exactly like a float64 matrix, so predictions are the
+ * same. out_preds holds batch->length x width values. Neither structure is released. */
+LIGNUM_API int LignumModelPredictArrow(LignumModelHandle handle,
+                                       const struct ArrowSchema* schema,
+                                       const struct ArrowArray* batch,
+                                       int raw_score,
+                                       int n_jobs,
+                                       int strategy,
+                                       double* out_preds);
 
 /* Experimental compiled mode: compiles the trees to native code with the system C compiler
  * (see Model.compile in the Python docs). Predictions stay bit-identical.

@@ -23,6 +23,7 @@ test = [
     "xgboost",
     "scikit-learn",
     "pandas",
+    "pyarrow",
 ]
 
 [tool.scikit-build]

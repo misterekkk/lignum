@@ -6,6 +6,8 @@ with compiled Lignum models. It bypasses standard parsers by using a native
 C++ engine for direct JSON inference and mmap-based binary loading.
 """
 
+from __future__ import annotations
+
 import os
 import statistics
 import sys
@@ -18,6 +20,10 @@ from . import _core
 
 __all__ = ["Model", "load"]
 __version__ = "0.1.0"
+
+
+def _is_pandas(X) -> bool:
+    return type(X).__module__.split(".")[0] == "pandas"
 
 
 class Model:
@@ -41,8 +47,14 @@ class Model:
 
         Parameters
         ----------
-        X : array-like, shape (n_samples, n_features)
-            The input samples to predict.
+        X : array-like or Arrow data, shape (n_samples, n_features)
+            The input samples to predict: anything numpy converts to a float64 matrix, or Arrow
+            data through the PyCapsule interface (`pyarrow.RecordBatch` / `Table` /
+            `RecordBatchReader`, polars `DataFrame`, ...). Arrow columns are used by position;
+            float64, float32, integer, boolean and null columns are read without copying the
+            table, nulls are NaN and dictionary (categorical) columns give their category codes.
+            Predictions equal those for the same float64 matrix. pandas DataFrames are converted
+            with numpy; pass `pyarrow.Table.from_pandas(df)` for categorical columns.
         raw_score : bool, default=False
             Whether to output raw scores (leaf values) instead of transformed predictions.
         n_jobs : int, default=-1
@@ -72,6 +84,13 @@ class Model:
         # array([0.45, 0.89])
         ```
         """
+        if not isinstance(X, np.ndarray) and not _is_pandas(X):
+            # Arrow PyCapsule interface: pyarrow, polars, duckdb, nanoarrow... (no pyarrow needed here).
+            if hasattr(X, "__arrow_c_array__"):
+                schema, array = X.__arrow_c_array__()
+                return self._c_model.predict_arrow(schema, array, raw_score, n_jobs, strategy)
+            if hasattr(X, "__arrow_c_stream__"):
+                return self._c_model.predict_arrow_stream(X.__arrow_c_stream__(), raw_score, n_jobs, strategy)
         X_arr = np.ascontiguousarray(X, dtype=np.float64)
         return self._c_model.predict(X_arr, raw_score, n_jobs, strategy)
 

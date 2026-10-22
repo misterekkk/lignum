@@ -30,6 +30,7 @@ endif()
 # Core library
 # ---------------------------------------------------------------------------
 add_library(lignum STATIC
+    src/arrow.cpp
     src/binned.cpp
     src/builder.cpp
     src/c_api.cpp
@@ -105,7 +106,7 @@ if(LIGNUM_BUILD_C_LIBRARY)
     include(GNUInstallDirs)
     install(TARGETS lignum_c LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-    install(FILES include/lignum/c_api.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/lignum)
+    install(FILES include/lignum/c_api.h include/lignum/arrow.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/lignum)
 endif()
 
 # ---------------------------------------------------------------------------

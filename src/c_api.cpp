@@ -78,6 +78,16 @@ int LignumModelPredict(LignumModelHandle handle, const double* X, size_t n_sampl
     });
 }
 
+int LignumModelPredictArrow(LignumModelHandle handle, const struct ArrowSchema* schema, const struct ArrowArray* batch,
+                            int raw_score, int n_jobs, int strategy, double* out_preds) {
+    if (!handle || !schema || !batch) return fail("LignumModelPredictArrow: null argument.");
+    if (batch->length > 0 && !out_preds) return fail("LignumModelPredictArrow: null output buffer.");
+    if (strategy < LIGNUM_STRATEGY_AUTO || strategy > LIGNUM_STRATEGY_ROWS) return fail("LignumModelPredictArrow: unknown strategy.");
+    return guarded([&] {
+        lignum::predict_arrow(*as_model(handle), *schema, *batch, out_preds, raw_score != 0, n_jobs, static_cast<lignum::Strategy>(strategy));
+    });
+}
+
 int LignumModelCompile(LignumModelHandle handle, const char* compiler, const char* flags, const char* work_dir, const char* library) {
     if (!handle) return fail("LignumModelCompile: null handle.");
     return guarded([&] {

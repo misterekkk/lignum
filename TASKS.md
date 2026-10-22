@@ -192,10 +192,11 @@ precomputed decision bits (-47%); evaluating all 7 slots speculatively (2x slowe
 
 ## Stage 5 — Zero-copy input streaming (inference only)
 
-- [ ] Arrow C Data / C Stream Interface input (no libarrow dependency)
-- [ ] Column-major accessor in the kernel; benchmark vs row-major
-- [ ] float32 inputs, dictionary columns as categories, validity bitmaps
-- [ ] Re-check latency with Arrow input
+- [x] Arrow C Data / C Stream Interface input (no libarrow dependency): `include/lignum/arrow.h`, `predict_arrow`, `predict_arrow_stream`, `LignumModelPredictArrow`; Python `predict()` takes any `__arrow_c_array__` / `__arrow_c_stream__` object (pyarrow, polars, ...), pandas stays on the numpy path
+- [x] float32 / integer / boolean / null inputs, dictionary columns as categories, validity bitmaps (column and batch), offsets; bit-exact with the float64 matrix
+- [x] Per-thread conversion in L1-sized tiles, then predict on the same thread. M4, Covertype compiled: 1 thread 411 -> 436 ms (+6%), 10 threads 62 -> 72 ms (+15%) vs a ready float64 matrix; other sets within noise; vs converting the table with numpy first (256 ms) 3.2x faster. 1 row with 54 columns: +13 us, of which 11 us are pyarrow's capsule export
+- [ ] Column-major binning straight from Arrow buffers (skips the double conversion; Covertype's remaining +6-15%)
+- [ ] Re-check latency with Arrow input on x86
 
 ## Stage 6 — PyPI
 

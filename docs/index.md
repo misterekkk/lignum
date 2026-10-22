@@ -98,3 +98,23 @@ preds = model.predict(X)
   `model.compiled_min_rows`, the batch size from which the compiled trees are used.
 - On Windows, `compiler="auto"` uses `cl` (Visual Studio with C++ tools, found automatically), MinGW `gcc` or
   `clang`; on Linux and macOS it uses `cc`.
+
+### Scenario D: Arrow data (pyarrow, polars, streams)
+
+`predict` accepts Arrow data through the PyCapsule interface, without copying the table into a numpy matrix and
+without requiring pyarrow itself: `pyarrow.RecordBatch`, `Table` and `RecordBatchReader`, polars `DataFrame`, and
+any object with `__arrow_c_array__` / `__arrow_c_stream__`. Columns are used by position (the first
+`model.n_features` columns); float64, float32, integer, boolean and null columns are supported, nulls are NaN and
+dictionary (categorical) columns give their category codes. Predictions equal those for the same float64 matrix.
+
+```python
+import pyarrow as pa
+
+table = pa.Table.from_pandas(df)        # categorical pandas columns become dictionary columns
+preds = model.predict(table)            # one result for all batches of the table
+for batch in reader:                    # e.g. batches decoded from a Kafka topic
+    preds = model.predict(batch)
+```
+
+C and C++ programs use `LignumModelPredictArrow` (C API) or `lignum::predict_arrow` with the structures of the
+Arrow C Data Interface (`include/lignum/arrow.h`).

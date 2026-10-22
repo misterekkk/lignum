@@ -6,10 +6,28 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/map.h>
 
+#include <algorithm>
+#include <vector>
+
 namespace nb = nanobind;
 using namespace lignum;
 
 namespace {
+
+    template <typename T>
+    T* capsule_pointer(const nb::object& capsule, const char* name) {
+        void* p = PyCapsule_GetPointer(capsule.ptr(), name);
+        if (!p) throw nb::python_error();
+        return static_cast<T*>(p);
+    }
+
+    // Predictions as a numpy array: 1-D for one value per row, otherwise (n_rows, width).
+    nb::ndarray<nb::numpy, double, nb::c_contig, nb::device::cpu> to_numpy(std::vector<double>&& values, size_t n_rows, size_t width) {
+        auto* data = new std::vector<double>(std::move(values));
+        nb::capsule owner(data, [](void* p) noexcept { delete static_cast<std::vector<double>*>(p); });
+        size_t shape[2] = {n_rows, width};
+        return nb::ndarray<nb::numpy, double, nb::c_contig, nb::device::cpu>(data->data(), width == 1 ? 1 : 2, shape, owner);
+    }
 
     Strategy parse_strategy(const std::string& name) {
         if (name == "auto") return Strategy::Auto;
@@ -58,6 +76,32 @@ NB_MODULE(_core, m) {
         nb::arg("strategy") = "auto",
         "Returns model prediction for input data.")
         
+        .def("predict_arrow", [](const Model& self, nb::object schema_capsule, nb::object array_capsule, bool raw_score, int n_jobs,
+                                 const std::string& strategy_name) {
+            const Strategy strategy = parse_strategy(strategy_name);
+            const auto* schema = capsule_pointer<ArrowSchema>(schema_capsule, "arrow_schema");
+            const auto* batch = capsule_pointer<ArrowArray>(array_capsule, "arrow_array");
+            const size_t width = self.output_width(raw_score);
+            std::vector<double> out(static_cast<size_t>(std::max<int64_t>(batch->length, 0)) * width);
+            {
+                nb::gil_scoped_release release;
+                predict_arrow(self, *schema, *batch, out.data(), raw_score, n_jobs, strategy);
+            }
+            return to_numpy(std::move(out), out.size() / width, width);
+        }, nb::arg("schema"), nb::arg("array"), nb::arg("raw_score") = false, nb::arg("n_jobs") = -1, nb::arg("strategy") = "auto",
+           "Predicts an Arrow record batch given as PyCapsules (arrow_schema, arrow_array).")
+        .def("predict_arrow_stream", [](const Model& self, nb::object stream_capsule, bool raw_score, int n_jobs, const std::string& strategy_name) {
+            const Strategy strategy = parse_strategy(strategy_name);
+            auto* stream = capsule_pointer<ArrowArrayStream>(stream_capsule, "arrow_array_stream");
+            std::vector<double> out;
+            size_t n_rows = 0;
+            {
+                nb::gil_scoped_release release;
+                out = predict_arrow_stream(self, *stream, raw_score, n_jobs, strategy, &n_rows);
+            }
+            return to_numpy(std::move(out), n_rows, self.output_width(raw_score));
+        }, nb::arg("stream"), nb::arg("raw_score") = false, nb::arg("n_jobs") = -1, nb::arg("strategy") = "auto",
+           "Predicts every batch of an Arrow stream given as a PyCapsule (arrow_array_stream).")
         .def("compile", [](Model& self, const std::string& compiler, const std::string& flags, const std::string& work_dir, int jobs, int block_trees, const std::string& output) {
             CompileOptions options;
             options.compiler = compiler;
