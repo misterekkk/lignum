@@ -54,6 +54,28 @@ LIGNUM_API int LignumModelPredict(LignumModelHandle handle,
                                   int strategy,
                                   double* out_preds);
 
+/* Experimental compiled mode: compiles the trees to native code with the system C compiler
+ * (see Model.compile in the Python docs). Predictions stay bit-identical.
+ * compiler: NULL or "auto" (cc on POSIX; cl, Visual Studio, gcc, clang on Windows);
+ * flags: NULL or "" for -O2 / /O2; work_dir: NULL for the system temp directory (cache);
+ * library: NULL, or a path to also write the library to (to ship it next to the model).
+ * Needs a model loaded with the binned kernel (the default).
+ * Compile, LoadCompiled and Decompile change the handle: call them before sharing it between
+ * threads, not concurrently with LignumModelPredict. */
+LIGNUM_API int LignumModelCompile(LignumModelHandle handle, const char* compiler, const char* flags,
+                                  const char* work_dir, const char* library);
+
+/* Attaches a library written by LignumModelCompile for this model, without a compiler. Fails for a
+ * library of another model or lignum version. Loading runs the library's code: only load
+ * libraries you trust. */
+LIGNUM_API int LignumModelLoadCompiled(LignumModelHandle handle, const char* library);
+
+/* Goes back to the interpreter. */
+LIGNUM_API int LignumModelDecompile(LignumModelHandle handle);
+
+/* *out_compiled = 1 when predictions use compiled trees, otherwise 0. */
+LIGNUM_API int LignumModelUsesCompiled(LignumModelHandle handle, int* out_compiled);
+
 LIGNUM_API int LignumModelFree(LignumModelHandle handle);
 
 #ifdef __cplusplus

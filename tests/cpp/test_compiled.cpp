@@ -62,11 +62,9 @@ TEST(Compiled, FingerprintChangesWithLeavesAndThresholds) {
     EXPECT_NE(base, lignum::compiled_fingerprint(load_model("fp_c.json", 0.375, 0.3)));
 }
 
-#if !defined(_WIN32)
-
 TEST(Compiled, ShippedLibraryGivesTheInterpretersPredictions) {
     auto model = load_model("ship_src.json");
-    const std::string bin = temp_path("ship.bin"), library = temp_path("ship.so");
+    const std::string bin = temp_path("ship.bin"), library = temp_path("ship.lib_out");
     model.save(bin);
     std::filesystem::remove(library);
     lignum::CompileStats stats;
@@ -84,7 +82,7 @@ TEST(Compiled, ShippedLibraryGivesTheInterpretersPredictions) {
 
 TEST(Compiled, RejectsALibraryOfAnotherModel) {
     auto model = load_model("other_src.json");
-    const std::string library = temp_path("other.so");
+    const std::string library = temp_path("other.lib_out");
     model.compiled = lignum::compile_forest(model, options(library), nullptr);
 
     auto different = load_model("other_dst.json", 0.376);
@@ -93,7 +91,7 @@ TEST(Compiled, RejectsALibraryOfAnotherModel) {
 
 TEST(Compiled, ReportsMissingLibraryAndCompiler) {
     auto model = load_model("missing_src.json");
-    EXPECT_THROW(lignum::load_compiled(model, temp_path("does_not_exist.so")), std::runtime_error);
+    EXPECT_THROW(lignum::load_compiled(model, temp_path("does_not_exist.lib_out")), std::runtime_error);
 
     auto o = options();
     o.compiler = "lignum-no-such-compiler";
@@ -106,5 +104,3 @@ TEST(Compiled, ReportsMissingLibraryAndCompiler) {
         EXPECT_NE(std::string(e.what()).find("not found"), std::string::npos) << e.what();
     }
 }
-
-#endif

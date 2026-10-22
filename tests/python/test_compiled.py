@@ -1,7 +1,6 @@
 """Compiled mode as shipped to production: library next to the model, checks, fallback."""
 
 import json
-import sys
 import warnings
 
 import lightgbm as lgb
@@ -10,9 +9,6 @@ import pytest
 import xgboost as xgb
 
 import lignum as lg
-
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="compiled mode is POSIX-only")
-
 
 @pytest.fixture(autouse=True)
 def binned_only(kernel):

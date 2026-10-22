@@ -1,5 +1,6 @@
 #include <lignum/c_api.h>
 #include <lignum/lignum.hpp>
+#include "compiled.hpp"
 
 #include <exception>
 #include <string>
@@ -26,8 +27,12 @@ namespace {
         return -1;
     }
 
-    const lignum::Model* as_model(LignumModelHandle handle) {
-        return static_cast<const lignum::Model*>(handle);
+    lignum::Model* as_model(LignumModelHandle handle) {
+        return static_cast<lignum::Model*>(handle);
+    }
+
+    std::string or_default(const char* s, const char* fallback) {
+        return (s && *s) ? s : fallback;
     }
 
 } // namespace
@@ -71,6 +76,35 @@ int LignumModelPredict(LignumModelHandle handle, const double* X, size_t n_sampl
         if (raw_score) as_model(handle)->predict_raw(X, n_samples, n_features, out_preds, n_jobs, s);
         else           as_model(handle)->predict(X, n_samples, n_features, out_preds, n_jobs, s);
     });
+}
+
+int LignumModelCompile(LignumModelHandle handle, const char* compiler, const char* flags, const char* work_dir, const char* library) {
+    if (!handle) return fail("LignumModelCompile: null handle.");
+    return guarded([&] {
+        lignum::CompileOptions options;
+        options.compiler = or_default(compiler, "auto");
+        options.flags = or_default(flags, "");
+        options.work_dir = or_default(work_dir, "");
+        options.output = or_default(library, "");
+        as_model(handle)->compiled = lignum::compile_forest(*as_model(handle), options, nullptr);
+    });
+}
+
+int LignumModelLoadCompiled(LignumModelHandle handle, const char* library) {
+    if (!handle || !library) return fail("LignumModelLoadCompiled: null argument.");
+    return guarded([&] { as_model(handle)->compiled = lignum::load_compiled(*as_model(handle), library); });
+}
+
+int LignumModelDecompile(LignumModelHandle handle) {
+    if (!handle) return fail("LignumModelDecompile: null handle.");
+    as_model(handle)->compiled = nullptr;
+    return 0;
+}
+
+int LignumModelUsesCompiled(LignumModelHandle handle, int* out_compiled) {
+    if (!handle || !out_compiled) return fail("LignumModelUsesCompiled: null argument.");
+    *out_compiled = as_model(handle)->compiled != nullptr;
+    return 0;
 }
 
 int LignumModelFree(LignumModelHandle handle) {

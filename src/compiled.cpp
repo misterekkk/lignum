@@ -2,6 +2,7 @@
 #include "binned.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -16,7 +17,13 @@
 #include <vector>
 
 #if defined(_WIN32)
-    // Prototype: POSIX only.
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #include <windows.h>
 #else
     #include <dlfcn.h>
 #endif
@@ -103,7 +110,7 @@ namespace lignum {
                 for (uint32_t k = 0; k < len; k++) out << (k ? ", " : "") << literal(f.cuts[f.cut_offsets[j] + k]);
                 out << "};\n";
             }
-            out << "void lignum_bin(const double* restrict X, size_t stride, size_t n, uint16_t* restrict codes) {\n"
+            out << "LIGNUM_EXPORT void lignum_bin(const double* restrict X, size_t stride, size_t n, uint16_t* restrict codes) {\n"
                 << "  for (size_t i = 0; i < n; i++) {\n"
                 << "    const double* restrict x = X + i * stride;\n"
                 << "    uint16_t* restrict c = codes + i * " << f.n_features << ";\n";
@@ -241,15 +248,139 @@ namespace lignum {
         };
 
         // LIGNUM_KEEP(v): an empty asm that makes v live in a register at this point, so the
-        // compiler cannot sink the per-row loads back into the branches.
+        // compiler cannot sink the per-row loads back into the branches (MSVC has no inline asm
+        // on x64: there it is a no-op, which costs speed, not correctness). LIGNUM_EXPORT makes
+        // the entry points visible in a Windows DLL.
         const char* kPrelude =
             "#include <math.h>\n#include <stddef.h>\n#include <stdint.h>\n"
             "#if defined(__GNUC__) || defined(__clang__)\n"
             "#define restrict __restrict__\n#define LIGNUM_KEEP(v) __asm__(\"\" : \"+r\"(v))\n"
-            "#else\n#define LIGNUM_KEEP(v)\n#endif\n\n";
+            "#else\n#define restrict __restrict\n#define LIGNUM_KEEP(v)\n#endif\n"
+            "#if defined(_WIN32)\n#define LIGNUM_EXPORT __declspec(dllexport)\n"
+            "#else\n#define LIGNUM_EXPORT __attribute__((visibility(\"default\")))\n#endif\n\n";
 
         int run(const std::string& command) {
+        #if defined(_WIN32)
+            // cmd /c drops the first and last quote of the line; wrap it so quoted paths survive.
+            return std::system(("\"" + command + "\"").c_str());
+        #else
             return std::system(command.c_str());
+        #endif
+        }
+
+        std::string quote(const std::string& s) { return "\"" + s + "\""; }
+
+    #if defined(_WIN32)
+        constexpr const char* kNull = "NUL";
+        constexpr const char* kLibraryExtension = ".dll";
+    #else
+        constexpr const char* kNull = "/dev/null";
+        constexpr const char* kLibraryExtension = ".so";
+    #endif
+
+        // The C compiler and how to drive it.
+        struct Toolchain {
+            std::string compiler;
+            bool msvc = false;     // cl / clang-cl command line; otherwise gcc / clang
+            std::string prefix;    // Windows: sets up the Visual Studio environment first
+            std::string name() const { return prefix.empty() ? compiler : compiler + " (Visual Studio)"; }
+        };
+
+        bool msvc_style(const std::string& compiler) {
+            std::string base = std::filesystem::path(compiler).filename().string();
+            std::transform(base.begin(), base.end(), base.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+            return base == "cl" || base == "cl.exe" || base == "clang-cl" || base == "clang-cl.exe";
+        }
+
+        bool responds(const Toolchain& t) {
+            const std::string probe = t.msvc ? t.compiler + " /?" : t.compiler + " --version";
+            return run(t.prefix + probe + " > " + kNull + " 2>&1") == 0;
+        }
+
+    #if defined(_WIN32)
+        // vcvarsall.bat of the newest Visual Studio with the C++ tools, found with vswhere.
+        std::string visual_studio_environment() {
+            const char* root = std::getenv("ProgramFiles(x86)");
+            if (!root) return "";
+            const std::filesystem::path vswhere = std::filesystem::path(root) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe";
+            if (!std::filesystem::exists(vswhere)) return "";
+            const auto out = std::filesystem::temp_directory_path() / "lignum_vswhere.txt";
+            const std::string command = quote(vswhere.string()) + " -latest -products * -property installationPath > " + quote(out.string());
+            if (run(command) != 0) return "";
+            std::string path;
+            std::getline(std::ifstream(out), path);
+            std::filesystem::remove(out);
+            while (!path.empty() && (path.back() == '\r' || path.back() == ' ')) path.pop_back();
+            const auto vcvars = std::filesystem::path(path) / "VC" / "Auxiliary" / "Build" / "vcvarsall.bat";
+            if (path.empty() || !std::filesystem::exists(vcvars)) return "";
+        #if defined(_M_ARM64)
+            const char* arch = "arm64";
+        #else
+            const char* arch = "x64";
+        #endif
+            return "call " + quote(vcvars.string()) + " " + arch + " > NUL && ";
+        }
+    #endif
+
+        // "auto": cc on POSIX; on Windows cl on PATH, Visual Studio (via vswhere), gcc, clang.
+        Toolchain find_toolchain(const std::string& requested) {
+            std::vector<Toolchain> candidates;
+            if (!requested.empty() && requested != "auto") {
+                candidates.push_back({requested, msvc_style(requested), ""});
+            } else {
+            #if defined(_WIN32)
+                candidates.push_back({"cl", true, ""});
+                const std::string vs = visual_studio_environment();
+                if (!vs.empty()) candidates.push_back({"cl", true, vs});
+                candidates.push_back({"gcc", false, ""});
+                candidates.push_back({"clang", false, ""});
+            #else
+                candidates.push_back({"cc", false, ""});
+            #endif
+            }
+            for (const auto& t : candidates) {
+                if (responds(t)) return t;
+            }
+            throw std::runtime_error("C compiler '" + (requested.empty() ? std::string("auto") : requested) +
+                                     "' not found; install one (gcc, clang, or Visual Studio with C++ tools on Windows) "
+                                     "or load a library compiled elsewhere.");
+        }
+
+        // Compiles the sources (in parallel) and links them into `library`.
+        void build(const Toolchain& t, const std::string& flags, const std::vector<std::filesystem::path>& c_files,
+                   const std::filesystem::path& dir, const std::string& tag, const std::filesystem::path& library) {
+            if (t.msvc) {
+                // One command: /MP compiles the files in parallel, /LD links the DLL.
+                std::string command = t.prefix + t.compiler + " /nologo " + (flags.empty() ? "/O2" : flags) + " /LD /MP /Fo" +
+                                      quote(dir.string() + "\\\\") + " /Fe" + quote(library.string());  // "dir\\": a lone \ would escape the quote
+                for (const auto& c : c_files) command += " " + quote(c.string());
+                command += " > " + quote((dir / ("lignum_" + tag + "_build.log")).string()) + " 2>&1";
+                if (run(command) != 0) {
+                    throw std::runtime_error("Compiling the generated code failed; see " + (dir / ("lignum_" + tag + "_build.log")).string());
+                }
+                return;
+            }
+        #if defined(_WIN32)
+            const std::string pic;
+        #else
+            const std::string pic = " -fPIC";
+        #endif
+            std::vector<std::string> objects(c_files.size());
+            std::vector<int> status(c_files.size(), 0);
+            std::vector<std::thread> workers;
+            for (size_t p = 0; p < c_files.size(); p++) {
+                objects[p] = (dir / (c_files[p].stem().string() + ".o")).string();
+                const std::string command = t.prefix + t.compiler + " " + (flags.empty() ? "-O2" : flags) + pic + " -c " +
+                                            quote(c_files[p].string()) + " -o " + quote(objects[p]);
+                workers.emplace_back([&status, p, command] { status[p] = run(command); });
+            }
+            for (auto& w : workers) w.join();
+            for (int s : status) {
+                if (s != 0) throw std::runtime_error("Compiling the generated code failed (see compiler output).");
+            }
+            std::string link = t.prefix + t.compiler + " -shared -o " + quote(library.string());
+            for (const auto& o : objects) link += " " + quote(o);
+            if (run(link) != 0) throw std::runtime_error("Linking the generated code failed.");
         }
 
         // Version of the generated functions' interface and semantics; bump on any change to the
@@ -282,10 +413,28 @@ namespace lignum {
             return text;
         }
 
-    #if !defined(_WIN32)
+        void* open_handle(const std::string& library) {
+        #if defined(_WIN32)
+            void* handle = static_cast<void*>(LoadLibraryW(std::filesystem::path(library).wstring().c_str()));
+            if (!handle) throw std::runtime_error("LoadLibrary failed for " + library + " (error " + std::to_string(GetLastError()) + ")");
+        #else
+            void* handle = dlopen(library.c_str(), RTLD_NOW | RTLD_LOCAL);
+            if (!handle) throw std::runtime_error(std::string("dlopen failed: ") + dlerror());
+        #endif
+            return handle;
+        }
+
+        void* raw_symbol(void* handle, const std::string& name) {
+        #if defined(_WIN32)
+            return reinterpret_cast<void*>(GetProcAddress(static_cast<HMODULE>(handle), name.c_str()));
+        #else
+            return dlsym(handle, name.c_str());
+        #endif
+        }
+
         template <typename T>
         const T* symbol(void* handle, const std::string& name, const std::string& library) {
-            const auto* p = reinterpret_cast<const T*>(dlsym(handle, name.c_str()));
+            const auto* p = reinterpret_cast<const T*>(raw_symbol(handle, name));
             if (!p) throw std::runtime_error(name + " not found in " + library + " (not a lignum compiled library?)");
             return p;
         }
@@ -293,8 +442,7 @@ namespace lignum {
         std::shared_ptr<CompiledForest> open_library(const Model& model, const std::string& library) {
             auto compiled = std::make_shared<CompiledForest>();
             compiled->library = library;
-            compiled->handle = dlopen(library.c_str(), RTLD_NOW | RTLD_LOCAL);
-            if (!compiled->handle) throw std::runtime_error(std::string("dlopen failed: ") + dlerror());
+            compiled->handle = open_handle(library);
             const uint32_t abi = *symbol<uint32_t>(compiled->handle, "lignum_abi", library);
             if (abi != kAbi) {
                 throw std::runtime_error(library + " was generated by another lignum version (ABI " + std::to_string(abi) +
@@ -312,13 +460,15 @@ namespace lignum {
                 const_cast<void*>(static_cast<const void*>(symbol<char>(compiled->handle, "lignum_bin", library))));
             return compiled;
         }
-    #endif
 
     } // namespace
 
     CompiledForest::~CompiledForest() {
-    #if !defined(_WIN32)
-        if (handle) dlclose(handle);
+        if (!handle) return;
+    #if defined(_WIN32)
+        FreeLibrary(static_cast<HMODULE>(handle));
+    #else
+        dlclose(handle);
     #endif
     }
 
@@ -343,21 +493,12 @@ namespace lignum {
     }
 
     std::shared_ptr<const CompiledForest> load_compiled(const Model& model, const std::string& library) {
-    #if defined(_WIN32)
-        (void)model; (void)library;
-        throw std::runtime_error("Compiled mode is not supported on Windows yet.");
-    #else
         if (!model.binned) throw std::runtime_error("Compiled mode needs the binned kernel (load with binned=True).");
         if (!std::filesystem::exists(library)) throw std::runtime_error("Compiled library not found: " + library);
         return open_library(model, library);
-    #endif
     }
 
     std::shared_ptr<const CompiledForest> compile_forest(const Model& model, const CompileOptions& options, CompileStats* stats) {
-    #if defined(_WIN32)
-        (void)model; (void)options; (void)stats;
-        throw std::runtime_error("Compiled mode is not supported on Windows yet.");
-    #else
         if (!model.binned) throw std::runtime_error("Compiled mode needs the binned kernel (load with binned=True).");
         const BinnedForest& f = *model.binned;
         CompileStats local;
@@ -380,9 +521,9 @@ namespace lignum {
             std::ostringstream src;
             src << kPrelude;
             if (p == 0) {
-                src << "const uint32_t lignum_abi = " << kAbi << ";\n"
-                    << "const uint64_t lignum_fingerprint = " << hex(compiled_fingerprint(model)) << ";\n"
-                    << "const uint32_t lignum_n_blocks = " << n_blocks << ";\n";
+                src << "LIGNUM_EXPORT const uint32_t lignum_abi = " << kAbi << ";\n"
+                    << "LIGNUM_EXPORT const uint64_t lignum_fingerprint = " << hex(compiled_fingerprint(model)) << ";\n"
+                    << "LIGNUM_EXPORT const uint32_t lignum_n_blocks = " << n_blocks << ";\n";
                 binning(src, f);
             }
             for (size_t b = n_blocks * p / parts; b < n_blocks * (p + 1) / parts; b++) {
@@ -412,7 +553,7 @@ namespace lignum {
                 src << "static const " << acc << " leaves_" << b << "[" << std::max<size_t>(1, gen.table().size()) << "] = {";
                 for (size_t k = 0; k < gen.table().size(); k++) src << (k ? ", " : "") << (model.float32 ? "(float)" : "") << literal(gen.table()[k]);
                 src << "};\n"
-                    << "void lignum_block_" << b << "(const uint16_t* restrict codes, const uint64_t* restrict decisions, size_t n, double* restrict out) {\n"
+                    << "LIGNUM_EXPORT void lignum_block_" << b << "(const uint16_t* restrict codes, const uint64_t* restrict decisions, size_t n, double* restrict out) {\n"
                     << "  const " << acc << "* restrict L = leaves_" << b << "; LIGNUM_KEEP(L);\n";
                 src << "  for (size_t i = 0; i < n; i++) {\n"
                     << "    const uint16_t* restrict c = codes + i * " << f.n_features << ";\n"
@@ -434,47 +575,36 @@ namespace lignum {
         }
         st.codegen_ms = ms_since(t0);
 
-        size_t hash = std::hash<std::string>{}(options.compiler + " " + options.flags);
+        size_t hash = std::hash<std::string>{}(options.compiler + " " + options.flags + " " + kLibraryExtension);
         st.source_bytes = 0;
         for (const auto& s : sources) {
             hash = hash * 1000003u ^ std::hash<std::string>{}(s);
             st.source_bytes += s.size();
         }
 
-        // 2. Compile (cached by source hash).
+        // 2. Compile (cached by source hash; the toolchain is only looked up on a miss).
         namespace fs = std::filesystem;
         const fs::path dir = options.work_dir.empty() ? fs::temp_directory_path() / "lignum_compiled" : fs::path(options.work_dir);
         fs::create_directories(dir);
         char tag[32];
         std::snprintf(tag, sizeof(tag), "%016zx", hash);
-        const fs::path library = dir / (std::string("lignum_") + tag + ".so");
+        const fs::path library = dir / (std::string("lignum_") + tag + kLibraryExtension);
         st.library = library.string();
 
         t0 = Clock::now();
         st.cached = fs::exists(library);
         if (!st.cached) {
-            if (run(options.compiler + " --version > /dev/null 2>&1") != 0) {
-                throw std::runtime_error("C compiler '" + options.compiler + "' not found; install one (e.g. gcc or clang) "
-                                         "or load a library compiled elsewhere.");
-            }
-            std::vector<std::string> objects(sources.size());
-            std::vector<int> status(sources.size(), 0);
-            std::vector<std::thread> workers;
+            const Toolchain toolchain = find_toolchain(options.compiler);
+            std::vector<fs::path> c_files(sources.size());
             for (size_t p = 0; p < sources.size(); p++) {
-                const fs::path c_file = dir / (std::string("lignum_") + tag + "_" + std::to_string(p) + ".c");
-                objects[p] = (dir / (std::string("lignum_") + tag + "_" + std::to_string(p) + ".o")).string();
-                std::ofstream(c_file) << sources[p];
-                const std::string command = options.compiler + " " + options.flags + " -fPIC -c \"" + c_file.string() + "\" -o \"" + objects[p] + "\"";
-                workers.emplace_back([&status, p, command] { status[p] = run(command); });
+                c_files[p] = dir / (std::string("lignum_") + tag + "_" + std::to_string(p) + ".c");
+                std::ofstream(c_files[p], std::ios::binary) << sources[p];
             }
-            for (auto& w : workers) w.join();
-            for (int s : status) {
-                if (s != 0) throw std::runtime_error("Compiling the generated code failed (see compiler output).");
-            }
-            std::string link = options.compiler + " -shared -o \"" + library.string() + ".tmp\"";
-            for (const auto& o : objects) link += " \"" + o + "\"";
-            if (run(link) != 0) throw std::runtime_error("Linking the generated code failed.");
-            fs::rename(library.string() + ".tmp", library);
+            // Build under a temporary name and rename, so a half-written library is never cached.
+            const fs::path tmp = dir / (std::string("lignum_") + tag + "_tmp" + kLibraryExtension);
+            build(toolchain, options.flags, c_files, dir, tag, tmp);
+            fs::rename(tmp, library);
+            st.compiler = toolchain.name();
         }
         st.compile_ms = ms_since(t0);
 
@@ -491,7 +621,6 @@ namespace lignum {
         auto compiled = open_library(model, st.library);
         st.load_ms = ms_since(t0);
         return compiled;
-    #endif
     }
 
 } // namespace lignum

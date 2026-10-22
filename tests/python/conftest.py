@@ -1,14 +1,13 @@
 """Every Python test runs three times: with the binned kernel (default), with the direct traversal
-and, on POSIX, with the binned model compiled to native code (experimental compiled mode)."""
+and with the binned model compiled to native code (experimental compiled mode)."""
 
 import functools
-import sys
 
 import pytest
 
 import lignum
 
-KERNELS = [True, False] + ([] if sys.platform == "win32" else ["compiled"])
+KERNELS = [True, False, "compiled"]
 
 
 @pytest.fixture(scope="session")
@@ -16,7 +15,7 @@ def compiled_dir(tmp_path_factory):
     return tmp_path_factory.mktemp("compiled")
 
 
-@pytest.fixture(autouse=True, params=KERNELS, ids=["binned", "direct", "compiled"][:len(KERNELS)])
+@pytest.fixture(autouse=True, params=KERNELS, ids=["binned", "direct", "compiled"])
 def kernel(request, monkeypatch):
     original = lignum.load
     if request.param != "compiled":

@@ -77,7 +77,7 @@ class Model:
         """Number of model outputs: the number of classes for multiclass models, otherwise 1."""
         return self._c_model.n_outputs
 
-    def compile(self, compiler: str = "cc", flags: str = "-O2", work_dir: str = "", jobs: int = 0,
+    def compile(self, compiler: str = "auto", flags: str = "", work_dir: str = "", jobs: int = 0,
                 block_trees: int = 16, library: str | os.PathLike | None = None, fallback: bool = False) -> dict:
         """
         Experimental: compile the trees to native code with the system C compiler.
@@ -87,10 +87,17 @@ class Model:
         chunk of rows before the next one; binning of categorical features, threads and
         transforms stay in lignum and every row sums its trees in model order, so predictions
         are unchanged (bit-identical). Libraries are cached by content in `work_dir` (default:
-        a `lignum_compiled` folder in the temp directory). Linux and macOS only.
+        a `lignum_compiled` folder in the temp directory).
 
         Parameters
         ----------
+        compiler : str, default='auto'
+            C compiler. `'auto'` uses `cc` on Linux and macOS; on Windows `cl` if it is on PATH,
+            otherwise the newest Visual Studio with C++ tools (found with vswhere), then `gcc`
+            (MinGW) and `clang`. MSVC-style compilers (`cl`, `clang-cl`) are driven with their
+            own options.
+        flags : str, default=''
+            Optimisation flags; empty means `-O2` (gcc, clang) or `/O2` (MSVC).
         library : path, optional
             Also write the compiled library here, e.g. next to the `.bin` model, so production
             can attach it with `lignum.load(model_path, compiled=library)` without a compiler.
@@ -102,7 +109,7 @@ class Model:
         -------
         dict
             `compiled`, timings (`codegen_ms`, `compile_ms`, `load_ms`), `source_bytes`,
-            `cached` and the `library` path.
+            `cached`, the `library` path and the `compiler` used (empty for a cached library).
 
         Examples
         --------

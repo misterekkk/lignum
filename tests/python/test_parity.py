@@ -5,7 +5,6 @@ placed exactly on every split threshold, which is where precision bugs show up.
 """
 
 import json
-import sys
 
 import lightgbm as lgb
 import numpy as np
@@ -267,7 +266,6 @@ def test_multiclass_binary_roundtrip(tmp_path, data, fmt):
     np.testing.assert_array_equal(restored.predict(X, raw_score=True), model.predict(X, raw_score=True))
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="compiled mode is POSIX-only")
 @pytest.mark.parametrize("fmt", ["lightgbm", "xgboost"])
 def test_compiled_mode_is_bit_identical(tmp_path, data, fmt, kernel):
     if not kernel:

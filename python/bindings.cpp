@@ -78,8 +78,9 @@ NB_MODULE(_core, m) {
             result["source_bytes"] = stats.source_bytes;
             result["cached"] = stats.cached;
             result["library"] = stats.library;
+            result["compiler"] = stats.compiler;
             return result;
-        }, nb::arg("compiler") = "cc", nb::arg("flags") = "-O2", nb::arg("work_dir") = "", nb::arg("jobs") = 0, nb::arg("block_trees") = 16, nb::arg("output") = "",
+        }, nb::arg("compiler") = "auto", nb::arg("flags") = "", nb::arg("work_dir") = "", nb::arg("jobs") = 0, nb::arg("block_trees") = 16, nb::arg("output") = "",
            "Experimental: compiles the trees to native code with the system compiler.")
         .def("load_compiled", [](Model& self, const std::string& library) {
             std::shared_ptr<const CompiledForest> compiled;

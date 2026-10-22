@@ -11,7 +11,7 @@ namespace lignum {
 
     // Experimental compiled mode: the trees of the binned forest become C code (nested ifs on
     // constant thresholds, leaves in per-block tables), built with the system compiler and loaded
-    // with dlopen. The generated library bins the numeric features (same codes as the kernel)
+    // as a shared library (dlopen, or LoadLibrary on Windows). The generated library bins the numeric features (same codes as the kernel)
     // and walks the trees in blocks: a block adds its trees, in model order, to the running sums
     // of a chunk of rows before the next block runs, which keeps the block's code and branch
     // history hot. Categorical decision bits, threads and transforms stay in lignum, so results
@@ -27,8 +27,8 @@ namespace lignum {
     };
 
     struct CompileOptions {
-        std::string compiler = "cc";
-        std::string flags = "-O2";
+        std::string compiler = "auto";  // auto: cc on POSIX; on Windows cl, Visual Studio (vswhere), gcc, clang
+        std::string flags;              // empty: -O2 (gcc/clang) or /O2 (cl)
         std::string work_dir;  // empty: system temp directory
         std::string output;    // also copy the library here (to ship it next to the model file)
         int jobs = 0;          // translation units compiled in parallel; 0 = hardware threads
@@ -40,6 +40,7 @@ namespace lignum {
         size_t source_bytes = 0;
         bool cached = false;
         std::string library;
+        std::string compiler;  // toolchain used (empty when the library came from the cache)
     };
 
     // Requires the binned kernel (Model::binned). Throws std::runtime_error when the compiler is

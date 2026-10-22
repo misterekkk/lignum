@@ -2,6 +2,8 @@
 
 #include <lignum/c_api.h>
 
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -56,4 +58,38 @@ TEST(CApi, ReportsErrors) {
     EXPECT_EQ(LignumModelPredict(nullptr, x, 1, 2, 0, 1, LIGNUM_STRATEGY_AUTO, &out), -1);
     EXPECT_EQ(LignumModelFree(model), 0);
     EXPECT_EQ(LignumModelFree(nullptr), 0);
+}
+
+TEST(CApi, CompiledModeAndShippedLibrary) {
+    LignumModelHandle model = nullptr;
+    ASSERT_EQ(LignumModelLoad(write_temp("capi_cc.json", kStump).c_str(), "lightgbm", &model), 0) << LignumGetLastError();
+    const std::vector<double> X = {0.0, 0.1, 0.0, 0.9, 0.0, 0.5, 0.0, NAN};
+    std::vector<double> expected(4), out(4);
+    ASSERT_EQ(LignumModelPredict(model, X.data(), 4, 2, 1, 1, LIGNUM_STRATEGY_AUTO, expected.data()), 0);
+
+    const auto dir = std::filesystem::temp_directory_path();
+    const std::string library = (dir / "lignum_test_capi_lib").string();
+    ASSERT_EQ(LignumModelCompile(model, nullptr, nullptr, (dir / "lignum_test_capi_cache").string().c_str(), library.c_str()), 0)
+        << LignumGetLastError();
+    int compiled = 0;
+    ASSERT_EQ(LignumModelUsesCompiled(model, &compiled), 0);
+    EXPECT_EQ(compiled, 1);
+    ASSERT_EQ(LignumModelPredict(model, X.data(), 4, 2, 1, 1, LIGNUM_STRATEGY_AUTO, out.data()), 0);
+    EXPECT_EQ(out, expected);
+
+    LignumModelHandle production = nullptr;
+    ASSERT_EQ(LignumModelLoad(write_temp("capi_cc2.json", kStump).c_str(), "lightgbm", &production), 0);
+    ASSERT_EQ(LignumModelLoadCompiled(production, library.c_str()), 0) << LignumGetLastError();
+    std::fill(out.begin(), out.end(), 0.0);
+    ASSERT_EQ(LignumModelPredict(production, X.data(), 4, 2, 1, 1, LIGNUM_STRATEGY_AUTO, out.data()), 0);
+    EXPECT_EQ(out, expected);
+
+    ASSERT_EQ(LignumModelDecompile(production), 0);
+    ASSERT_EQ(LignumModelUsesCompiled(production, &compiled), 0);
+    EXPECT_EQ(compiled, 0);
+    EXPECT_EQ(LignumModelLoadCompiled(production, "/nonexistent/lib"), -1);
+    EXPECT_NE(std::string(LignumGetLastError()).find("not found"), std::string::npos);
+    EXPECT_EQ(LignumModelCompile(nullptr, nullptr, nullptr, nullptr, nullptr), -1);
+    EXPECT_EQ(LignumModelFree(production), 0);
+    EXPECT_EQ(LignumModelFree(model), 0);
 }
