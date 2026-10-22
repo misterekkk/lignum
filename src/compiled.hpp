@@ -10,7 +10,7 @@
 namespace lignum {
 
     // Experimental compiled mode: the trees of the binned forest become C code (nested ifs on
-    // constant thresholds, leaves as exact constants), built with the system compiler and loaded
+    // constant thresholds, leaves in per-block tables), built with the system compiler and loaded
     // with dlopen. The generated library bins the numeric features (same codes as the kernel)
     // and walks the trees in blocks: a block adds its trees, in model order, to the running sums
     // of a chunk of rows before the next block runs, which keeps the block's code and branch

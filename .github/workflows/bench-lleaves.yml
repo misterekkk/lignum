@@ -26,7 +26,7 @@ concurrency:
 env:
   # Compile flags of the experimental kernel variant measured next to the default build
   # (empty = skip).
-  EXPERIMENT_CXX_FLAGS: ""
+  EXPERIMENT_CXX_FLAGS: "-DLIGNUM_COMPILED_LOCALS=16"
   BENCH_ARGS: ${{ github.event.inputs.args || '--only lightgbm,lightgbm-cat,lightgbm-real-diabetes,lightgbm-real-covtype,lightgbm-real-california,lightgbm-real-adult,lightgbm-real-bank --rows 300000 --trees 500 --repeats 5 --latency-budget 1' }}
 
 jobs:
@@ -73,7 +73,7 @@ jobs:
 
       - name: lignum (experimental variant)
         if: env.EXPERIMENT_CXX_FLAGS != ''
-        run: python benchmarks/bench.py --engines lignum $BENCH_ARGS
+        run: python benchmarks/bench.py --engines lignum,lignum-compiled $BENCH_ARGS
 
       - name: Summary
         run: |

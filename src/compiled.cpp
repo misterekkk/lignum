@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #if defined(_WIN32)
@@ -38,6 +39,18 @@ namespace lignum {
             return text;
         }
 
+        // Features of a block held in locals (the most used ones); the rest read c[feature].
+        // M4, Covertype, 1 thread: all (51) 445 ms, 24: 412, 16: 409, 8: 415. x86-64 has half the
+        // general registers, hence a smaller default there.
+        #ifndef LIGNUM_COMPILED_LOCALS
+            #if defined(__x86_64__) || defined(_M_X64)
+                #define LIGNUM_COMPILED_LOCALS 10
+            #else
+                #define LIGNUM_COMPILED_LOCALS 16
+            #endif
+        #endif
+        constexpr size_t kMaxLocals = LIGNUM_COMPILED_LOCALS;
+
         uint32_t n_cuts(const BinnedForest& f, unsigned feature) {
             return f.cut_offsets[feature + 1] - f.cut_offsets[feature];
         }
@@ -52,7 +65,8 @@ namespace lignum {
         }
 
         // C expression that is 1 when slot s of b goes right: the binned kernel's decision.
-        std::string condition(const BinnedForest& f, const BNode& b, int s) {
+        // `locals`: dense features held in locals in this block (others read c[feature]).
+        std::string condition(const BinnedForest& f, const BNode& b, int s, const std::vector<bool>& locals) {
             const unsigned feature = b.features[s];
             const unsigned threshold = b.thresholds[s];
             const unsigned shift = (b.nan_left >> s) & 1;
@@ -63,13 +77,15 @@ namespace lignum {
                 return "!" + bit;
             }
             std::string compare;
-            if (local_feature(f, b, s)) {
+            if (local_feature(f, b, s) && locals[feature]) {
                 const std::string v = "v" + std::to_string(feature);
                 compare = shift ? v + " >= " + std::to_string(int(threshold) - 1) : "(uint32_t)" + v + " >= " + std::to_string(threshold);
                 if ((b.zero_slots >> s) & 1) return "(" + v + " == " + std::to_string(f.zero_bin[feature]) + " ? " + std::to_string(shift ^ 1) + " : " + compare + ")";
                 return compare;
             }
-            compare = shift ? "(uint16_t)(" + code + " + 1) >= " + std::to_string(threshold) : code + " >= " + std::to_string(threshold);
+            compare = !shift ? code + " >= " + std::to_string(threshold)
+                    : local_feature(f, b, s) ? "(int16_t)" + code + " >= " + std::to_string(int(threshold) - 1)
+                                             : "(uint16_t)(" + code + " + 1) >= " + std::to_string(threshold);
             if ((b.zero_slots >> s) & 1) return "(" + code + " == " + std::to_string(f.zero_bin[feature]) + " ? " + std::to_string(shift ^ 1) + " : " + compare + ")";
             return compare;
         }
@@ -108,8 +124,9 @@ namespace lignum {
             out << "  }\n}\n";
         }
 
-        // Emits trees inline in a block's row loop: nested ifs on constant thresholds, leaves as
-        // exact constants added to the running sum of the tree's output.
+        // Emits trees inline in a block's row loop: nested ifs on constant thresholds, leaves read
+        // from the block's table (exact values; XGBoost's rounded to float like the kernel) and
+        // added to the running sum of the tree's output.
         class Generator {
             public:
                 Generator(const BinnedForest& f, const double* leaf_values, bool float32)
@@ -124,32 +141,45 @@ namespace lignum {
                     out << "    end_" << t << ":;\n";
                 }
 
-                // Marks the features tree t reads through locals.
-                void locals(size_t t, std::vector<bool>& used) const { locals_of(f_.roots[t], used); }
+                // Leaves of the current block, read as L[k] (index in the block's table).
+                void begin_block() { table_values_.clear(); table_index_.clear(); }
+                const std::vector<double>& table() const { return table_values_; }
+
+                // Counts the slots of tree t that can read a local, per dense feature.
+                void count_locals(size_t t, std::vector<size_t>& uses) const { locals_of(f_.roots[t], uses); }
+                void set_locals(const std::vector<bool>* locals) { locals_ = locals; }
 
             private:
                 const BinnedForest& f_;
                 const double* leaf_values_;
                 bool float32_;
                 std::string leaf_, leaf_end_;
+                std::vector<double> table_values_;
+                std::unordered_map<int32_t, size_t> table_index_;
 
-                void locals_of(int32_t r, std::vector<bool>& used) const {
+                size_t slot(int32_t r) {
+                    auto [it, inserted] = table_index_.try_emplace(r, table_values_.size());
+                    if (inserted) table_values_.push_back(leaf_values_[(-r) - 1]);
+                    return it->second;
+                }
+
+                const std::vector<bool>* locals_ = nullptr;
+
+                void locals_of(int32_t r, std::vector<size_t>& uses) const {
                     if (r < 0) return;
                     const BNode& b = f_.nodes[r];
                     for (int s = 0; s < 7; s++) {
-                        if (local_feature(f_, b, s)) used[b.features[s]] = true;
+                        // Unused slots compare against threshold 0 and point both ways alike.
+                        if (local_feature(f_, b, s) && (s == 0 || b.thresholds[s] != 0)) uses[b.features[s]]++;
                     }
-                    for (int c = 0; c < 8; c++) locals_of(b.children[c], used);
+                    for (int c = 0; c < 8; c++) locals_of(b.children[c], uses);
                 }
 
                 static void indent(std::ostream& out, int depth) {
                     for (int i = 0; i < depth; i++) out << "  ";
                 }
 
-                // XGBoost rounds the exact double to float, like the kernel does.
-                std::string value(int32_t r) const {
-                    return (float32_ ? "(float)" : "") + literal(leaf_values_[(-r) - 1]);
-                }
+                std::string value(int32_t r) { return "L[" + std::to_string(slot(r)) + "]"; }
 
                 void ref(std::ostream& out, int32_t r, int depth) {
                     if (r < 0) {
@@ -169,7 +199,8 @@ namespace lignum {
                 bool select(std::ostream& out, const BNode& b, int s, int32_t right, int32_t left, int depth) {
                     if (right >= 0 || left >= 0) return false;
                     indent(out, depth);
-                    out << leaf_ << "((" << condition(f_, b, s) << ") ? " << value(right) << " : " << value(left) << ")" << leaf_end_ << "\n";
+                    // Select the index, then one load.
+                    out << leaf_ << "L[(" << condition(f_, b, s, *locals_) << ") ? " << slot(right) << " : " << slot(left) << "]" << leaf_end_ << "\n";
                     return true;
                 }
 
@@ -198,7 +229,7 @@ namespace lignum {
                 template <typename Right, typename Left>
                 void branch(std::ostream& out, const BNode& b, int s, int depth, Right right, Left left) {
                     indent(out, depth);
-                    out << "if (" << condition(f_, b, s) << ") {\n";
+                    out << "if (" << condition(f_, b, s, *locals_) << ") {\n";
                     right(depth + 1);
                     indent(out, depth);
                     out << "} else {\n";
@@ -258,12 +289,33 @@ namespace lignum {
             for (size_t b = n_blocks * p / parts; b < n_blocks * (p + 1) / parts; b++) {
                 const size_t begin = b * block_trees, end = std::min(begin + block_trees, f.n_trees);
                 std::vector<bool> outputs(K, false), locals(f.n_features, false);
+                std::vector<size_t> uses(f.n_features, 0);
                 for (size_t t = begin; t < end; t++) {
-                    gen.locals(t, locals);
+                    gen.count_locals(t, uses);
                     outputs[K > 1 ? model.tree_outputs[t] : 0] = true;
                 }
-                src << "void lignum_block_" << b << "(const uint16_t* restrict codes, const uint64_t* restrict decisions, size_t n, double* restrict out) {\n"
-                    << "  for (size_t i = 0; i < n; i++) {\n"
+                // Locals for the most used features only: more than the registers would be
+                // spilled to the stack and reloaded anyway.
+                std::vector<size_t> order(f.n_features);
+                for (size_t j = 0; j < order.size(); j++) order[j] = j;
+                std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b2) { return uses[a] > uses[b2]; });
+                for (size_t k = 0; k < std::min<size_t>(kMaxLocals, order.size()); k++) {
+                    if (uses[order[k]]) locals[order[k]] = true;
+                }
+                gen.set_locals(&locals);
+                gen.begin_block();
+                std::ostringstream body;
+                for (size_t t = begin; t < end; t++) gen.tree(body, t, "s" + std::to_string(K > 1 ? model.tree_outputs[t] : 0));
+                // Leaves of the block in a table: one load per leaf instead of a 64-bit constant
+                // built in the code (mov + 3 movk + fmov). M4, 1 thread: Covertype 488 -> 435 ms,
+                // Bank 51.8 -> 46.8 ms. The empty asm hides the contents, so the compiler loads
+                // the leaves instead of folding them back into constants.
+                src << "static const " << acc << " leaves_" << b << "[" << std::max<size_t>(1, gen.table().size()) << "] = {";
+                for (size_t k = 0; k < gen.table().size(); k++) src << (k ? ", " : "") << (model.float32 ? "(float)" : "") << literal(gen.table()[k]);
+                src << "};\n"
+                    << "void lignum_block_" << b << "(const uint16_t* restrict codes, const uint64_t* restrict decisions, size_t n, double* restrict out) {\n"
+                    << "  const " << acc << "* restrict L = leaves_" << b << "; LIGNUM_KEEP(L);\n";
+                src << "  for (size_t i = 0; i < n; i++) {\n"
                     << "    const uint16_t* restrict c = codes + i * " << f.n_features << ";\n"
                     << "    const uint64_t* restrict d = decisions" << (f.decision_words ? " + i * " + std::to_string(f.decision_words) : std::string()) << ";\n"
                     << "    (void)c; (void)d;\n";
@@ -273,7 +325,7 @@ namespace lignum {
                 for (size_t j = 0; j < locals.size(); j++) {
                     if (locals[j]) src << "    int32_t v" << j << " = (int16_t)c[" << j << "]; LIGNUM_KEEP(v" << j << ");\n";
                 }
-                for (size_t t = begin; t < end; t++) gen.tree(src, t, "s" + std::to_string(K > 1 ? model.tree_outputs[t] : 0));
+                src << body.str();
                 for (size_t k = 0; k < K; k++) {
                     if (outputs[k]) src << "    out[i * " << K << " + " << k << "] = (double)s" << k << ";\n";
                 }
