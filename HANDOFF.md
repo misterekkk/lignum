@@ -67,16 +67,46 @@ Wyniki na M4 (500 drzew, ms, 1 wątek / 10 wątków; kompilacja 6-12 s, lleaves 
 | Bank | 226 / 33.3 | **51.9 / 8.9** | 61.6 / 10.7 |
 | Diabetes | 969 / 136 | **296 / 42.8** | 1508 / 273 |
 
+CI (`bench-lleaves.yml`, commit `d6bce3f`, 4 vCPU, build generic, s: 4 wątki / 1 wątek; pełne
+raporty w `benchmarks/results/ci/2026-10-22-gh-*-d6bce3f.md`, 0 niezgodności bit-exact):
+
+| model | x86 interpreter | x86 skompilowany | x86 lleaves | ARM interpreter | ARM skompilowany | ARM lleaves |
+|---|---:|---:|---:|---:|---:|---:|
+| syntetyczny numeryczny | **0.412 / 0.961** | 0.414 / 1.390 | 0.422 / 1.341 | 0.331 / 1.309 | **0.213 / 0.856** | 0.334 / 1.329 |
+| syntetyczny z kategoriami | 0.840 / 2.749 | **0.534 / 1.743** | 0.944 / 2.880 | 0.717 / 2.832 | **0.252 / 1.012** | 0.888 / 3.539 |
+| Diabetes | 0.380 / 1.139 | **0.199 / 0.602** | 0.482 / 1.380 | 0.315 / 1.209 | **0.097 / 0.371** | 0.628 / 2.484 |
+| Covertype | 0.858 / 2.167 | 0.246 / 0.646 | **0.202 / 0.496** | 0.742 / 2.775 | **0.184 / 0.707** | 0.206 / 0.740 |
+| California | 0.037 / 0.108 | **0.015 / 0.043** | 0.018 / 0.050 | 0.034 / 0.134 | **0.008 / 0.033** | 0.015 / 0.058 |
+| Adult | 0.090 / 0.288 | **0.028 / 0.097** | 0.034 / 0.115 | 0.080 / 0.316 | **0.016 / 0.068** | 0.025 / 0.099 |
+| Bank | 0.098 / 0.281 | **0.037 / 0.078** | 0.039 / 0.081 | 0.088 / 0.331 | **0.022 / 0.069** | 0.027 / 0.087 |
+
+Pojedynczy wiersz (1 wątek): skompilowany 1.9-2.3 µs na x86 / 3.7-4.5 µs na ARM, interpreter 5-8 /
+7-11 µs, lleaves 6-15 / 10-62 µs. Wyjątek: syntetyczny numeryczny na x86 (niezależne cechy, skoki
+nieprzewidywalne) — bezskokowy interpreter wygrywa na 1 wątku (0.96 vs 1.39 s) i przy 100 wierszach
+(169 vs 307 µs). Kryterium wyboru trybu to więc przewidywalność skoków, nie rozmiar batcha.
+
+Kod Covertype (`lignum_block_*`, M4): progi są natychmiastowymi w `cmp w, #imm` (30.9k, zero
+odczytów z tablic), liście to stałe 64-bit budowane w kodzie (`mov` + 3x `movk` + `fmov`, 94k
+`movk`), progi binowania > 8 cięć w tablicach `.rodata`. Odczyty: 1.4k odczytów kodów wiersza
+(było 15.6k) + 6.1k odczytów ze stosu — zmiennych lokalnych jest więcej niż rejestrów (51 cech +
+7 sum), więc kompilator je rozlewa; lleaves ma ~4.3k odczytów łącznie.
+
 Co nie pomogło: porównania na surowych `double` (stała 64-bit = 5 instrukcji; California 38 ms
 zamiast 23), `-O3`, `-mcpu=native`, bloki 8-64 (szybkość ta sama, kompilacja rośnie z rozmiarem).
 
-**Następne kroki**:
-1. Wyniki z CI (x86 + ARM, `bench-lleaves.yml` mierzy teraz też `lignum-compiled`) i z Ryzena.
-2. Covertype (~20% za lleaves): IR lleaves skompilowany tym samym clangiem daje 374 ms, więc to
-   kształt naszego kodu. `-mllvm -enable-tail-merge=false` daje ~4% (tylko clang).
-3. Próg interpreter/kompilowany: na M4 kompilowany wygrywa już od 1 wiersza (ciepły cache);
-   sprawdzić p99 dla pojedynczego wiersza z zimnym kodem na x86.
-4. Jeśli się utrzyma: API (zapis skompilowanej biblioteki obok `.bin`), Windows.
+**Następne kroki** (w tej kolejności):
+1. Ryzen (dedykowana maszyna, `benchmarks/README.md`, `--engines lignum,lignum-compiled,lleaves`),
+   także p99 pojedynczego wiersza.
+2. Mniej instrukcji w drzewach: liście z tablicy w `.rodata` (`adrp`+`ldr` zamiast 5 instrukcji,
+   kod ~35% mniejszy) i mniej rozlewania: bloki układane tak, by drzewa w bloku dzieliły cechy
+   (dowolna kolejność między klasami w multiclass jest dozwolona, w obrębie klasy nie), albo
+   lokalne tylko dla najczęściej używanych cech bloku.
+3. Covertype na x86: IR lleaves tym samym clangiem = 374 ms na M4, więc to kształt kodu;
+   `-mllvm -enable-tail-merge=false` daje ~4% (tylko clang; gcc: `-fno-crossjumping`).
+4. Automatyczny wybór trybu: przy `compile()` zmierzyć interpreter i kod skompilowany na próbce
+   (np. 10k wierszy z danych użytkownika lub modelu) i używać szybszego; osobno dla małych batchy.
+5. API: zapis skompilowanej biblioteki obok `.bin` (bez kompilacji przy starcie), Windows (MSVC/clang-cl),
+   ostrzeżenie gdy brak kompilatora.
 
 ## Co jeszcze otwarte (pełna lista w `TASKS.md`)
 
