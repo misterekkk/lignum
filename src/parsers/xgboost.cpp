@@ -132,12 +132,25 @@ namespace lignum {
                 return values;
             }
 
+            std::vector<std::unique_ptr<TempBinNode>> load_document(simdjson::dom::element doc, ModelInfo& info);
+
         } // namespace
 
         std::vector<std::unique_ptr<TempBinNode>> load_xgboost_json(const std::string& filepath, ModelInfo& info) {
             simdjson::dom::parser parser;
+            return load_document(parser.load(filepath), info);
+        }
+
+        std::vector<std::unique_ptr<TempBinNode>> load_xgboost_ubj(const std::string& filepath, ModelInfo& info) {
+            const std::string json = ubjson_to_json(read_file(filepath));
+            simdjson::dom::parser parser;
+            return load_document(parser.parse(json), info);
+        }
+
+        namespace {
+
+        std::vector<std::unique_ptr<TempBinNode>> load_document(simdjson::dom::element doc, ModelInfo& info) {
             std::vector<std::unique_ptr<TempBinNode>> forest;
-            simdjson::dom::element doc = parser.load(filepath);
 
             info = ModelInfo{};
             info.precision = Precision::Float32;
@@ -201,6 +214,8 @@ namespace lignum {
 
             return forest;
         }
+
+        } // namespace
 
     } // namespace parsers
 

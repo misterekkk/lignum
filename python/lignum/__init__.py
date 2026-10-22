@@ -291,9 +291,10 @@ def load(filepath: str, format: str = "auto", binned: bool = True,
     ----------
     filepath : str
         Path to the model file on disk.
-    format : {'auto', 'lignum', 'binary', 'lightgbm', 'xgboost'}, default='auto'
-        Expected format of the model file. If set to 'auto', the function will 
-        attempt to infer the format from the file contents.
+    format : {'auto', 'lignum', 'lightgbm', 'xgboost'}, default='auto'
+        Library of the model. The file's own bytes tell which of its formats it is, so 'auto'
+        loads a lignum `.bin`, a LightGBM `model.txt` (`save_model`) or `dump_model()` JSON,
+        and an XGBoost `.json` or `.ubj` (`save_model`). Naming the library only adds a check.
     binned : bool, default=True
         Prepare the binned kernel: inputs are mapped once per row to integer bin codes and
         categorical decisions are precomputed, so the tree walk compares small integers. Results are identical either way; False keeps

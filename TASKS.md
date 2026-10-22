@@ -190,6 +190,11 @@ precomputed decision bits (-47%); evaluating all 7 slots speculatively (2x slowe
 - [ ] Shallow trees: a depth-3 tree costs 73% of a depth-6 one (per-tree overhead: root, loop, leaf load, sum; the last KNode level is half empty). Ideas: single-level node for the last odd level, fixed-depth unrolled traversal for complete trees, several trees per loop iteration
 - [ ] Single row on large models (5000 trees, ~6.5 MB): 39 µs vs 23–25 µs (TL2cgen) — memory-latency bound
 
+## Model formats
+
+- [x] LightGBM `model.txt` (save_model) and XGBoost `.ubj` (UBJSON) besides the JSON files; `format="auto"` recognises every format by content. Text numbers parse through simdjson (exact, fast path), UBJSON is rewritten as JSON skipping training statistics. M4, parse only (binned=False): Covertype 500 trees JSON 13.8 / txt 7.2 ms, 5000 trees JSON 127 / txt 67 ms; XGBoost 3000 trees JSON 36 / ubj 63 ms; `.bin` 0.2-0.7 ms
+- [ ] LightGBM linear trees and random forest (boosting=rf: average_output) are rejected (text) — support or reject in JSON too
+
 ## Stage 5 — Zero-copy input streaming (inference only)
 
 - [x] Arrow C Data / C Stream Interface input (no libarrow dependency): `include/lignum/arrow.h`, `predict_arrow`, `predict_arrow_stream`, `LignumModelPredictArrow`; Python `predict()` takes any `__arrow_c_array__` / `__arrow_c_stream__` object (pyarrow, polars, ...), pandas stays on the numpy path

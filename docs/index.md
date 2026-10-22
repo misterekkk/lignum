@@ -27,6 +27,14 @@ pip install .
 
 ## Quick Start
 
+### Model files
+
+`lignum.load(path)` recognises the file by its contents: LightGBM `model.txt` (`booster.save_model`) or
+`dump_model()` JSON, XGBoost `.json` or `.ubj` (`booster.save_model`), and lignum's own `.bin`. All of them give
+the same model and bit-identical predictions. Loading 500 trees takes a few to a few tens of milliseconds
+(LightGBM's text format is the fastest source); the `.bin` file maps in well under a millisecond, so save one for
+production.
+
 ### Scenario A: Direct Prediction from JSON
 
 You can run predictions straight from a model exported by LightGBM or XGBoost. This is ideal for testing and standard data science workflows.

@@ -9,20 +9,16 @@
 
 namespace lignum {
 
-    Model Builder::load_json(const std::string& filepath, const std::string& model_format) {
+    Model Builder::load_model(const std::string& filepath, ModelSource source) {
         auto data = std::make_shared<VectorData>();
         ModelInfo info;
 
         std::vector<std::unique_ptr<TempBinNode>> temp_forest;
-
-        if (model_format == "lightgbm" || model_format == "lgbm" || model_format == "lgb") {
-            temp_forest = parsers::load_lightgbm_json(filepath, info);
-        }
-        else if (model_format == "xgboost" || model_format == "xgb") {
-            temp_forest = parsers::load_xgboost_json(filepath, info);
-        }
-        else {
-            throw std::invalid_argument("This model format is not supported.");
+        switch (source) {
+            case ModelSource::LightGBMJson:  temp_forest = parsers::load_lightgbm_json(filepath, info); break;
+            case ModelSource::LightGBMText:  temp_forest = parsers::load_lightgbm_text(filepath, info); break;
+            case ModelSource::XGBoostJson:   temp_forest = parsers::load_xgboost_json(filepath, info); break;
+            case ModelSource::XGBoostUbjson: temp_forest = parsers::load_xgboost_ubj(filepath, info); break;
         }
 
         BuildStats stats;

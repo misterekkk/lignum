@@ -7,9 +7,12 @@
 
 namespace lignum {
 
+    // Source formats of a model file (see load.cpp for how they are recognised).
+    enum class ModelSource { LightGBMJson, LightGBMText, XGBoostJson, XGBoostUbjson };
+
     class Builder {
         public:
-            static Model load_json(const std::string& filepath, const std::string& model_format);
+            static Model load_model(const std::string& filepath, ModelSource source);
 
         private:
             struct BuildStats {

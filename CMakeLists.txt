@@ -39,6 +39,8 @@ add_library(lignum STATIC
     src/load.cpp
     src/model.cpp
     src/parsers/lightgbm.cpp
+    src/parsers/lightgbm_text.cpp
+    src/parsers/ubjson.cpp
     src/parsers/xgboost.cpp
     src/validate.cpp
     extern/simdjson/simdjson.cpp

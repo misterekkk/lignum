@@ -26,6 +26,26 @@ namespace lignum {
                 return -kZeroThreshold;                                         // band -> 0 > t: right
             }
 
+            enum class Missing { None, Zero, NaN };
+
+            // A numeric split in the IR's terms (shared by the JSON and the text format).
+            void numeric_split(TempBinNode& node, double raw_threshold, bool default_left, Missing missing) {
+                const double threshold = lightgbm_threshold(raw_threshold);
+                const int32_t natural_zero_dir = 0.0 >= threshold;
+                const int32_t default_dir = default_left ? 0 : 1;
+                node.threshold_or_value = threshold;
+                if (missing == Missing::None) {
+                    // NaN is replaced by 0.0 and compared normally.
+                    node.default_dir = natural_zero_dir;
+                } else if (missing == Missing::Zero) {
+                    // NaN becomes 0.0, and 0.0 is missing. Only flag nodes where that changes the outcome.
+                    node.default_dir = default_dir;
+                    node.zero_is_missing = (default_dir != natural_zero_dir);
+                } else {
+                    node.default_dir = default_dir;
+                }
+            }
+
             // Categorical thresholds are strings such as "1||3||5".
             std::vector<uint32_t> parse_categories(simdjson::dom::element threshold) {
                 std::vector<uint32_t> categories;
@@ -76,22 +96,8 @@ namespace lignum {
                 if (missing_elem.error() == simdjson::SUCCESS) {
                     missing_type = missing_elem.get_string().value();
                 }
-
-                const double threshold = lightgbm_threshold(obj["threshold"].get_double());
-                const int32_t natural_zero_dir = 0.0 >= threshold;
-                const int32_t default_dir = obj["default_left"].get_bool() ? 0 : 1;
-
-                node->threshold_or_value = threshold;
-                if (missing_type == "None") {
-                    // NaN is replaced by 0.0 and compared normally.
-                    node->default_dir = natural_zero_dir;
-                } else if (missing_type == "Zero") {
-                    // NaN becomes 0.0, and 0.0 is missing. Only flag nodes where that changes the outcome.
-                    node->default_dir = default_dir;
-                    node->zero_is_missing = (default_dir != natural_zero_dir);
-                } else {
-                    node->default_dir = default_dir;
-                }
+                const Missing missing = missing_type == "None" ? Missing::None : missing_type == "Zero" ? Missing::Zero : Missing::NaN;
+                numeric_split(*node, obj["threshold"].get_double(), obj["default_left"].get_bool(), missing);
 
                 node->left = parse_lgbm_node(obj["left_child"].get_object());
                 node->right = parse_lgbm_node(obj["right_child"].get_object());
@@ -124,6 +130,14 @@ namespace lignum {
             }
 
         } // namespace
+
+        void lightgbm_numeric_split(TempBinNode& node, double threshold, bool default_left, int missing_type) {
+            numeric_split(node, threshold, default_left, missing_type == 0 ? Missing::None : missing_type == 1 ? Missing::Zero : Missing::NaN);
+        }
+
+        void lightgbm_objective(std::string_view objective, ModelInfo& info) {
+            parse_objective(objective, info);
+        }
 
         std::vector<std::unique_ptr<TempBinNode>> load_lightgbm_json(const std::string& filepath, ModelInfo& info) {
             simdjson::dom::parser parser;
