@@ -535,12 +535,14 @@ namespace lignum {
         struct BinnedRow {
             const uint16_t* __restrict__ codes;
             const uint64_t* __restrict__ decisions;
+            const uint16_t* __restrict__ zero_bin;  // per dense feature (model-wide)
         };
 
-        template <bool Cat>
+        // Kind: tree_kind bits of the tree (Categorical, ZeroMissing).
+        template <uint8_t Kind>
         LIGNUM_INLINE int32_t bdir(const BNode& b, int s, const BinnedRow& r) {
             const uint16_t code = r.codes[b.features[s]];
-            if constexpr (Cat) {
+            if constexpr ((Kind & tree_kind::Categorical) != 0) {
                 if ((b.cat_slots >> s) & 1) {
                     // The answer was computed before the walk: one bit from L1.
                     const uint32_t bit = b.thresholds[s];
@@ -551,35 +553,42 @@ namespace lignum {
                     return static_cast<int32_t>(!in_set);
                 }
             }
-            return static_cast<uint16_t>(code + ((b.nan_left >> s) & 1)) >= b.thresholds[s];
+            const uint32_t shift = (b.nan_left >> s) & 1;
+            const int32_t right = static_cast<uint16_t>(code + shift) >= b.thresholds[s];
+            if constexpr ((Kind & tree_kind::ZeroMissing) != 0) {
+                // Branch-free: the zero band takes the NaN direction (right iff no shift).
+                const bool in_band = static_cast<bool>((b.zero_slots >> s) & 1) & (code == r.zero_bin[b.features[s]]);
+                return in_band ? static_cast<int32_t>(shift ^ 1) : right;
+            }
+            return right;
         }
 
         // Three tree levels per step, comparing only along the path (3 dependent comparisons):
         // evaluating all seven speculatively was 2x slower (the kernel is compute bound).
-        template <bool Cat>
+        template <uint8_t Kind>
         LIGNUM_INLINE int32_t bstep(const BNode& b, const BinnedRow& r) {
-            const int32_t d0 = bdir<Cat>(b, 0, r);
-            const int32_t d1 = bdir<Cat>(b, 1 + d0, r);
+            const int32_t d0 = bdir<Kind>(b, 0, r);
+            const int32_t d1 = bdir<Kind>(b, 1 + d0, r);
             const int32_t g = (d0 << 1) | d1;
-            const int32_t d2 = bdir<Cat>(b, 3 + g, r);
+            const int32_t d2 = bdir<Kind>(b, 3 + g, r);
             return b.children[(g << 1) | d2];
         }
 
-        template <bool Cat>
+        template <uint8_t Kind>
         LIGNUM_INLINE void bwalk4(const BNode* __restrict__ nodes, int32_t root, const BinnedRow* r,
                                   int32_t& n0, int32_t& n1, int32_t& n2, int32_t& n3) {
             n0 = n1 = n2 = n3 = root;
             while (n0 >= 0 || n1 >= 0 || n2 >= 0 || n3 >= 0) {
-                if (n0 >= 0) n0 = bstep<Cat>(nodes[n0], r[0]);
-                if (n1 >= 0) n1 = bstep<Cat>(nodes[n1], r[1]);
-                if (n2 >= 0) n2 = bstep<Cat>(nodes[n2], r[2]);
-                if (n3 >= 0) n3 = bstep<Cat>(nodes[n3], r[3]);
+                if (n0 >= 0) n0 = bstep<Kind>(nodes[n0], r[0]);
+                if (n1 >= 0) n1 = bstep<Kind>(nodes[n1], r[1]);
+                if (n2 >= 0) n2 = bstep<Kind>(nodes[n2], r[2]);
+                if (n3 >= 0) n3 = bstep<Kind>(nodes[n3], r[3]);
             }
         }
 
-        template <bool Cat>
+        template <uint8_t Kind>
         LIGNUM_INLINE int32_t bwalk1(const BNode* __restrict__ nodes, int32_t node, const BinnedRow& r) {
-            while (node >= 0) node = bstep<Cat>(nodes[node], r);
+            while (node >= 0) node = bstep<Kind>(nodes[node], r);
             return node;
         }
 
@@ -651,10 +660,10 @@ namespace lignum {
                                 size_t i_begin, size_t i_end, size_t t_begin, size_t t_end, double* __restrict__ out) const {
                     const BNode* __restrict__ nodes = f_.nodes.data();
                     const int32_t* __restrict__ roots = f_.roots.data();
-                    const uint8_t* __restrict__ has_cat = f_.tree_has_cat.data();
+                    const uint8_t* __restrict__ kinds = f_.tree_kind.data();
                     const double* __restrict__ leaf_values = m_.leaf_values;
                     auto row = [&](size_t i) LIGNUM_LAMBDA_INLINE {
-                        return BinnedRow{&codes[(i - i_begin) * nd], &decisions[(i - i_begin) * nw]};
+                        return BinnedRow{&codes[(i - i_begin) * nd], &decisions[(i - i_begin) * nw], f_.zero_bin.data()};
                     };
                     const size_t unrolled_end = i_begin + ((i_end - i_begin) / 4) * 4;
                     for (size_t i = i_begin; i < unrolled_end; i += 4) {
@@ -662,8 +671,9 @@ namespace lignum {
                         if constexpr (Multi) {
                             for (size_t t = t_begin; t < t_end; t++) {
                                 int32_t n0, n1, n2, n3;
-                                if (has_cat[t]) bwalk4<true>(nodes, roots[t], r, n0, n1, n2, n3);
-                                else            bwalk4<false>(nodes, roots[t], r, n0, n1, n2, n3);
+                                with_kind<true>(kinds[t], [&](auto K) LIGNUM_LAMBDA_INLINE {
+                                    bwalk4<decltype(K)::value>(nodes, roots[t], r, n0, n1, n2, n3);
+                                });
                                 add(out, i, t, n0);
                                 add(out, i + 1, t, n1);
                                 add(out, i + 2, t, n2);
@@ -676,8 +686,9 @@ namespace lignum {
                             Acc sum3 = static_cast<Acc>(out[i + 3]);
                             for (size_t t = t_begin; t < t_end; t++) {
                                 int32_t n0, n1, n2, n3;
-                                if (has_cat[t]) bwalk4<true>(nodes, roots[t], r, n0, n1, n2, n3);
-                                else            bwalk4<false>(nodes, roots[t], r, n0, n1, n2, n3);
+                                with_kind<true>(kinds[t], [&](auto K) LIGNUM_LAMBDA_INLINE {
+                                    bwalk4<decltype(K)::value>(nodes, roots[t], r, n0, n1, n2, n3);
+                                });
                                 sum0 += static_cast<Acc>(leaf_value(leaf_values, n0));
                                 sum1 += static_cast<Acc>(leaf_value(leaf_values, n1));
                                 sum2 += static_cast<Acc>(leaf_value(leaf_values, n2));
@@ -692,7 +703,9 @@ namespace lignum {
                     for (size_t i = unrolled_end; i < i_end; i++) {
                         const BinnedRow r = row(i);
                         for (size_t t = t_begin; t < t_end; t++) {
-                            add(out, i, t, has_cat[t] ? bwalk1<true>(nodes, roots[t], r) : bwalk1<false>(nodes, roots[t], r));
+                            int32_t leaf;
+                            with_kind<true>(kinds[t], [&](auto K) LIGNUM_LAMBDA_INLINE { leaf = bwalk1<decltype(K)::value>(nodes, roots[t], r); });
+                            add(out, i, t, leaf);
                         }
                     }
                 }

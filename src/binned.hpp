@@ -34,6 +34,10 @@ namespace lignum {
     // tree walk reads one bit from L1 instead of converting the value and loading a set.
     //   LightGBM: in set -> left, anything else (NaN, invalid, unseen) -> right.
     //   XGBoost (bit s of xgb_slots): in set -> right; NaN -> right iff bit s of nan_left.
+    //
+    // Zero-as-missing slot s (bit s of zero_slots): the feature's cuts include both edges of the
+    // zero band [-kZero, kZero], so the band is exactly one bin (BinnedForest::zero_bin); a code
+    // equal to it takes the NaN direction (right iff the slot has no shift).
     struct alignas(64) BNode {
         int32_t children[8];
         uint16_t thresholds[7];
@@ -41,7 +45,8 @@ namespace lignum {
         uint8_t nan_left;        // numeric slot s: shift = 1; XGBoost categorical slot s: NaN goes right
         uint8_t cat_slots;       // bit s: slot s is categorical
         uint8_t xgb_slots;       // bit s: categorical slot s uses XGBoost semantics
-        uint8_t padding;
+        uint8_t zero_slots;      // bit s: numeric slot s treats the zero band as missing (LightGBM
+                                 // missing_type=Zero), going where NaN goes
     };
     static_assert(sizeof(BNode) == 64, "BNode must fill exactly one cache line");
 
@@ -76,20 +81,21 @@ namespace lignum {
     struct BinnedForest {
         std::vector<BNode> nodes;
         std::vector<int32_t> roots;          // per tree: BNode index, or a leaf (negative)
-        std::vector<uint8_t> tree_has_cat;   // per tree: has categorical slots
+        std::vector<uint8_t> tree_kind;      // per tree: tree_kind bits (Categorical, ZeroMissing)
         std::vector<uint32_t> feature_of;    // dense feature -> input column
         std::vector<uint8_t> feature_kind;   // dense feature -> feature_kind
         std::vector<uint32_t> cut_offsets;   // numeric dense feature j: cuts[cut_offsets[j] .. cut_offsets[j + 1])
         std::vector<double> cuts;            // sorted unique thresholds of every numeric dense feature
+        std::vector<uint16_t> zero_bin;      // dense feature -> bin of the zero band (features with zero-as-missing slots)
         std::vector<BinnedCatSlot> cat_slots;    // build-time only
         std::vector<BinnedCatFeature> cat_features;
         std::vector<uint64_t> cat_tables;
         uint32_t decision_words = 0;              // 64-bit words of decision bits per row
     };
 
-    // Builds the binned form of a model, or returns nullptr when the model uses something the
-    // prototype does not cover (zero-as-missing splits, category ids >= kInvalidCat, too many
-    // thresholds per feature, more than 65535 categorical slots, decision tables > 256 MB).
+    // Builds the binned form of a model, or returns nullptr when it does not fit the 16-bit codes
+    // (category ids >= kInvalidCat, too many thresholds per feature, more than 65535 categorical
+    // slots) or the decision tables would exceed 256 MB.
     std::shared_ptr<const BinnedForest> build_binned(const Model& model);
 
 } // namespace lignum

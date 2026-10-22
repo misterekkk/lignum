@@ -1,6 +1,7 @@
 #include "binned.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <bit>
 #include <stdexcept>
 #include <unordered_map>
@@ -76,7 +77,7 @@ namespace lignum {
                        const std::vector<std::vector<double>>& cuts)
                     : bt_(bt), out_(out), dense_(dense), cuts_(cuts) {}
 
-                bool tree_has_cat = false;
+                uint8_t tree_kind = 0;
 
                 int32_t pack(int32_t i) {
                     if (bt_[i].leaf) return bt_[i].leaf_ref;
@@ -118,11 +119,17 @@ namespace lignum {
                             if (nan_right) b.nan_left |= static_cast<uint8_t>(1u << slot);
                         }
                         out_.cat_slots.push_back(c);
-                        tree_has_cat = true;
+                        tree_kind |= tree_kind::Categorical;
                         return;
                     }
                     const auto& c = cuts_[j];
                     const auto k = std::lower_bound(c.begin(), c.end(), n.threshold) - c.begin();
+                    if (n.dirs & dir_bits::ZeroIsMissing) {
+                        // Encoded like any numeric slot (NaN via the shift); the kernel overrides
+                        // the result for the zero band.
+                        b.zero_slots |= static_cast<uint8_t>(1u << slot);
+                        tree_kind |= tree_kind::ZeroMissing;
+                    }
                     b.thresholds[slot] = static_cast<uint16_t>(k + 1 + (nan_right ? 0 : 1));
                     if (!nan_right) b.nan_left |= static_cast<uint8_t>(1u << slot);
                 }
@@ -225,9 +232,9 @@ namespace lignum {
         std::unordered_map<uint32_t, uint16_t> dense;
         std::vector<std::vector<double>> cuts;
         auto forest = std::make_shared<BinnedForest>();
+        std::vector<bool> zero_feature;
         for (const BTNode& n : bt) {
             if (n.leaf) continue;
-            if (n.dirs & dir_bits::ZeroIsMissing) return nullptr;
 
             uint8_t kind = feature_kind::Numeric;
             if (n.kind != slot_kind::Numeric) {
@@ -239,17 +246,34 @@ namespace lignum {
             if (inserted) {
                 if (cuts.size() >= 0xFFFF) return nullptr;
                 cuts.emplace_back();
+                zero_feature.push_back(false);
                 forest->feature_of.push_back(n.feature);
                 forest->feature_kind.push_back(kind);
             } else if (forest->feature_kind[it->second] != kind) {
                 return nullptr;  // the same column used with different semantics
             }
             if (kind == feature_kind::Numeric) cuts[it->second].push_back(n.threshold);
+            if (n.dirs & dir_bits::ZeroIsMissing) zero_feature[it->second] = true;
         }
-        for (auto& c : cuts) {
+        // LightGBM zeroes |x| <= kZero; parsers never place a threshold inside (-kZero, kZero], so
+        // with both band edges as cuts the band is exactly one bin.
+        constexpr double kZero = static_cast<double>(1e-35f);
+        forest->zero_bin.assign(cuts.size(), kNanBin);
+        for (size_t j = 0; j < cuts.size(); j++) {
+            auto& c = cuts[j];
+            if (zero_feature[j]) {
+                c.push_back(-kZero);
+                c.push_back(std::nextafter(kZero, INFINITY));
+            }
             std::sort(c.begin(), c.end());
             c.erase(std::unique(c.begin(), c.end()), c.end());
             if (c.size() >= kInvalidCat - 1) return nullptr;  // bin + 1 must stay below kInvalidCat
+            if (zero_feature[j]) {
+                const auto lo = std::lower_bound(c.begin(), c.end(), -kZero) - c.begin();
+                const auto hi = std::lower_bound(c.begin(), c.end(), std::nextafter(kZero, INFINITY)) - c.begin();
+                if (hi != lo + 1) return nullptr;  // a threshold inside the band: not representable
+                forest->zero_bin[j] = static_cast<uint16_t>(lo + 1);
+            }
         }
         forest->cut_offsets.push_back(0);
         for (const auto& c : cuts) {
@@ -260,9 +284,9 @@ namespace lignum {
         Packer packer(bt, *forest, dense, cuts);
         try {
             for (int32_t root : bt_roots) {
-                packer.tree_has_cat = false;
+                packer.tree_kind = 0;
                 forest->roots.push_back(packer.pack(root));
-                forest->tree_has_cat.push_back(packer.tree_has_cat);
+                forest->tree_kind.push_back(packer.tree_kind);
             }
         } catch (const std::length_error&) {
             return nullptr;  // more categorical slots than a 16-bit index can address
