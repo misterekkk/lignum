@@ -10,6 +10,22 @@ namespace lignum {
 
     namespace {
 
+        // Owning storage of a binned forest built at load time.
+        struct BinnedStorage {
+            std::vector<BNode> nodes;
+            std::vector<int32_t> roots;
+            std::vector<uint8_t> tree_kind;
+            std::vector<uint32_t> feature_of;
+            std::vector<uint8_t> feature_kind;
+            std::vector<uint16_t> zero_bin;
+            std::vector<uint32_t> cut_offsets;
+            std::vector<double> cuts;
+            std::vector<BinnedCatSlot> cat_slots;  // build-time only
+            std::vector<BinnedCatFeature> cat_features;
+            std::vector<uint64_t> cat_tables;
+            uint32_t decision_words = 0;
+        };
+
         // Plain binary tree recovered from the KNode form.
         struct BTNode {
             bool leaf = false;
@@ -73,7 +89,7 @@ namespace lignum {
 
         class Packer {
             public:
-                Packer(const std::vector<BTNode>& bt, BinnedForest& out, const std::unordered_map<uint32_t, uint16_t>& dense,
+                Packer(const std::vector<BTNode>& bt, BinnedStorage& out, const std::unordered_map<uint32_t, uint16_t>& dense,
                        const std::vector<std::vector<double>>& cuts)
                     : bt_(bt), out_(out), dense_(dense), cuts_(cuts) {}
 
@@ -93,7 +109,7 @@ namespace lignum {
 
             private:
                 const std::vector<BTNode>& bt_;
-                BinnedForest& out_;
+                BinnedStorage& out_;
                 const std::unordered_map<uint32_t, uint16_t>& dense_;
                 const std::vector<std::vector<double>>& cuts_;
 
@@ -179,7 +195,7 @@ namespace lignum {
 
         // Per categorical feature, a table category -> decision bits of all its slots; the slots'
         // BNode thresholds become bit indices into a row's decision bits.
-        bool build_decision_tables(const Model& model, BinnedForest& f) {
+        bool build_decision_tables(const Model& model, BinnedStorage& f) {
             std::vector<std::vector<uint32_t>> slots_of(f.feature_of.size());
             for (uint32_t id = 0; id < f.cat_slots.size(); id++) slots_of[f.cat_slots[id].dense].push_back(id);
 
@@ -231,7 +247,7 @@ namespace lignum {
         // Dense features with their kind; sorted unique thresholds for numeric ones.
         std::unordered_map<uint32_t, uint16_t> dense;
         std::vector<std::vector<double>> cuts;
-        auto forest = std::make_shared<BinnedForest>();
+        auto forest = std::make_shared<BinnedStorage>();
         std::vector<bool> zero_feature;
         for (const BTNode& n : bt) {
             if (n.leaf) continue;
@@ -292,7 +308,29 @@ namespace lignum {
             return nullptr;  // more categorical slots than a 16-bit index can address
         }
         if (!build_decision_tables(model, *forest)) return nullptr;
-        return forest;
+
+        auto view = std::make_shared<BinnedForest>();
+        view->nodes = forest->nodes.data();
+        view->n_nodes = forest->nodes.size();
+        view->roots = forest->roots.data();
+        view->tree_kind = forest->tree_kind.data();
+        view->n_trees = forest->roots.size();
+        view->feature_of = forest->feature_of.data();
+        view->feature_kind = forest->feature_kind.data();
+        view->zero_bin = forest->zero_bin.data();
+        view->cut_offsets = forest->cut_offsets.data();
+        view->n_features = forest->feature_of.size();
+        view->cuts = forest->cuts.data();
+        view->n_cuts = forest->cuts.size();
+        view->cat_features = forest->cat_features.data();
+        view->n_cat_features = forest->cat_features.size();
+        view->cat_tables = forest->cat_tables.data();
+        view->n_table_words = forest->cat_tables.size();
+        view->decision_words = forest->decision_words;
+        forest->cat_slots.clear();
+        forest->cat_slots.shrink_to_fit();
+        view->owner = forest;
+        return view;
     }
 
 } // namespace lignum

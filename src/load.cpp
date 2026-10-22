@@ -31,26 +31,28 @@ namespace lignum {
 
     namespace {
 
+        // Builds the binned kernel unless it came from the file (or is not wanted).
         Model with_binned(Model model, bool binned) {
-            if (binned) model.binned = build_binned(model);
+            if (!binned) model.binned = nullptr;
+            else if (!model.binned) model.binned = build_binned(model);
             return model;
         }
 
-        Model load_any(const std::string& filepath, const std::string& fmt);
+        Model load_any(const std::string& filepath, const std::string& fmt, bool binned);
 
     } // namespace
 
     Model load(const std::string& filepath, const std::string& format, bool binned) {
-        return with_binned(load_any(filepath, lower_case(format)), binned);
+        return with_binned(load_any(filepath, lower_case(format), binned), binned);
     }
 
     namespace {
 
-    Model load_any(const std::string& filepath, const std::string& fmt) {
+    Model load_any(const std::string& filepath, const std::string& fmt, bool binned) {
 
         if (fmt == "auto" || fmt == "lignum" || fmt == "binary" || fmt == "bin") {
             if (is_lignum_bin(filepath)) {
-                return load_binary(filepath);
+                return load_binary(filepath, binned);
             }
             throw std::invalid_argument("Binary file is not lignum format.");
         }

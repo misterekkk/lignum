@@ -1,5 +1,6 @@
 #include <lignum/model.hpp>
 #include "io.hpp"
+#include "binned.hpp"
 
 #include <fstream>
 #include <stdexcept>
@@ -49,7 +50,7 @@ namespace lignum {
         struct alignas(64) FileHeader {
             char magic[6] = {'L', 'I', 'G', 'N', 'U', 'M'}; 
             uint8_t version_major = 0;
-            uint8_t version_minor = 5;
+            uint8_t version_minor = 6;
 
             uint8_t os_id = LIGNUM_OS_ID;
             uint8_t arch_id = LIGNUM_ARCH_ID;
@@ -72,7 +73,30 @@ namespace lignum {
         namespace header_flags {
             constexpr uint8_t Float32 = 1 << 0;
             constexpr uint8_t SpecialTrees = 1 << 1;
+            constexpr uint8_t Binned = 1 << 2;  // a BinnedFileHeader and its sections follow
         } // namespace header_flags
+
+        // Binned sections, in file order: (pointer, element size, element count).
+        struct Section {
+            const void* data;
+            size_t element_size;
+            size_t count;
+        };
+
+        std::vector<Section> binned_sections(const BinnedForest& f) {
+            return {
+                {f.nodes, sizeof(BNode), f.n_nodes},
+                {f.roots, sizeof(int32_t), f.n_trees},
+                {f.tree_kind, sizeof(uint8_t), f.n_trees},
+                {f.feature_of, sizeof(uint32_t), f.n_features},
+                {f.feature_kind, sizeof(uint8_t), f.n_features},
+                {f.zero_bin, sizeof(uint16_t), f.n_features},
+                {f.cut_offsets, sizeof(uint32_t), f.n_features + 1},
+                {f.cuts, sizeof(double), f.n_cuts},
+                {f.cat_features, sizeof(BinnedCatFeature), f.n_cat_features},
+                {f.cat_tables, sizeof(uint64_t), f.n_table_words},
+            };
+        }
 
         size_t align(size_t size) {
             return (size + 63) & ~size_t(63); // aligns data to 64B
@@ -161,7 +185,8 @@ namespace lignum {
         header.n_cat_words = n_cat_words;
         header.sigmoid = sigmoid;
         header.transform = transform;
-        header.flags = static_cast<uint8_t>((float32 ? header_flags::Float32 : 0) | (has_special_trees ? header_flags::SpecialTrees : 0));
+        header.flags = static_cast<uint8_t>((float32 ? header_flags::Float32 : 0) | (has_special_trees ? header_flags::SpecialTrees : 0) |
+                                            (binned ? header_flags::Binned : 0));
         header.n_features = n_features;
         header.n_nodes = n_nodes;
         header.n_offsets = n_offsets;
@@ -178,9 +203,26 @@ namespace lignum {
             padded_write(out, reinterpret_cast<const char*>(tree_outputs), n_offsets * sizeof(uint16_t));
         }
         padded_write(out, reinterpret_cast<const char*>(cat_bitsets), n_cat_words * sizeof(uint32_t));
+
+        // The binned kernel is stored too, so a mapped model needs no preparation at load time.
+        if (binned) {
+            BinnedFileHeader bh;
+            bh.n_nodes = binned->n_nodes;
+            bh.n_trees = binned->n_trees;
+            bh.n_features = binned->n_features;
+            bh.n_cuts = binned->n_cuts;
+            bh.n_cat_features = binned->n_cat_features;
+            bh.n_table_words = binned->n_table_words;
+            bh.decision_words = binned->decision_words;
+            out.write(reinterpret_cast<const char*>(&bh), sizeof(bh));
+            for (const Section& sec : binned_sections(*binned)) {
+                padded_write(out, static_cast<const char*>(sec.data), sec.element_size * sec.count);
+            }
+        }
+        if (!out) throw std::runtime_error("Failed to write the model file.");
     }
 
-    Model load_binary(const std::string& filepath) {
+    Model load_binary(const std::string& filepath, bool binned) {
         auto binary_data = std::make_shared<MmapData>(filepath);
 
         if (binary_data->size < sizeof(FileHeader)) {
@@ -198,7 +240,7 @@ namespace lignum {
             throw std::runtime_error("Endianness mismatch.");
         }
 
-        if (header.version_major != 0 || header.version_minor != 5) {
+        if (header.version_major != 0 || header.version_minor != 6) {
             throw std::runtime_error("Unsupported lignum binary format version " + std::to_string(header.version_major) + "." +
                                      std::to_string(header.version_minor) + "; re-export the model from JSON.");
         }
@@ -254,6 +296,48 @@ namespace lignum {
         }
         if (model.n_cat_words > 0) {
             model.cat_bitsets = reinterpret_cast<const uint32_t*>(binary_data->data + offset);
+        }
+        offset += align(model.n_cat_words * sizeof(uint32_t));
+
+        if (binned && (header.flags & header_flags::Binned)) {
+            if (binary_data->size < offset + sizeof(BinnedFileHeader)) {
+                throw std::runtime_error("Binary file is truncated or corrupted.");
+            }
+            BinnedFileHeader bh;
+            std::memcpy(&bh, binary_data->data + offset, sizeof(bh));
+            offset += sizeof(bh);
+
+            auto f = std::make_shared<BinnedForest>();
+            f->n_nodes = bh.n_nodes;
+            f->n_trees = bh.n_trees;
+            f->n_features = bh.n_features;
+            f->n_cuts = bh.n_cuts;
+            f->n_cat_features = bh.n_cat_features;
+            f->n_table_words = bh.n_table_words;
+            f->decision_words = bh.decision_words;
+            if (f->n_trees != model.n_offsets) throw std::runtime_error("Binary file is truncated or corrupted.");
+
+            size_t needed = offset;
+            for (const Section& sec : binned_sections(*f)) needed += align(sec.element_size * sec.count);
+            if (binary_data->size < needed) throw std::runtime_error("Binary file is truncated or corrupted.");
+
+            auto at = [&](size_t bytes) {
+                const char* p = binary_data->data + offset;
+                offset += align(bytes);
+                return p;
+            };
+            f->nodes = reinterpret_cast<const BNode*>(at(f->n_nodes * sizeof(BNode)));
+            f->roots = reinterpret_cast<const int32_t*>(at(f->n_trees * sizeof(int32_t)));
+            f->tree_kind = reinterpret_cast<const uint8_t*>(at(f->n_trees * sizeof(uint8_t)));
+            f->feature_of = reinterpret_cast<const uint32_t*>(at(f->n_features * sizeof(uint32_t)));
+            f->feature_kind = reinterpret_cast<const uint8_t*>(at(f->n_features * sizeof(uint8_t)));
+            f->zero_bin = reinterpret_cast<const uint16_t*>(at(f->n_features * sizeof(uint16_t)));
+            f->cut_offsets = reinterpret_cast<const uint32_t*>(at((f->n_features + 1) * sizeof(uint32_t)));
+            f->cuts = reinterpret_cast<const double*>(at(f->n_cuts * sizeof(double)));
+            f->cat_features = reinterpret_cast<const BinnedCatFeature*>(at(f->n_cat_features * sizeof(BinnedCatFeature)));
+            f->cat_tables = reinterpret_cast<const uint64_t*>(at(f->n_table_words * sizeof(uint64_t)));
+            f->owner = binary_data;
+            model.binned = f;
         }
 
         return model;

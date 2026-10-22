@@ -71,31 +71,49 @@ namespace lignum {
     // Per categorical feature: table[c] = decision bits of category c for every categorical slot
     // of this feature (bit l = c is in the set of the feature's l-th slot).
     struct BinnedCatFeature {
-        uint16_t dense;          // dense feature index
+        uint32_t dense;          // dense feature index
         uint32_t n_categories;   // codes >= n_categories are in no set
         uint32_t words;          // 64-bit words per category row
         uint32_t row_offset;     // first word of this feature in a row's decision bits
         uint64_t table_offset;   // first word of this feature's table in BinnedForest::cat_tables
     };
+    static_assert(sizeof(BinnedCatFeature) == 24, "BinnedCatFeature is part of the binary format");
 
+    // View of a binned model; the memory belongs to `owner` (vectors built at load time, or the
+    // mapped model file). Same ownership scheme as Model.
     struct BinnedForest {
-        std::vector<BNode> nodes;
-        std::vector<int32_t> roots;          // per tree: BNode index, or a leaf (negative)
-        std::vector<uint8_t> tree_kind;      // per tree: tree_kind bits (Categorical, ZeroMissing)
-        std::vector<uint32_t> feature_of;    // dense feature -> input column
-        std::vector<uint8_t> feature_kind;   // dense feature -> feature_kind
-        std::vector<uint32_t> cut_offsets;   // numeric dense feature j: cuts[cut_offsets[j] .. cut_offsets[j + 1])
-        std::vector<double> cuts;            // sorted unique thresholds of every numeric dense feature
-        std::vector<uint16_t> zero_bin;      // dense feature -> bin of the zero band (features with zero-as-missing slots)
-        std::vector<BinnedCatSlot> cat_slots;    // build-time only
-        std::vector<BinnedCatFeature> cat_features;
-        std::vector<uint64_t> cat_tables;
-        uint32_t decision_words = 0;              // 64-bit words of decision bits per row
+        const BNode* nodes = nullptr;
+        size_t n_nodes = 0;
+        const int32_t* roots = nullptr;          // per tree: BNode index, or a leaf (negative)
+        const uint8_t* tree_kind = nullptr;      // per tree: tree_kind bits (Categorical, ZeroMissing)
+        size_t n_trees = 0;
+        const uint32_t* feature_of = nullptr;    // dense feature -> input column
+        const uint8_t* feature_kind = nullptr;   // dense feature -> feature_kind
+        const uint16_t* zero_bin = nullptr;      // dense feature -> bin of the zero band (zero-as-missing features)
+        const uint32_t* cut_offsets = nullptr;   // n_features + 1: numeric feature j uses cuts[cut_offsets[j] .. cut_offsets[j + 1])
+        size_t n_features = 0;
+        const double* cuts = nullptr;            // sorted unique thresholds of every numeric dense feature
+        size_t n_cuts = 0;
+        const BinnedCatFeature* cat_features = nullptr;
+        size_t n_cat_features = 0;
+        const uint64_t* cat_tables = nullptr;
+        size_t n_table_words = 0;
+        uint32_t decision_words = 0;             // 64-bit words of decision bits per row
+        std::shared_ptr<const void> owner;
     };
 
     // Builds the binned form of a model, or returns nullptr when it does not fit the 16-bit codes
     // (category ids >= kInvalidCat, too many thresholds per feature, more than 65535 categorical
     // slots) or the decision tables would exceed 256 MB.
     std::shared_ptr<const BinnedForest> build_binned(const Model& model);
+
+    // Binary format (see io.cpp): header + 64-byte aligned sections.
+    struct alignas(64) BinnedFileHeader {
+        uint64_t n_nodes = 0, n_trees = 0, n_features = 0, n_cuts = 0, n_cat_features = 0, n_table_words = 0;
+        uint32_t decision_words = 0;
+        uint32_t reserved = 0;
+        uint64_t reserved2 = 0;
+    };
+    static_assert(sizeof(BinnedFileHeader) == 64, "BinnedFileHeader must stay 64 bytes");
 
 } // namespace lignum

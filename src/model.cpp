@@ -599,7 +599,7 @@ namespace lignum {
                     : m_(model), f_(forest), X_(X), n_features_(n_features), raw_score_(raw_score) {}
 
                 void predict_rows(size_t i_begin, size_t i_end, double* __restrict__ out) const {
-                    const size_t nd = f_.feature_of.size();
+                    const size_t nd = f_.n_features;
                     const size_t nw = f_.decision_words;
                     thread_local std::vector<uint16_t> buffer;
                     thread_local std::vector<uint64_t> decision_buffer;
@@ -623,7 +623,8 @@ namespace lignum {
                         // Categorical part, done once per row: copy the decision bits of the row's
                         // category for every categorical slot of the model.
                         uint64_t* rd = &decisions[(i - i_begin) * nw];
-                        for (const BinnedCatFeature& cf : f_.cat_features) {
+                        for (size_t k = 0; k < f_.n_cat_features; k++) {
+                            const BinnedCatFeature& cf = f_.cat_features[k];
                             const uint16_t code = rc[cf.dense];
                             if (code < cf.n_categories) {
                                 std::memcpy(rd + cf.row_offset, &f_.cat_tables[cf.table_offset + uint64_t{code} * cf.words], cf.words * sizeof(uint64_t));
@@ -637,8 +638,8 @@ namespace lignum {
                     for (size_t i = i_begin; i < i_end; i++) {
                         for (size_t c = 0; c < K; c++) out[i * K + c] = static_cast<double>(static_cast<Acc>(m_.base_scores[c]));
                     }
-                    for (size_t t_start = 0; t_start < f_.roots.size(); t_start += T_BLOCK) {
-                        accumulate(codes, nd, decisions, nw, i_begin, i_end, t_start, std::min(t_start + T_BLOCK, f_.roots.size()), out);
+                    for (size_t t_start = 0; t_start < f_.n_trees; t_start += T_BLOCK) {
+                        accumulate(codes, nd, decisions, nw, i_begin, i_end, t_start, std::min(t_start + T_BLOCK, f_.n_trees), out);
                     }
                     finish_rows<Acc, Multi>(m_, raw_score_, i_begin, i_end, out);
                 }
@@ -658,12 +659,12 @@ namespace lignum {
 
                 void accumulate(const uint16_t* __restrict__ codes, size_t nd, const uint64_t* __restrict__ decisions, size_t nw,
                                 size_t i_begin, size_t i_end, size_t t_begin, size_t t_end, double* __restrict__ out) const {
-                    const BNode* __restrict__ nodes = f_.nodes.data();
-                    const int32_t* __restrict__ roots = f_.roots.data();
-                    const uint8_t* __restrict__ kinds = f_.tree_kind.data();
+                    const BNode* __restrict__ nodes = f_.nodes;
+                    const int32_t* __restrict__ roots = f_.roots;
+                    const uint8_t* __restrict__ kinds = f_.tree_kind;
                     const double* __restrict__ leaf_values = m_.leaf_values;
                     auto row = [&](size_t i) LIGNUM_LAMBDA_INLINE {
-                        return BinnedRow{&codes[(i - i_begin) * nd], &decisions[(i - i_begin) * nw], f_.zero_bin.data()};
+                        return BinnedRow{&codes[(i - i_begin) * nd], &decisions[(i - i_begin) * nw], f_.zero_bin};
                     };
                     const size_t unrolled_end = i_begin + ((i_end - i_begin) / 4) * 4;
                     for (size_t i = i_begin; i < unrolled_end; i += 4) {
