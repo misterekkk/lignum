@@ -142,7 +142,7 @@ Weak spots:
 - [x] Categorical decisions precomputed per row (category -> decision bits table per feature); a categorical slot reads one bit from L1
 - [x] Zero-as-missing in the binned kernel (zero band = one bin, branch-free override)
 - [x] Validate every index in loaded model files (children strictly forward, leaves, features, categorical tables): 0.15-0.64 ms per load; XGBoost JSON child order checked (no cycles); fuzz test under ASan/UBSan in CI
-- [ ] Single rows: measure the binned kernel for 1-7 rows (currently they keep the KNode walk)
+- [x] Binned kernel for every batch size: with four trees interleaved per leftover row it beats the KNode walk from one row on (M4 one row: numeric 6.9 -> 6.6 us, categorical 14.4 -> 8.3 us)
 
 ### Binned kernel results (CI `bench-lleaves.yml`, 300k rows, 500 trees, 4 threads)
 

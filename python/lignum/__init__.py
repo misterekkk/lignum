@@ -118,9 +118,8 @@ def load(filepath: str, format: str = "auto", binned: bool = True) -> Model:
         Expected format of the model file. If set to 'auto', the function will 
         attempt to infer the format from the file contents.
     binned : bool, default=True
-        Prepare the binned kernel used for batches of 8 or more rows: inputs are mapped
-        once per row to integer bin codes and categorical decisions are precomputed, so the
-        tree walk compares small integers. Results are identical either way; False keeps
+        Prepare the binned kernel: inputs are mapped once per row to integer bin codes and
+        categorical decisions are precomputed, so the tree walk compares small integers. Results are identical either way; False keeps
         only the direct traversal (lower memory use).
 
     Returns

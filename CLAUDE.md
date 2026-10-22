@@ -19,7 +19,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) before touching the kernel or parsers; t
 6. C++20. Code, comments, commit messages and repo docs in English.
 7. Every feature ships with tests: GoogleTest in `tests/cpp` for logic, pytest parity tests in
    `tests/python` against real LightGBM/XGBoost models (include NaN, zeros, values exactly on thresholds).
-   There are two kernels (binned for batches, KNode walk for single rows / `binned=False`); every
+   There are two kernels (binned by default, KNode walk for `binned=False` / unsupported models); every
    Python test runs with both (`tests/python/conftest.py`), and kernel changes must keep both exact.
 8. Distributed builds never use `-march=native`/`-mcpu=native` (`LIGNUM_NATIVE` is for local benchmarks only).
 9. Kernel ideas are measured on x86-64 and aarch64 before they are kept: put compile flags in

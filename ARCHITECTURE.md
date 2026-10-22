@@ -65,7 +65,7 @@ non-bitset slots read a valid address).
   last tile. XGBoost `multi:softmax` (argmax) is computed from raw margins in a temporary buffer,
   because narrowing K columns to one in place would race between threads.
 
-## Binned kernel (src/binned.*, default for batches of 8+ rows)
+## Binned kernel (src/binned.*, default)
 
 Built from the KNode form at load time (or mapped from the binary file):
 
@@ -86,8 +86,10 @@ Built from the KNode form at load time (or mapped from the binary file):
   table row per feature into its decision buffer, and a categorical slot reads one bit from L1.
 - LightGBM zero-as-missing: both edges of the zero band are added as cuts, so the band is one bin;
   flagged slots override the comparison for that bin (branch-free).
-- Results are identical to the KNode kernel; `load(..., binned=False)` disables it, and every
-  Python test runs with both kernels (`tests/python/conftest.py`).
+- Rows outside the 4-row groups (including a single row) walk four trees at once.
+- Results are identical to the KNode kernel, which remains for `load(..., binned=False)` and models
+  the binned form cannot represent; every Python test runs with both kernels
+  (`tests/python/conftest.py`).
 
 ## Split semantics
 

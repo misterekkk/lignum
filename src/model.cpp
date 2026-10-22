@@ -469,6 +469,13 @@ namespace lignum {
         // 4 rows 27 us serial vs 36 us parallel; 8 rows 47 us vs 40 us).
         constexpr size_t kMinRowsForThreads = 8;
 
+        // Smallest batch that uses the binned kernel. With four trees interleaved per leftover row
+        // it wins from one row on (M4: numeric 6.9 -> 6.6 us, categorical 14.4 -> 8.3 us per row).
+        #ifndef LIGNUM_BINNED_MIN_ROWS
+            #define LIGNUM_BINNED_MIN_ROWS 1
+        #endif
+        constexpr size_t kMinRowsForBinned = LIGNUM_BINNED_MIN_ROWS;
+
         Strategy choose_strategy(size_t n_samples, int n_threads) {
             if (n_threads <= 1 || n_samples < kMinRowsForThreads) return Strategy::Serial;
             return Strategy::Rows;
@@ -583,6 +590,19 @@ namespace lignum {
                 if (n1 >= 0) n1 = bstep<Kind>(nodes[n1], r[1]);
                 if (n2 >= 0) n2 = bstep<Kind>(nodes[n2], r[2]);
                 if (n3 >= 0) n3 = bstep<Kind>(nodes[n3], r[3]);
+            }
+        }
+
+        // Four trees of the same row, interleaved (rows outside the 4-row groups, e.g. one row).
+        template <uint8_t Kind>
+        LIGNUM_INLINE void bwalk4_trees(const BNode* __restrict__ nodes, const int32_t* roots, const BinnedRow& r,
+                                        int32_t& n0, int32_t& n1, int32_t& n2, int32_t& n3) {
+            n0 = roots[0]; n1 = roots[1]; n2 = roots[2]; n3 = roots[3];
+            while (n0 >= 0 || n1 >= 0 || n2 >= 0 || n3 >= 0) {
+                if (n0 >= 0) n0 = bstep<Kind>(nodes[n0], r);
+                if (n1 >= 0) n1 = bstep<Kind>(nodes[n1], r);
+                if (n2 >= 0) n2 = bstep<Kind>(nodes[n2], r);
+                if (n3 >= 0) n3 = bstep<Kind>(nodes[n3], r);
             }
         }
 
@@ -701,9 +721,20 @@ namespace lignum {
                             out[i + 3] = static_cast<double>(sum3);
                         }
                     }
+                    // Leftover rows: interleave four trees of the same row; leaves still in tree order.
+                    const size_t trees_unrolled_end = t_begin + ((t_end - t_begin) / 4) * 4;
                     for (size_t i = unrolled_end; i < i_end; i++) {
                         const BinnedRow r = row(i);
-                        for (size_t t = t_begin; t < t_end; t++) {
+                        for (size_t t = t_begin; t < trees_unrolled_end; t += 4) {
+                            int32_t n0, n1, n2, n3;
+                            with_kind<true>(static_cast<uint8_t>(kinds[t] | kinds[t + 1] | kinds[t + 2] | kinds[t + 3]),
+                                            [&](auto K) LIGNUM_LAMBDA_INLINE { bwalk4_trees<decltype(K)::value>(nodes, &roots[t], r, n0, n1, n2, n3); });
+                            add(out, i, t, n0);
+                            add(out, i, t + 1, n1);
+                            add(out, i, t + 2, n2);
+                            add(out, i, t + 3, n3);
+                        }
+                        for (size_t t = trees_unrolled_end; t < t_end; t++) {
                             int32_t leaf;
                             with_kind<true>(kinds[t], [&](auto K) LIGNUM_LAMBDA_INLINE { leaf = bwalk1<decltype(K)::value>(nodes, roots[t], r); });
                             add(out, i, t, leaf);
@@ -743,7 +774,7 @@ namespace lignum {
             if (n_samples == 0) return;
 
             // Batches use the binned kernel when available; a few rows keep the direct traversal.
-            const bool binned = model.binned && n_samples >= kMinRowsForThreads;
+            const bool binned = model.binned && n_samples >= kMinRowsForBinned;
             auto run_model = [&](double* dst, bool raw) {
                 if (binned) run_binned_any(model, X, n_samples, n_features, dst, n_jobs, strategy, raw);
                 else        run_any(model, X, n_samples, n_features, dst, n_jobs, strategy, raw);
