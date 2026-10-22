@@ -13,6 +13,7 @@ For every model and engine it reports:
     measured both on the benchmark data and on training rows (which hit split thresholds exactly).
 
 Generated data and models are cached in benchmarks/.cache; results are written to benchmarks/results/.
+Real datasets: --only lightgbm-real-diabetes,lightgbm-real-covtype,... (see benchmarks/datasets.py).
 """
 
 from __future__ import annotations
@@ -175,6 +176,33 @@ def build_workloads(args) -> list[Workload]:
         booster = lgb.Booster(model_file=str(txt))
         workloads.append(Workload("lightgbm-cat", np.ascontiguousarray(Xc), Xc_train,
                                   np.ascontiguousarray(Xc[n_train:n_train + 100_000]), js, txt, booster))
+
+    # Real datasets (benchmarks/datasets.py): lightgbm-real-<name>, LightGBM trained on 80% of the rows.
+    for name in [n for n in args.only if n.startswith("lightgbm-real-")]:
+        sys.path.insert(0, str(HERE))
+        import datasets
+
+        ds = name[len("lightgbm-real-"):]
+        d = datasets.LOADERS[ds]()
+        real_cache = CACHE / "real"
+        real_cache.mkdir(parents=True, exist_ok=True)
+        txt, js = real_cache / f"{ds}_t{args.trees}.txt", real_cache / f"{ds}_t{args.trees}.json"
+        split = int(len(d.y) * 0.8)
+        if not txt.exists():
+            params = {"num_leaves": 63, "learning_rate": 0.1, "verbose": -1, "seed": 7, "max_cat_to_onehot": 4,
+                      "max_cat_threshold": 64, "min_data_per_group": 20}
+            if d.task == "multiclass":
+                params.update(objective="multiclass", num_class=d.n_classes)
+            else:
+                params["objective"] = "binary" if d.task == "binary" else "regression"
+            rounds = max(1, args.trees // d.n_classes)
+            booster = lgb.train(params, lgb.Dataset(d.frame.iloc[:split], d.y[:split]), num_boost_round=rounds)
+            booster.save_model(str(txt))
+            js.write_text(json.dumps(booster.dump_model()))
+        booster = lgb.Booster(model_file=str(txt))
+        workloads.append(Workload(name, d.X, np.ascontiguousarray(d.X[:min(split, 100_000)]),
+                                  np.ascontiguousarray(d.X[split:split + 100_000]), js, txt, booster,
+                                  d.n_classes if d.task == "multiclass" else 1))
 
     if "xgboost-cat" in args.only:
         js, cat_data = cache / "xgb_cat.json", cache / "data_cat.npz"

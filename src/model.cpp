@@ -574,11 +574,22 @@ namespace lignum {
         // evaluating all seven speculatively was 2x slower (the kernel is compute bound).
         template <uint8_t Kind>
         LIGNUM_INLINE int32_t bstep(const BNode& b, const BinnedRow& r) {
+        #ifdef LIGNUM_BINNED_BRANCHY
+            // Experimental: branch on every level like compiled code, so a well-predicted path
+            // lets the CPU run ahead to the next comparisons and node loads.
+            if (bdir<Kind>(b, 0, r)) {
+                if (bdir<Kind>(b, 2, r)) return b.children[6 | bdir<Kind>(b, 6, r)];
+                return b.children[4 | bdir<Kind>(b, 5, r)];
+            }
+            if (bdir<Kind>(b, 1, r)) return b.children[2 | bdir<Kind>(b, 4, r)];
+            return b.children[bdir<Kind>(b, 3, r)];
+        #else
             const int32_t d0 = bdir<Kind>(b, 0, r);
             const int32_t d1 = bdir<Kind>(b, 1 + d0, r);
             const int32_t g = (d0 << 1) | d1;
             const int32_t d2 = bdir<Kind>(b, 3 + g, r);
             return b.children[(g << 1) | d2];
+        #endif
         }
 
         template <uint8_t Kind>

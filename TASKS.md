@@ -144,6 +144,28 @@ Weak spots:
 - [x] Validate every index in loaded model files (children strictly forward, leaves, features, categorical tables): 0.15-0.64 ms per load; XGBoost JSON child order checked (no cycles); fuzz test under ASan/UBSan in CI
 - [x] Binned kernel for every batch size: with four trees interleaved per leftover row it beats the KNode walk from one row on (M4 one row: numeric 6.9 -> 6.6 us, categorical 14.4 -> 8.3 us)
 
+### Real datasets (`benchmarks/datasets.py`, M4, LightGBM num_leaves 63 unlimited depth, 500 trees)
+
+Parity: 20 bit-exact tests (`tests/python/test_real_data.py`): California, Covertype, Adult, Bank,
+Diabetes x LightGBM/XGBoost x both kernels.
+
+| dataset | lignum batch | lleaves batch | 1 row lignum / lleaves | 100 rows lignum / lleaves |
+|---|---:|---:|---:|---:|
+| California (20k, numeric) | 0.012 s | **0.006 s** | **4.7** / 6.5 µs | **99** / 268 µs |
+| Covertype (581k, 7 classes) | 0.256 s | **0.070 s** | 3.7 / 3.8 µs | **89** / 257 µs |
+| Adult (33k, 8 categorical) | 0.032 s | **0.010 s** | **4.4** / 4.8 µs | **131** / 269 µs |
+| Bank (45k, 9 categorical) | 0.033 s | **0.011 s** | **4.0** / 4.5 µs | **96** / 264 µs |
+| Diabetes (100k, 39 categorical, up to 789 categories) | **0.138 s** | 0.270 s | **6.9** / 13.2 µs | **171** / 726 µs |
+
+Finding: on real data lleaves is 2-4x faster on large batches except the high-cardinality categorical
+model. Its compiled branches are predicted almost perfectly on real, correlated features (Covertype:
+~1.4 ns per tree and row vs 5.9 ns on random synthetic data), while our branch-free walk costs the
+same either way. Ruled out: binning cost (~2%), multiclass (binary model on Covertype: same gap), row
+order (gap stays ~4x shuffled), interleaving (sequential walks are slower). A branchy binned step
+(`-DLIGNUM_BINNED_BRANCHY`) gives -18% on Covertype, -5% Diabetes, but +10-20% elsewhere and 2.2x on
+synthetic data.
+- [ ] Decide: optional compiled backend (code generation for maximum batch throughput) vs. interpreter-only positioning (latency, load time, exactness)
+
 ### Binned kernel results (CI `bench-lleaves.yml`, 300k rows, 500 trees, 4 threads)
 
 | | KNode kernel | binned | lleaves |

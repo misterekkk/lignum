@@ -16,7 +16,7 @@ on:
       args:
         description: "Arguments for benchmarks/bench.py"
         required: false
-        default: "--only lightgbm,lightgbm-cat --rows 300000 --trees 500 --repeats 5 --latency-budget 1"
+        default: "--only lightgbm,lightgbm-cat,lightgbm-real-diabetes,lightgbm-real-covtype --rows 300000 --trees 500 --repeats 5 --latency-budget 1"
 
 concurrency:
   group: bench-lleaves-${{ github.ref }}
@@ -26,7 +26,7 @@ env:
   # Compile flags of the experimental kernel variant measured next to the default build
   # (empty = skip).
   EXPERIMENT_CXX_FLAGS: ""
-  BENCH_ARGS: ${{ github.event.inputs.args || '--only lightgbm,lightgbm-cat --rows 300000 --trees 500 --repeats 5 --latency-budget 1' }}
+  BENCH_ARGS: ${{ github.event.inputs.args || '--only lightgbm,lightgbm-cat,lightgbm-real-diabetes,lightgbm-real-covtype --rows 300000 --trees 500 --repeats 5 --latency-budget 1' }}
 
 jobs:
   bench:
@@ -47,6 +47,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install ".[test]" lleaves "llvmlite<0.45"
+
+      - name: Cache datasets
+        uses: actions/cache@v4
+        with:
+          path: benchmarks/.cache/datasets
+          key: datasets-v1
 
       - name: CPU info
         run: lscpu | grep -E "Model name|^CPU\(s\)|Flags" | cut -c1-200
