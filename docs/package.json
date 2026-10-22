@@ -1,0 +1,16 @@
+{
+  "name": "lignum-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "api": "python scripts/api_reference.py",
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.42.5",
+    "astro": "7.3.7",
+    "sharp": "0.35.5"
+  }
+}

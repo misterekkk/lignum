@@ -112,13 +112,25 @@ compile_commands.json
 
 test_lignum
 !CMakeLists.txt
-!inst/tinytest/*.json
-!inst/tinytest/*.csv
-!py_package/tests/*.json
-!py_package/tests/*.csv
 site/
-R-package/inst/include
-R-package/src/*.cpp
-R-package/src/*.o
-!R-package/src/cpp11.cpp
-!R-package/src/r_wrapper.cpp
+.venv/
+*.npy
+benchmarks/bench_model_*
+benchmarks/.cache/
+
+# Benchmark scripts write each run to benchmarks/results/; the reports worth keeping are moved into
+# its folders (one per machine and architecture), raw .md / .json / .txt included.
+/benchmarks/results/*
+!/benchmarks/results/*/
+!/benchmarks/results/README.md
+!/benchmarks/results/*/**/*.json
+!/benchmarks/results/*/**/*.txt
+
+# The docs site (Starlight) needs its npm and TypeScript files.
+!docs/package.json
+!docs/package-lock.json
+!docs/tsconfig.json
+
+# Local working notes (roadmap with measurements, session handoff); not part of the project.
+TASKS.md
+HANDOFF.md

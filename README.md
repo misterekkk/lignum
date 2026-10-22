@@ -1,95 +1,80 @@
-# Lignum: Ultra-Fast Decision Tree Inference
+<p align="center"><img src="docs/assets/logo.svg" width="112" alt="lignum logo"></p>
 
-[![R package check](https://github.com/misterekkk/lignum/actions/workflows/r-check.yml/badge.svg)](https://github.com/misterekkk/lignum/actions/workflows/r-check.yml)
-[![Python package test](https://github.com/misterekkk/lignum/actions/workflows/py-check.yml/badge.svg)](https://github.com/misterekkk/lignum/actions/workflows/py-check.yml)
-[![Deploy Documentation](https://github.com/misterekkk/lignum/actions/workflows/docs.yml/badge.svg)](https://github.com/misterekkk/lignum/actions/workflows/docs.yml)
+<h1 align="center">lignum</h1>
 
-`lignum` is a high-performance inference library for decision-tree models (LightGBM, XGBoost) written in native C++. By utilizing a custom binary format loaded via memory mapping (`mmap`) and a highly optimized multi-threaded prediction engine (OpenMP), it completely bypasses the parsing and prediction bottlenecks of standard frameworks.
+<p align="center">
+  Fast inference for LightGBM and XGBoost models, with predictions <b>bit-identical</b> to the library that trained them.
+</p>
 
-## Documentation & Guides
+<p align="center">
+  <a href="https://pypi.org/project/pylignum/"><img src="https://img.shields.io/pypi/v/pylignum" alt="PyPI"></a>
+  <a href="https://github.com/misterekkk/lignum/actions/workflows/tests.yml"><img src="https://github.com/misterekkk/lignum/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
+  <a href="https://misterekkk.github.io/lignum/"><img src="https://github.com/misterekkk/lignum/actions/workflows/docs.yml/badge.svg" alt="Documentation"></a>
+</p>
 
-The unified, comprehensive documentation for both ecosystems is available on GitHub Pages:
-**[Read the Full Documentation](https://misterekkk.github.io/lignum/)**
+```bash
+pip install pylignum
+```
 
----
+```python
+import lignum
+
+model = lignum.load("model.txt")    # LightGBM model.txt / JSON, XGBoost .json / .ubj
+preds = model.predict(X)            # numpy array, or Arrow data (pyarrow, polars, ...)
+```
+
+Installed as `pylignum`, imported as `lignum`. Wheels for Linux (x86_64, aarch64), macOS 15+ and
+Windows; Python 3.10+.
+
+## Why lignum
+
+- **Exact.** Raw scores and probabilities equal `booster.predict(...)` bit for bit: NaN,
+  zero-as-missing, categorical splits and XGBoost's float32 arithmetic included.
+- **Fast.** An interpreter for any batch size, and a compiled mode that turns the trees into native
+  code in a few seconds (`model.compile()`); `model.autotune(X)` picks the faster one per batch size.
+- **Instant start.** `model.save("model.bin")` writes a binary file that loads by memory mapping in
+  under a millisecond.
+- **Arrow and C.** `predict` reads pyarrow, polars and any Arrow PyCapsule object without copies;
+  a C API (`include/lignum/c_api.h`) serves other languages.
 
 ## Benchmarks
 
-The following benchmarks show direct head-to-head comparisons on a synthetic dataset. 
+LightGBM models with 500 trees on public data sets, AMD EPYC-Milan (4 dedicated vCPU). Seconds for
+the whole data set on all threads, and one row on one thread.
 
-### Benchmark Setup
-* **Dataset:** 1,000,000 samples, 20 features (15 informative) with a **5% random missing value (NaN) rate**.
-* **Model:** 1,000 trees with a maximum depth of 6.
-* **Hardware:** Multi-threaded execution scaling across all available CPU cores. Ran on MacBook Pro M4 16GB RAM.
+| | lignum compiled | lleaves | LightGBM |
+|---|---:|---:|---:|
+| California housing (20k rows) | **0.014 s** | 0.021 s | 0.140 s |
+| Covertype (581k rows, 7 classes) | **0.265 s** | 0.269 s | 2.401 s |
+| Diabetes 130-US (102k rows, categorical) | **0.151 s** | 0.803 s | 1.830 s |
+| One row, one thread (Covertype) | **2.9 µs** | 7.8 µs | 32.0 µs |
+| Bit-identical to LightGBM | yes | no | — |
 
-### Head-to-Head Comparisons
+lleaves is the fastest other engine for LightGBM; it differs from LightGBM on 81-100% of the rows.
+More data sets, ARM, Apple M4, Arrow input and the cases where lignum is not the fastest:
+[benchmarks](https://misterekkk.github.io/lignum/benchmarks/).
 
-#### Lignum vs LightGBM
-| Framework | Execution Time (s) | Speedup | Match Accuracy |
-| :--- | :---: | :---: | :---: |
-| LightGBM | 4.5768 s | 1.0x (Baseline) | — |
-| **Lignum** | **0.7082 s** | **6.46x faster** | **100% Perfect Match** |
+## Documentation
 
-#### Lignum vs XGBoost
-| Framework | Execution Time (s) | Speedup | Match Accuracy |
-| :--- | :---: | :---: | :---: |
-| XGBoost | 1.5921 s | 1.0x (Baseline) | — |
-| **Lignum** | **0.8168 s** | **1.95x faster** | **100% Perfect Match** |
+**[misterekkk.github.io/lignum](https://misterekkk.github.io/lignum/)**: getting started, model
+formats, the compiled mode, Arrow input, the C API and the Python reference.
 
-#### Lignum vs Treelite (Compiled)
-| Framework | Execution Time (s) | Speedup | Match Accuracy |
-| :--- | :---: | :---: | :---: |
-| Treelite | 1.4242 s | 1.0x (Baseline) | — |
-| **Lignum** | **0.7426 s** | **1.91x faster** | **100% Perfect Match** |
-
----
-
-## Repository Structure
-
-This repository is managed as a multi-language monorepo:
-
-* **[`R-package/`](./R-package)** – R interface featuring `cpp11` bindings and native `pkgdown` documentation.
-* **[`py-package/`](./py-package)** – Python interface featuring `nanobind` extensions optimized for NumPy arrays.
-* **[`src_core/`](./src_core)** & **[`include/`](./include)** – Core C++ inference engine shared by both packages.
-
----
-
-## Quick Local Setup
-
-To quickly compile and install the packages locally from the root directory:
-
-### For R:
-```bash
-# Install development prerequisites in R, then:
-make r-build
-
-```
-
-*For detailed setup, examples, and production mode deployment, see the [R Package README](./R-package/README.md).*
-
-### For Python:
+## Development
 
 ```bash
-pip install ./py-package
-
+make venv       # .venv with Python 3.12 via uv and the test dependencies
+make py-build   # editable install
+make test       # C++ (GoogleTest) + Python parity tests against LightGBM and XGBoost
 ```
 
-*For NumPy-specific optimization notes and developer guides, see the [Python Package README](./py-package/README.md).*
+macOS needs `brew install libomp`. The engine is C++20 (`src/`, public headers in
+`include/lignum/`) with nanobind bindings in `python/`; [ARCHITECTURE.md](ARCHITECTURE.md) describes
+the design and [CLAUDE.md](CLAUDE.md) the rules for changes.
 
-### Run Tests Locally
-
-You can use the global `Makefile` to trigger tests across both environments simultaneously:
-
-```bash
-make test
-
-```
 ## Acknowledgments
 
-`lignum` achieves extreme parsing speeds by utilizing the [simdjson](https://github.com/simdjson/simdjson) library for parsing JSON model files. We are grateful to the authors and contributors of simdjson for their outstanding work.
-
----
+lignum parses JSON models and numbers with [simdjson](https://github.com/simdjson/simdjson).
 
 ## License
 
-This project is licensed under the **[MIT License](./LICENSE)**. Both the R and Python packages, along with the core C++ engine, are open-source and free to use under the terms of the MIT license. See the global **[LICENSE](./LICENSE)** file for the full legal text.
+[MIT](LICENSE).

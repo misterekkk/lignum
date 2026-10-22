@@ -1,46 +1,42 @@
-.PHONY: r-build py-build r-test py-test py-bench test all clean docs
+.PHONY: venv bench-deps py-build py-test cpp-build cpp-test test bench bench-quick docs clean
 
-r-build:
-	mkdir -p R-package/inst/include R-package/src
-	
-	rm -f R-package/inst/include/*.hpp R-package/inst/include/simdjson.h
-	rm -f R-package/src/builder.cpp R-package/src/io.cpp R-package/src/load.cpp R-package/src/model.cpp R-package/src/parser_lightgbm.cpp R-package/src/parser_xgboost.cpp R-package/src/simdjson.cpp
-	
-	cp include/*.hpp R-package/inst/include/
-	cp extern/simdjson/simdjson.h R-package/inst/include/
-	cp src_core/*.cpp R-package/src/
-	cp extern/simdjson/simdjson.cpp R-package/src/
-	
-	Rscript -e "cpp11::cpp_register('R-package')"
-	Rscript -e "devtools::document('R-package')"
-	R CMD INSTALL R-package
+PYTHON ?= .venv/bin/python
+CPP_BUILD_DIR ?= build/cpp
 
-r-test: r-build
-	Rscript -e "tinytest::test_all('R-package')"
+venv:
+	uv venv --python 3.12 .venv
+	uv pip install --python $(PYTHON) numpy pandas scikit-learn lightgbm xgboost pytest nanobind scikit-build-core pyarrow ninja
+
+# Competitor engines for benchmarks/bench.py (lleaves 1.3 needs llvmlite < 0.45).
+bench-deps:
+	uv pip install --python $(PYTHON) treelite tl2cgen lleaves "llvmlite<0.45" onnxruntime onnxmltools onnxconverter-common
 
 py-build:
-	python -m pip install -e py-package/ --no-cache-dir
+	uv pip install --python $(PYTHON) --no-build-isolation -e .
 
 py-test: py-build
-	python -m pytest py-package/tests/ -v --tb=short
+	$(PYTHON) -m pytest tests/python -v --tb=short
 
-py-bench: py-build
-	python benchmarks/bench_lightgbm.py
-	python benchmarks/bench_xgboost.py
-	python benchmarks/bench_treelite.py
-	rm -f benchmarks/bench_model_*
+cpp-build:
+	cmake -S . -B $(CPP_BUILD_DIR) -DLIGNUM_BUILD_TESTS=ON
+	cmake --build $(CPP_BUILD_DIR) --parallel
+
+cpp-test: cpp-build
+	ctest --test-dir $(CPP_BUILD_DIR) --output-on-failure
+
+test: cpp-test py-test
+
+# Compares lignum with native LightGBM/XGBoost, TL2cgen, GTIL, lleaves and ONNX Runtime (see bench-deps).
+bench:
+	$(PYTHON) benchmarks/bench.py
+
+bench-quick:
+	$(PYTHON) benchmarks/bench.py --quick
 
 docs:
 	rm -rf site/
-	Rscript -e "pkgdown::build_site('R-package', override = list(destination = '../site'))"
-	python -m pip install mkdocs-material "mkdocstrings[python]"
-	python -m mkdocs build --dirty
-
-test: r-test py-test
-all: r-build py-build
+	$(PYTHON) -m pip install mkdocs-material "mkdocstrings[python]"
+	$(PYTHON) -m mkdocs build
 
 clean:
-	rm -f R-package/src/builder.cpp R-package/src/io.cpp R-package/src/load.cpp R-package/src/model.cpp R-package/src/parser_lightgbm.cpp R-package/src/parser_xgboost.cpp R-package/src/simdjson.cpp
-	rm -rf R-package/inst/include/
-	rm -f R-package/src/*.o R-package/src/*.so R-package/src/*.dll
-	rm -rf build/ R-package.Rcheck/ lignum.Rcheck/ py-package/.pytest_cache/ benchmarks/bench_model_* site/
+	rm -rf build/ .pytest_cache/ benchmarks/.cache site/

@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# One-shot benchmark run on a fresh Ubuntu 24.04 cloud server (e.g. Hetzner CCX / CAX):
+# installs the toolchain, builds lignum, runs the comparisons and packs the reports.
+#
+#   curl -LsSf https://raw.githubusercontent.com/misterekkk/lignum/main/benchmarks/cloud.sh | bash
+#   # or, from a clone: bash benchmarks/cloud.sh
+#
+# Result: ~/lignum-bench-<host>-<date>.tar.gz with the Markdown reports, CPU info and the commit.
+# About 30-40 minutes on 4-8 cores (dataset downloads, training, lleaves compiling its models).
+# Delete the server afterwards: a stopped server is still billed.
+# Works on x86-64 (CCX, AMD EPYC) and aarch64 (CAX, Ampere Altra); run it once per server.
+set -euo pipefail
+
+# Everything runs inside main, so a `curl | bash` pipe cut short cannot run half a script.
+main() {
+
+BRANCH="${BRANCH:-main}"
+TREES="${TREES:-500}"
+REAL="lightgbm-real-california,lightgbm-real-covtype,lightgbm-real-adult,lightgbm-real-bank,lightgbm-real-diabetes"
+
+sudo apt-get update -qq
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential cmake git curl linux-tools-common >/dev/null
+command -v uv >/dev/null || { curl -LsSf https://astral.sh/uv/install.sh | sh; }
+export PATH="$HOME/.local/bin:$PATH"
+# uv's own Python 3.12 (with headers for the extension), whatever the image ships or lacks.
+export UV_PYTHON_PREFERENCE=only-managed
+
+if [ ! -d lignum ] && [ ! -f benchmarks/bench.py ]; then
+    git clone -q https://github.com/misterekkk/lignum.git
+    cd lignum
+elif [ -d lignum ]; then
+    cd lignum
+fi
+git fetch -q origin "$BRANCH" && git checkout -q "$BRANCH" && git pull -q --ff-only
+COMMIT=$(git rev-parse --short HEAD)
+
+# Stable clocks where the kernel allows it (often not on cloud VMs; harmless if it fails).
+sudo cpupower frequency-set -g performance >/dev/null 2>&1 || true
+
+make venv >/dev/null
+uv pip install -q --python .venv/bin/python ".[test]" nanobind scikit-build-core
+# Only lleaves of the competitors (make bench-deps also pulls tl2cgen, which has no aarch64 wheel).
+uv pip install -q --python .venv/bin/python lleaves "llvmlite<0.45"
+make py-build >/dev/null
+PY=.venv/bin/python
+
+mkdir -p benchmarks/.cache   # target of the scp below
+# Data sets first, so a blocked download stops the run now and not after half an hour.
+# scikit-learn fetches California and Covertype from figshare, which often refuses cloud servers.
+if ! $PY -c "
+import sys; sys.path.insert(0, 'benchmarks')
+import datasets
+for name, load in datasets.LOADERS.items():
+    load(); print('data set', name, 'ok')
+"; then
+    echo
+    echo "A data set could not be downloaded. Copy them from a machine that has them, then run again:"
+    echo "  scp -r benchmarks/.cache/datasets root@<server-ip>:$PWD/benchmarks/.cache/"
+    exit 1
+fi
+
+OUT="$HOME/lignum-bench-$(hostname)-$(uname -m)-$(date +%Y%m%d-%H%M)"
+mkdir -p "$OUT"
+touch "$OUT/.start"   # reports newer than this are the ones from this run
+{
+    lscpu; echo; nproc; echo; free -h; echo
+    echo "governor: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo 'n/a (VM)')"
+    gcc --version | head -1
+    # The defaults are measured on purpose: OMP_PROC_BIND pins the main thread at libgomp load, so
+    # thread pools started from Python (lleaves) would share one core; OMP_WAIT_POLICY=active
+    # leaves idle OpenMP threads spinning next to the other engines.
+    env | grep -E '^(OMP|GOMP|KMP)_' || echo "no OMP_* / GOMP_* / KMP_* variables"
+    echo "lignum commit $COMMIT"
+} > "$OUT/machine.txt"
+head -20 "$OUT/machine.txt"
+
+start=$(date +%s)
+# 1. Real data sets and the synthetic models: interpreter, compiled, lleaves, native LightGBM.
+$PY benchmarks/bench.py --engines lignum,lignum-compiled,lleaves,native \
+    --only "lightgbm,lightgbm-cat,$REAL" --trees "$TREES" --repeats 5
+# 2. Arrow input end to end (lignum vs lleaves via pandas vs LightGBM).
+$PY benchmarks/bench_arrow.py --trees "$TREES"
+# 3. Host-tuned build, for comparison with lleaves (which always targets the host CPU).
+CMAKE_ARGS="-DLIGNUM_NATIVE=ON" make py-build >/dev/null
+$PY benchmarks/bench.py --engines lignum,lignum-compiled --only "lightgbm,$REAL" --trees "$TREES" --repeats 5
+native_report=$(ls -t benchmarks/results/2*.md | head -1)
+CMAKE_ARGS="" make py-build >/dev/null
+# 4. Which path autotune picks per model on this CPU.
+TREES="$TREES" $PY - <<'EOF' | tee "$OUT/autotune.txt"
+import os, sys
+sys.path.insert(0, "benchmarks")
+import numpy as np, lignum, datasets
+for name in ["california", "covtype", "adult", "diabetes"]:
+    d = datasets.LOADERS[name]()
+    m = lignum.load(f"benchmarks/.cache/real/{name}_t{os.environ['TREES']}.txt")
+    r = m.compile(autotune=d.X[:4096])["autotune"]
+    print(name, "compiled_min_rows", r["compiled_min_rows"], {k: (round(a), round(b)) for k, (a, b) in r["timings"].items()})
+# The synthetic model bench.py trained above (1M rows, 20 features, independent: hard to predict).
+import glob
+cache = sorted(glob.glob("benchmarks/.cache/r1000000_f20_t*_d6"))[-1]
+X = np.load(f"{cache}/data.npz")["X"][:4096]
+m = lignum.load(f"{cache}/lgb.txt")
+r = m.compile(autotune=X)["autotune"]
+print("synthetic", "compiled_min_rows", r["compiled_min_rows"], {k: (round(a), round(b)) for k, (a, b) in r["timings"].items()})
+EOF
+echo "total $(( ($(date +%s) - start) / 60 )) min" >> "$OUT/machine.txt"
+
+find benchmarks/results -maxdepth 1 -type f -newer "$OUT/.start" -exec cp {} "$OUT"/ \;
+mv "$OUT/$(basename "$native_report")" "$OUT/native-$(basename "$native_report")"
+rm "$OUT/.start"
+tar -czf "$OUT.tar.gz" -C "$(dirname "$OUT")" "$(basename "$OUT")"
+echo
+echo "Reports: $OUT.tar.gz"
+echo "Copy them home with:  scp root@<server-ip>:$OUT.tar.gz ."
+}
+
+main "$@"

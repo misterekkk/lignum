@@ -1,0 +1,56 @@
+name: Benchmark
+
+# Manual run on shared GitHub runners. Absolute times are noisy; compare engines within one run
+# (ratios), not across runs. Results are uploaded as an artifact.
+# Full comparison against every engine; start it by hand. Day-to-day kernel work uses
+# bench-lleaves.yml, which runs automatically and only against lleaves.
+on:
+  workflow_dispatch:
+    inputs:
+      args:
+        description: "Arguments for benchmarks/bench.py"
+        required: false
+        default: "--rows 300000 --trees 500 --repeats 5"
+
+jobs:
+  bench:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lignum and engines
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[test]"
+          python -m pip install treelite lleaves "llvmlite<0.45" onnxruntime onnxmltools onnxconverter-common
+          # tl2cgen has no aarch64 Linux wheel and its sdist does not build there; bench.py reports it as unavailable.
+          python -m pip install --only-binary=:all: tl2cgen || echo "tl2cgen not available on this platform"
+
+      - name: CPU info
+        run: lscpu | grep -E "Model name|^CPU\(s\)|Thread|Flags" | cut -c1-200
+
+      - name: Run benchmark
+        run: python benchmarks/bench.py ${{ github.event.inputs.args || '--rows 300000 --trees 500 --repeats 5' }}
+
+      # Same machine, same job: lignum tuned for the host CPU (lleaves compiles for the host too).
+      - name: Rebuild lignum with LIGNUM_NATIVE=ON
+        run: CMAKE_ARGS="-DLIGNUM_NATIVE=ON" python -m pip install --force-reinstall --no-deps .
+
+      - name: Run benchmark (native-tuned lignum)
+        run: python benchmarks/bench.py --engines lignum ${{ github.event.inputs.args || '--rows 300000 --trees 500 --repeats 5' }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.os }}
+          path: |
+            benchmarks/results/2*.md
+            !benchmarks/results/*-m4-*.md

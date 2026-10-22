@@ -1,0 +1,102 @@
+name: Benchmark vs lleaves
+
+# Fast iteration loop for kernel work: lignum vs lleaves (the strongest competitor) on LightGBM
+# models only, on x86-64 and aarch64 Linux, with lignum built both generic and host-tuned
+# (the generic run also measures the experimental compiled mode, lignum-compiled).
+# Shared runners are noisy: compare lignum with lleaves within one job, not across runs.
+on:
+  push:
+    branches: [dev/v0.2]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/bench-lleaves.yml'
+  workflow_dispatch:
+    inputs:
+      args:
+        description: "Arguments for benchmarks/bench.py"
+        required: false
+        default: "--only lightgbm,lightgbm-cat,lightgbm-real-diabetes,lightgbm-real-covtype,lightgbm-real-california,lightgbm-real-adult,lightgbm-real-bank --rows 300000 --trees 500 --repeats 5 --latency-budget 1"
+
+concurrency:
+  group: bench-lleaves-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Compile flags of the experimental kernel variant measured next to the default build
+  # (empty = skip).
+  EXPERIMENT_CXX_FLAGS: ""
+  BENCH_ARGS: ${{ github.event.inputs.args || '--only lightgbm,lightgbm-cat,lightgbm-real-diabetes,lightgbm-real-covtype,lightgbm-real-california,lightgbm-real-adult,lightgbm-real-bank --rows 300000 --trees 500 --repeats 5 --latency-budget 1' }}
+
+jobs:
+  bench:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lignum and lleaves
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[test]" lleaves "llvmlite<0.45"
+
+      - name: Cache datasets
+        uses: actions/cache@v4
+        with:
+          path: benchmarks/.cache/datasets
+          key: datasets-v1
+
+      - name: CPU info
+        run: lscpu | grep -E "Model name|^CPU\(s\)|Flags" | cut -c1-200
+
+      - name: lignum (generic build, interpreter and compiled mode) vs lleaves
+        run: python benchmarks/bench.py --engines lignum,lignum-compiled,lleaves $BENCH_ARGS
+
+      - name: Rebuild lignum with LIGNUM_NATIVE=ON
+        run: CMAKE_ARGS="-DLIGNUM_NATIVE=ON" python -m pip install --force-reinstall --no-deps .
+
+      - name: lignum (host-tuned build)
+        run: python benchmarks/bench.py --engines lignum $BENCH_ARGS
+
+      - name: Rebuild lignum with the experimental variant
+        if: env.EXPERIMENT_CXX_FLAGS != ''
+        run: CMAKE_ARGS="-DCMAKE_CXX_FLAGS='$EXPERIMENT_CXX_FLAGS'" python -m pip install --force-reinstall --no-deps .
+
+      - name: lignum (experimental variant)
+        if: env.EXPERIMENT_CXX_FLAGS != ''
+        run: python benchmarks/bench.py --engines lignum,lignum-compiled $BENCH_ARGS
+
+      - name: Summary
+        run: |
+          python - <<'EOF'
+          import glob, re
+          for f in sorted(glob.glob("benchmarks/results/2*.md")):
+              if "-m4-" in f:
+                  continue
+              runs = [g for g in sorted(glob.glob("benchmarks/results/2*.md")) if "-m4-" not in g]
+              build = ["generic+lleaves", "native", "experiment"][runs.index(f)] if len(runs) <= 3 else f
+              section = None
+              for line in open(f):
+                  if line.startswith("## "):
+                      section = line[3:].strip()
+                  m = re.match(r"\| (lignum-compiled|lignum|lleaves) \| [^|]* \| ([\d.]+) \|[^|]*\| ([\d.]+) \| ([\d.,]+) \| ([\d.,]+) \| ([\d.,]+) \| ([\d.,]+) \|", line)
+                  if m:
+                      print(f"{section:14s} {m.group(1):15s} [{build:15s}] batch {m.group(2)} s | 1 thread {m.group(3)} s | "
+                            f"1 row {m.group(5)} µs (1 thr) | 100 rows {m.group(6)} µs, {m.group(7)} µs (1 thr)")
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-lleaves-${{ matrix.os }}
+          path: |
+            benchmarks/results/2*.md
+            !benchmarks/results/*-m4-*.md

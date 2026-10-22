@@ -1,0 +1,193 @@
+#include "parsers.hpp"
+#include "simdjson.h"
+
+#include <lignum/model.hpp>
+
+#include <cmath>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace lignum {
+
+    namespace parsers {
+
+        namespace {
+
+            // LightGBM drops |x| <= kZeroThreshold from dense input, so such values behave as 0.0.
+            constexpr double kZeroThreshold = static_cast<double>(1e-35f);
+
+            // LightGBM goes right iff z(x) > t, where z zeroes the band [-kZero, kZero].
+            // Returns the smallest double `thr` such that (x >= thr) gives the same answer.
+            double lightgbm_threshold(double t) {
+                if (t >= kZeroThreshold || t < -kZeroThreshold) return std::nextafter(t, INFINITY);
+                if (t >= 0.0) return std::nextafter(kZeroThreshold, INFINITY);  // band -> 0 <= t: left
+                return -kZeroThreshold;                                         // band -> 0 > t: right
+            }
+
+            enum class Missing { None, Zero, NaN };
+
+            // A numeric split in the IR's terms (shared by the JSON and the text format).
+            void numeric_split(TempBinNode& node, double raw_threshold, bool default_left, Missing missing) {
+                const double threshold = lightgbm_threshold(raw_threshold);
+                const int32_t natural_zero_dir = 0.0 >= threshold;
+                const int32_t default_dir = default_left ? 0 : 1;
+                node.threshold_or_value = threshold;
+                if (missing == Missing::None) {
+                    // NaN is replaced by 0.0 and compared normally.
+                    node.default_dir = natural_zero_dir;
+                } else if (missing == Missing::Zero) {
+                    // NaN becomes 0.0, and 0.0 is missing. Only flag nodes where that changes the outcome.
+                    node.default_dir = default_dir;
+                    node.zero_is_missing = (default_dir != natural_zero_dir);
+                } else {
+                    node.default_dir = default_dir;
+                }
+            }
+
+            // Categorical thresholds are strings such as "1||3||5".
+            std::vector<uint32_t> parse_categories(simdjson::dom::element threshold) {
+                std::vector<uint32_t> categories;
+                if (threshold.is_string()) {
+                    std::string_view text = threshold.get_string().value();
+                    size_t start = 0;
+                    while (start <= text.size()) {
+                        size_t end = text.find("||", start);
+                        if (end == std::string_view::npos) end = text.size();
+                        if (end > start) categories.push_back(static_cast<uint32_t>(std::stoul(std::string(text.substr(start, end - start)))));
+                        start = end + 2;
+                    }
+                } else {
+                    categories.push_back(static_cast<uint32_t>(threshold.get_int64().value()));
+                }
+                return categories;
+            }
+
+            std::unique_ptr<TempBinNode> parse_lgbm_node(simdjson::dom::object obj) {
+                auto node = std::make_unique<TempBinNode>();
+
+                if (obj["left_child"].error() != simdjson::SUCCESS) {
+                    // Linear trees (linear_tree=true) add a linear model per leaf: not supported.
+                    if (obj["leaf_const"].error() == simdjson::SUCCESS || obj["leaf_coeff"].error() == simdjson::SUCCESS) {
+                        throw std::runtime_error("Malformed LightGBM model file: linear trees (linear_tree=true) are not supported.");
+                    }
+                    node->is_leaf = true;
+                    node->threshold_or_value = obj["leaf_value"].get_double();
+                    return node;
+                }
+
+                node->feature_id = static_cast<int32_t>(obj["split_feature"].get_int64());
+
+                std::string_view decision_type = "<=";
+                auto dec_type_elem = obj["decision_type"];
+                if (dec_type_elem.error() == simdjson::SUCCESS) {
+                    decision_type = dec_type_elem.get_string().value();
+                }
+                if (decision_type == "==") {
+                    // LightGBM 4: NaN and values <= -1 go right, anything else is truncated to an
+                    // integer category and goes left if it is in the set (verified empirically).
+                    node->categorical = true;
+                    node->default_dir = 1;
+                    node->categories = parse_categories(obj["threshold"]);
+                    node->left = parse_lgbm_node(obj["left_child"].get_object());
+                    node->right = parse_lgbm_node(obj["right_child"].get_object());
+                    return node;
+                }
+
+                std::string_view missing_type = "NaN";
+                auto missing_elem = obj["missing_type"];
+                if (missing_elem.error() == simdjson::SUCCESS) {
+                    missing_type = missing_elem.get_string().value();
+                }
+                const Missing missing = missing_type == "None" ? Missing::None : missing_type == "Zero" ? Missing::Zero : Missing::NaN;
+                numeric_split(*node, obj["threshold"].get_double(), obj["default_left"].get_bool(), missing);
+
+                node->left = parse_lgbm_node(obj["left_child"].get_object());
+                node->right = parse_lgbm_node(obj["right_child"].get_object());
+                return node;
+            }
+
+            double parse_sigmoid(std::string_view objective) {
+                const auto pos = objective.find("sigmoid:");
+                if (pos == std::string_view::npos) return 1.0;
+                return std::stod(std::string(objective.substr(pos + 8)));
+            }
+
+            void parse_objective(std::string_view objective, ModelInfo& info) {
+                const std::string_view name = objective.substr(0, objective.find(' '));
+
+                if (name == "binary" || name == "multiclassova" || name == "ovr" || name == "multiclass_ova" || name == "ova") {
+                    info.transform = transform::Sigmoid;  // per class for one-vs-all
+                    info.sigmoid = parse_sigmoid(objective);
+                } else if (name == "multiclass" || name == "softmax") {
+                    info.transform = transform::Softmax;
+                } else if (name == "cross_entropy" || name == "xentropy") {
+                    info.transform = transform::Sigmoid;
+                } else if (name == "cross_entropy_lambda" || name == "xentlambda") {
+                    info.transform = transform::Log1pExp;
+                } else if (name == "poisson" || name == "gamma" || name == "tweedie") {
+                    info.transform = transform::Exp;
+                } else {
+                    info.transform = transform::Identity;
+                }
+            }
+
+        } // namespace
+
+        void lightgbm_numeric_split(TempBinNode& node, double threshold, bool default_left, int missing_type) {
+            numeric_split(node, threshold, default_left, missing_type == 0 ? Missing::None : missing_type == 1 ? Missing::Zero : Missing::NaN);
+        }
+
+        void lightgbm_objective(std::string_view objective, ModelInfo& info) {
+            parse_objective(objective, info);
+        }
+
+        std::vector<std::unique_ptr<TempBinNode>> load_lightgbm_json(const std::string& filepath, ModelInfo& info) {
+            simdjson::dom::parser parser;
+            std::vector<std::unique_ptr<TempBinNode>> forest;
+            simdjson::dom::element doc = parser.load(filepath);
+
+            info = ModelInfo{};
+            info.precision = Precision::Float64;
+
+            int64_t n_outputs = 1;
+            auto per_iteration = doc["num_tree_per_iteration"];
+            if (per_iteration.error() == simdjson::SUCCESS) {
+                n_outputs = per_iteration.get_int64();
+            } else if (doc["num_class"].error() == simdjson::SUCCESS) {
+                n_outputs = doc["num_class"].get_int64();
+            }
+            if (n_outputs < 1 || n_outputs > 65535) {
+                throw std::runtime_error("Unsupported number of trees per iteration: " + std::to_string(n_outputs) + ".");
+            }
+
+            bool average_output = false;
+            if (doc["average_output"].get_bool().get(average_output) == simdjson::SUCCESS && average_output) {
+                throw std::runtime_error("Malformed LightGBM model file: random forest models (boosting=rf) are not supported yet.");
+            }
+
+            auto obj_elem = doc["objective"];
+            if (obj_elem.error() == simdjson::SUCCESS) {
+                parse_objective(obj_elem.get_string().value(), info);
+            }
+
+            for (simdjson::dom::element tree_obj : doc["tree_info"]) {
+                simdjson::dom::object tree_structure = tree_obj["tree_structure"].get_object();
+                forest.push_back(parse_lgbm_node(tree_structure));
+            }
+
+            // Trees are stored iteration by iteration, one per class: tree t belongs to class t % K.
+            info.base_scores.assign(static_cast<size_t>(n_outputs), 0.0);
+            if (n_outputs > 1) {
+                for (size_t t = 0; t < forest.size(); t++) {
+                    info.tree_outputs.push_back(static_cast<uint16_t>(t % static_cast<size_t>(n_outputs)));
+                }
+            }
+
+            return forest;
+        }
+
+    } // namespace parsers
+
+} // namespace lignum
