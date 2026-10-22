@@ -33,20 +33,16 @@ jobs:
         include:
           - os: ubuntu-latest           # manylinux x86_64
           - os: ubuntu-24.04-arm        # manylinux aarch64
-          # Homebrew's libomp is built for the runner's macOS, so wheels need macOS >= 15.
+          # Homebrew's libomp is built for the runner's macOS, so wheels need macOS >= 15
+          # (MACOSX_DEPLOYMENT_TARGET in pyproject.toml).
           - os: macos-15                # arm64
-            target: "15.0"
           - os: macos-15-intel          # x86_64
-            target: "15.0"
           - os: windows-latest          # x64
     steps:
       - uses: actions/checkout@v4
 
       - name: Build and test wheels
         uses: pypa/cibuildwheel@v4.2.1
-        env:
-          # Homebrew's libomp is built for the runner's macOS: wheels cannot claim an older one.
-          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.target }}
 
       - uses: actions/upload-artifact@v4
         with:

@@ -150,9 +150,13 @@ namespace lignum {
                 std::vector<uint32_t> cat_threshold;
             };
 
-            // Children: >= 0 an internal node, < 0 leaf ~child.
-            std::unique_ptr<TempBinNode> build(const TreeArrays& t, int32_t child, int depth) {
-                if (depth > 10000) fail("tree too deep");
+            // As deep as the JSON format allows (simdjson's default depth limit).
+            constexpr int kMaxDepth = 1024;
+
+            // Children: >= 0 an internal node, < 0 leaf ~child. Every internal node is reached once:
+            // a corrupted file with a cycle would otherwise recurse until the stack overflows.
+            std::unique_ptr<TempBinNode> build(const TreeArrays& t, int32_t child, int depth, std::vector<char>& visited) {
+                if (depth > kMaxDepth) fail("tree deeper than " + std::to_string(kMaxDepth) + " levels");
                 auto node = std::make_unique<TempBinNode>();
                 if (child < 0) {
                     const size_t leaf = static_cast<size_t>(~child);
@@ -163,6 +167,8 @@ namespace lignum {
                 }
                 const size_t i = static_cast<size_t>(child);
                 if (i >= t.split_feature.size()) fail("node index out of range");
+                if (visited[i]) fail("a node is reached twice (cycle)");
+                visited[i] = 1;
                 node->feature_id = t.split_feature[i];
                 if (node->feature_id < 0) fail("negative split_feature");
                 const int dt = t.decision_type[i];
@@ -183,8 +189,8 @@ namespace lignum {
                 } else {
                     lightgbm_numeric_split(*node, t.threshold[i], (dt & kDefaultLeftMask) != 0, (dt >> 2) & 3);
                 }
-                node->left = build(t, t.left_child[i], depth + 1);
-                node->right = build(t, t.right_child[i], depth + 1);
+                node->left = build(t, t.left_child[i], depth + 1, visited);
+                node->right = build(t, t.right_child[i], depth + 1, visited);
                 return node;
             }
 
@@ -196,7 +202,8 @@ namespace lignum {
                 TreeArrays t;
                 t.leaf_value = doubles.parse(field(s, "leaf_value"));
                 if (static_cast<int64_t>(t.leaf_value.size()) != n_leaves) fail("leaf_value does not match num_leaves");
-                if (n_leaves == 1) return build(t, ~0, 0);
+                std::vector<char> visited;
+                if (n_leaves == 1) return build(t, ~0, 0, visited);
 
                 const size_t n_internal = static_cast<size_t>(n_leaves - 1);
                 t.split_feature = parse_list<int32_t>(field(s, "split_feature"), parse_integer<int32_t>);
@@ -212,7 +219,8 @@ namespace lignum {
                     t.cat_boundaries = parse_list<int32_t>(field(s, "cat_boundaries"), parse_integer<int32_t>);
                     t.cat_threshold = parse_list<uint32_t>(field(s, "cat_threshold"), parse_integer<uint32_t>);
                 }
-                return build(t, 0, 0);
+                visited.assign(n_internal, 0);
+                return build(t, 0, 0, visited);
             }
 
         } // namespace

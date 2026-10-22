@@ -183,3 +183,12 @@ TEST(Fuzz, UbjsonFilesAreRejectedOrSafe) {
     EXPECT_EQ(out, (std::vector<double>{static_cast<float>(0.5f + 0.1f), 1.5, 1.5}));
     fuzz_file("model.ubj", ubj, "auto", 2000);
 }
+
+TEST(Fuzz, LightGBMTextCyclesAreRejected) {
+    // Node 1's left child points back to node 0: must fail, not recurse until the stack overflows.
+    const std::string text =
+        "tree\nversion=v4\nnum_class=1\nnum_tree_per_iteration=1\nobjective=regression\n\n"
+        "Tree=0\nnum_leaves=3\nnum_cat=0\nsplit_feature=0 1\nthreshold=0.5 0.5\ndecision_type=2 2\n"
+        "left_child=1 0\nright_child=-1 -2\nleaf_value=1 2 3\nis_linear=0\n\nend of trees\n";
+    EXPECT_THROW(lignum::load(write_temp("cycle_model.txt", text), "lightgbm"), std::runtime_error);
+}
