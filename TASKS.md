@@ -166,6 +166,9 @@ order (gap stays ~4x shuffled), interleaving (sequential walks are slower). A br
 synthetic data.
 - [ ] Decide: optional compiled backend (code generation for maximum batch throughput) vs. interpreter-only positioning (latency, load time, exactness)
 - [x] Compiled mode prototype (`src/compiled.*`, `model.compile()`): bit-exact, 3.5-5 s to compile 500 trees; 1.4-2x over the interpreter on real data, best engine on Diabetes (0.065 vs lleaves 0.273 s) and synthetic categorical, still 2-3x behind lleaves on Covertype/California/Adult/Bank. Next: sum leaves in generated code, compare raw doubles instead of bins, inlining, -O3 (see HANDOFF.md)
+- [x] Compiled mode, round 2 (M4, 1 thread / 10 threads, ms): trees walked in blocks of 16 over ~2 MB row chunks, leaves as constants, generated binning, codes in locals (NaN-left via int16), selects for leaf pairs. California 22.6 / 3.7 (lleaves 35.7 / 6.4), Adult 47.6 / 8.2 (55.9 / 13.0), Bank 51.9 / 8.9 (61.6 / 10.7), Diabetes 296 / 42.8 (1508 / 273); Covertype 493 / 74.9 still behind (388 / 67.2). Compile 6-12 s. Every Python test also runs compiled (`conftest.py`)
+- [ ] Covertype gap (~20% single-thread): lleaves' IR built by the same clang runs 374 ms, so it is our code shape; disabling tail merging (`-mllvm -enable-tail-merge=false`, clang only) gives ~4%. Not helping: raw double compares (64-bit constants cost 5 instructions), -O3/-mcpu=native, block size 8-64
+- [ ] Interpreter vs compiled by batch size: on M4 compiled wins from 1 row (warm caches, e.g. Diabetes 1 row 6 -> 3 us); check p99 single-row latency with cold code on x86 before choosing a threshold
 
 ### Binned kernel results (CI `bench-lleaves.yml`, 300k rows, 500 trees, 4 threads)
 

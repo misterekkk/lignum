@@ -45,35 +45,38 @@ wczytanie modelu (mmap), niskie opóźnienie przy strumieniowaniu wierszy, dobra
 
 ## Tryb kompilowany (`src/compiled.*`, `model.compile()`)
 
-Jak działa: z `BinnedForest` generujemy kod C (każde drzewo = funkcja z zagnieżdżonymi `if` na
-stałych progach; porównania na kodach binów i bitach decyzji), dzielimy na N plików, kompilujemy
-równolegle systemowym `cc -O2 -fPIC`, linkujemy do `.so` (cache po hashu źródła), `dlopen`.
-Binowanie, wątki i sumowanie liści zostają w Lignum, więc wynik jest bit-exact (test w
-`tests/python/test_parity.py::test_compiled_mode_is_bit_identical`). Tylko Linux/macOS.
+Jak działa: z `BinnedForest` generujemy kod C, kompilujemy równolegle systemowym `cc -O2 -fPIC`
+(N plików), linkujemy do `.so` (cache po hashu źródła), `dlopen`. Wygenerowana biblioteka:
+- `lignum_bin`: binowanie cech numerycznych (stałe progi, rozwinięte wyszukiwanie binarne,
+  liniowe zliczanie dla <= 8 progów) — te same kody co `bin_of`;
+- `lignum_block_<b>`: blok 16 drzew (`block_trees`) przechodzi przez całą porcję wierszy
+  (~2 MB buforów na porcję, `LIGNUM_COMPILED_CHUNK_KB`), zanim ruszy następny blok; liście to
+  stałe hex-float dodawane do sum wiersza w kolejności drzew. Kody wiersza wczytywane raz do
+  zmiennych lokalnych (`int16`: NaN = -1, bez zawijania), pusty `asm` nie pozwala kompilatorowi
+  przenieść odczytów z powrotem do gałęzi; para liści = select zamiast skoku.
+Decyzje kategoryczne, wątki i transformacje zostają w Lignum, więc wynik jest bit-exact. Każdy
+test Pythona idzie też w wariancie `compiled` (`tests/python/conftest.py`). Tylko Linux/macOS.
 
-Wyniki na M4 (500 drzew, duży batch; kompilacja ~3.5-5 s vs lleaves 13-134 s):
+Wyniki na M4 (500 drzew, ms, 1 wątek / 10 wątków; kompilacja 6-12 s, lleaves 13-134 s):
 
 | model | interpreter | skompilowany | lleaves |
 |---|---:|---:|---:|
-| Diabetes | 0.138 s | **0.065 s** | 0.273 s |
-| syntetyczny z kategoriami | 0.306 s | **0.191 s** | 0.312 s |
-| Adult | 0.032 s | 0.018 s | **0.010 s** |
-| Bank | 0.033 s | 0.021 s | **0.011 s** |
-| California | 0.012 s | 0.011 s | **0.006 s** |
-| Covertype | 0.258 s | 0.229 s | **0.073 s** |
-| syntetyczny numeryczny | **0.105 s** | 0.212 s | 0.128 s |
+| California | 85.3 / 12.4 | **22.6 / 3.7** | 35.7 / 6.4 |
+| Covertype | 1674 / 253 | 493 / 74.9 | **388 / 67.2** |
+| Adult | 226 / 31.7 | **47.6 / 8.2** | 55.9 / 13.0 |
+| Bank | 226 / 33.3 | **51.9 / 8.9** | 61.6 / 10.7 |
+| Diabetes | 969 / 136 | **296 / 42.8** | 1508 / 273 |
 
-Wniosek: kompilacja daje 1.4-2x na danych rzeczywistych i jest najlepsza przy kategoriach, ale na
-Covertype/California/Adult/Bank nadal 2-3x za lleaves. **Następne kroki do sprawdzenia** (w tej
-kolejności):
-1. Narzut wywołań: dziś każdy wiersz = wywołanie `lignum_eval` -> N funkcji części -> ~500 funkcji
-   drzew (najpewniej nie inline'owane) + zapis 500 indeksów liści do bufora i ich odczyt. Spróbować:
-   sumowanie liści w wygenerowanym kodzie (stałe double w kolejności drzew — nadal bit-exact),
-   `static inline`/jedna funkcja na część, kilka wierszy na wywołanie.
-2. Porównania na surowych `double` zamiast kodów binów dla cech numerycznych (jak lleaves: bez
-   binowania; NaN: `!(x < t)` gdy NaN idzie w prawo, `x >= t` gdy w lewo — dokładne IEEE).
-3. `-O3`, `-march=native`, porównać z tym, co generuje lleaves (`fblocksize`, kolejność row/tree).
-4. Jeśli dogonimy: API (`lignum.compile` / zapis skompilowanej biblioteki obok `.bin`), Windows.
+Co nie pomogło: porównania na surowych `double` (stała 64-bit = 5 instrukcji; California 38 ms
+zamiast 23), `-O3`, `-mcpu=native`, bloki 8-64 (szybkość ta sama, kompilacja rośnie z rozmiarem).
+
+**Następne kroki**:
+1. Wyniki z CI (x86 + ARM, `bench-lleaves.yml` mierzy teraz też `lignum-compiled`) i z Ryzena.
+2. Covertype (~20% za lleaves): IR lleaves skompilowany tym samym clangiem daje 374 ms, więc to
+   kształt naszego kodu. `-mllvm -enable-tail-merge=false` daje ~4% (tylko clang).
+3. Próg interpreter/kompilowany: na M4 kompilowany wygrywa już od 1 wiersza (ciepły cache);
+   sprawdzić p99 dla pojedynczego wiersza z zimnym kodem na x86.
+4. Jeśli się utrzyma: API (zapis skompilowanej biblioteki obok `.bin`), Windows.
 
 ## Co jeszcze otwarte (pełna lista w `TASKS.md`)
 

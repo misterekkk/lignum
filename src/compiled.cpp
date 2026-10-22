@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -29,65 +30,157 @@ namespace lignum {
             return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
         }
 
-        // C expression that is 1 when slot s of b goes right (same rules as the binned kernel).
+        // Exact C literal for a double (hex float).
+        std::string literal(double v) {
+            if (std::isinf(v)) return v > 0 ? "INFINITY" : "-INFINITY";
+            char text[64];
+            std::snprintf(text, sizeof(text), "%a", v);
+            return text;
+        }
+
+        uint32_t n_cuts(const BinnedForest& f, unsigned feature) {
+            return f.cut_offsets[feature + 1] - f.cut_offsets[feature];
+        }
+
+        // Numeric features whose codes all fit in int16 (bins below 0x7FFF) are read once per row
+        // into a local v<feature> = (int32)(int16)code: NaN (0xFFFF) becomes -1, so
+        //   code >= T             is  (uint32)v >= T      (NaN above every bin: right)
+        //   uint16(code + 1) >= T  is  v >= T - 1          (NaN below every bin: left)
+        // without the wrap. Rare wider features read c[feature] with the binned kernel's rule.
+        bool local_feature(const BinnedForest& f, const BNode& b, int s) {
+            return !((b.cat_slots >> s) & 1) && n_cuts(f, b.features[s]) < 0x7FFF;
+        }
+
+        // C expression that is 1 when slot s of b goes right: the binned kernel's decision.
         std::string condition(const BinnedForest& f, const BNode& b, int s) {
             const unsigned feature = b.features[s];
             const unsigned threshold = b.thresholds[s];
             const unsigned shift = (b.nan_left >> s) & 1;
-            std::ostringstream e;
+            const std::string code = "c[" + std::to_string(feature) + "]";
             if ((b.cat_slots >> s) & 1) {
-                const unsigned word = threshold >> 6, bit = threshold & 63;
-                if ((b.xgb_slots >> s) & 1) {
-                    e << "(((d[" << word << "] >> " << bit << ") & 1) | ((c[" << feature << "] == 0xFFFF) & " << shift << "))";
-                } else {
-                    e << "!((d[" << word << "] >> " << bit << ") & 1)";
-                }
-                return e.str();
+                const std::string bit = "((d[" + std::to_string(threshold >> 6) + "] >> " + std::to_string(threshold & 63) + ") & 1)";
+                if ((b.xgb_slots >> s) & 1) return "(" + bit + " | ((" + code + " == 0xFFFF) & " + std::to_string(shift) + "))";
+                return "!" + bit;
             }
-            const std::string compare = shift ? "(uint16_t)(c[" + std::to_string(feature) + "] + 1) >= " + std::to_string(threshold)
-                                              : "c[" + std::to_string(feature) + "] >= " + std::to_string(threshold);
-            if ((b.zero_slots >> s) & 1) {
-                e << "(c[" << feature << "] == " << f.zero_bin[feature] << " ? " << (shift ^ 1) << " : (" << compare << "))";
-            } else {
-                e << compare;
+            std::string compare;
+            if (local_feature(f, b, s)) {
+                const std::string v = "v" + std::to_string(feature);
+                compare = shift ? v + " >= " + std::to_string(int(threshold) - 1) : "(uint32_t)" + v + " >= " + std::to_string(threshold);
+                if ((b.zero_slots >> s) & 1) return "(" + v + " == " + std::to_string(f.zero_bin[feature]) + " ? " + std::to_string(shift ^ 1) + " : " + compare + ")";
+                return compare;
             }
-            return e.str();
+            compare = shift ? "(uint16_t)(" + code + " + 1) >= " + std::to_string(threshold) : code + " >= " + std::to_string(threshold);
+            if ((b.zero_slots >> s) & 1) return "(" + code + " == " + std::to_string(f.zero_bin[feature]) + " ? " + std::to_string(shift ^ 1) + " : " + compare + ")";
+            return compare;
         }
 
+        // Binning of the numeric features, specialised per feature: cuts in constant tables, the
+        // binary search unrolled to its known length (a branch-free count for short features).
+        // Gives exactly the kernel's codes: #{cuts <= x}, kNanBin for NaN.
+        void binning(std::ostream& out, const BinnedForest& f) {
+            constexpr uint32_t kLinear = 8;
+            for (size_t j = 0; j < f.n_features; j++) {
+                const uint32_t len = n_cuts(f, j);
+                if (f.feature_kind[j] != feature_kind::Numeric || len <= kLinear) continue;
+                out << "static const double cuts_" << j << "[" << len << "] = {";
+                for (uint32_t k = 0; k < len; k++) out << (k ? ", " : "") << literal(f.cuts[f.cut_offsets[j] + k]);
+                out << "};\n";
+            }
+            out << "void lignum_bin(const double* restrict X, size_t stride, size_t n, uint16_t* restrict codes) {\n"
+                << "  for (size_t i = 0; i < n; i++) {\n"
+                << "    const double* restrict x = X + i * stride;\n"
+                << "    uint16_t* restrict c = codes + i * " << f.n_features << ";\n";
+            for (size_t j = 0; j < f.n_features; j++) {
+                if (f.feature_kind[j] != feature_kind::Numeric) continue;
+                const uint32_t len = n_cuts(f, j);
+                const double* cuts = &f.cuts[f.cut_offsets[j]];
+                out << "    { const double v = x[" << f.feature_of[j] << "]; unsigned b = 0";
+                if (len <= kLinear) {
+                    for (uint32_t k = 0; k < len; k++) out << " + (" << literal(cuts[k]) << " <= v)";
+                    out << "; ";
+                } else {
+                    out << "; ";
+                    for (uint32_t m = len; m > 1; m -= m / 2) out << "b = (cuts_" << j << "[b + " << m / 2 << "] <= v) ? b + " << m / 2 << " : b; ";
+                    out << "b += (cuts_" << j << "[b] <= v); ";
+                }
+                out << "c[" << j << "] = (v != v) ? 0xFFFF : (uint16_t)b; }\n";
+            }
+            out << "  }\n}\n";
+        }
+
+        // Emits trees inline in a block's row loop: nested ifs on constant thresholds, leaves as
+        // exact constants added to the running sum of the tree's output.
         class Generator {
             public:
-                explicit Generator(const BinnedForest& f) : f_(f) {}
+                Generator(const BinnedForest& f, const double* leaf_values, bool float32)
+                    : f_(f), leaf_values_(leaf_values), float32_(float32) {}
 
-                void tree(std::ostream& out, size_t t) {
-                    out << "static int32_t tree_" << t << "(const uint16_t* restrict c, const uint64_t* restrict d) {\n";
-                    ref(out, f_.roots[t], 1);
-                    out << "}\n";
+                const char* acc() const { return float32_ ? "float" : "double"; }
+
+                void tree(std::ostream& out, size_t t, const std::string& sum) {
+                    leaf_ = sum + " += ";
+                    leaf_end_ = "; goto end_" + std::to_string(t) + ";";
+                    ref(out, f_.roots[t], 2);
+                    out << "    end_" << t << ":;\n";
                 }
+
+                // Marks the features tree t reads through locals.
+                void locals(size_t t, std::vector<bool>& used) const { locals_of(f_.roots[t], used); }
 
             private:
                 const BinnedForest& f_;
+                const double* leaf_values_;
+                bool float32_;
+                std::string leaf_, leaf_end_;
+
+                void locals_of(int32_t r, std::vector<bool>& used) const {
+                    if (r < 0) return;
+                    const BNode& b = f_.nodes[r];
+                    for (int s = 0; s < 7; s++) {
+                        if (local_feature(f_, b, s)) used[b.features[s]] = true;
+                    }
+                    for (int c = 0; c < 8; c++) locals_of(b.children[c], used);
+                }
 
                 static void indent(std::ostream& out, int depth) {
                     for (int i = 0; i < depth; i++) out << "  ";
                 }
 
+                // XGBoost rounds the exact double to float, like the kernel does.
+                std::string value(int32_t r) const {
+                    return (float32_ ? "(float)" : "") + literal(leaf_values_[(-r) - 1]);
+                }
+
                 void ref(std::ostream& out, int32_t r, int depth) {
                     if (r < 0) {
                         indent(out, depth);
-                        out << "return " << r << ";\n";
+                        out << leaf_ << value(r) << leaf_end_ << "\n";
                         return;
                     }
                     const BNode& b = f_.nodes[r];
+                    const int32_t* c = b.children;
+                    if (c[0] == c[1] && c[0] == c[2] && c[0] == c[3] && c[4] == c[5] && c[4] == c[6] && c[4] == c[7] &&
+                        select(out, b, 0, c[4], c[0], depth)) return;
                     branch(out, b, 0, depth, [&](int d) { side(out, b, 2, 4, d); }, [&](int d) { side(out, b, 1, 0, d); });
+                }
+
+                // A split whose children are both leaves becomes a select, so a hard to predict last
+                // level costs no misprediction.
+                bool select(std::ostream& out, const BNode& b, int s, int32_t right, int32_t left, int depth) {
+                    if (right >= 0 || left >= 0) return false;
+                    indent(out, depth);
+                    out << leaf_ << "((" << condition(f_, b, s) << ") ? " << value(right) << " : " << value(left) << ")" << leaf_end_ << "\n";
+                    return true;
                 }
 
                 // Slot s (1 or 2) with subtrees children[first .. first + 3].
                 void side(std::ostream& out, const BNode& b, int s, int first, int depth) {
-                    if (b.children[first] == b.children[first + 1] && b.children[first] == b.children[first + 2] &&
-                        b.children[first] == b.children[first + 3]) {
-                        ref(out, b.children[first], depth);  // the child is a leaf
+                    const int32_t* c = &b.children[first];
+                    if (c[0] == c[1] && c[0] == c[2] && c[0] == c[3]) {
+                        ref(out, c[0], depth);  // the child is a leaf
                         return;
                     }
+                    if (c[0] == c[1] && c[2] == c[3] && select(out, b, s, c[2], c[0], depth)) return;
                     branch(out, b, s, depth, [&](int d) { grandchild(out, b, 2 * s + 2, first + 2, d); },
                                              [&](int d) { grandchild(out, b, 2 * s + 1, first, d); });
                 }
@@ -97,6 +190,7 @@ namespace lignum {
                         ref(out, b.children[first], depth);
                         return;
                     }
+                    if (select(out, b, s, b.children[first + 1], b.children[first], depth)) return;
                     branch(out, b, s, depth, [&](int d) { ref(out, b.children[first + 1], d); },
                                              [&](int d) { ref(out, b.children[first], d); });
                 }
@@ -114,7 +208,13 @@ namespace lignum {
                 }
         };
 
-        const char* kPrelude = "#include <stdint.h>\n#if defined(__GNUC__) || defined(__clang__)\n#define restrict __restrict__\n#endif\n\n";
+        // LIGNUM_KEEP(v): an empty asm that makes v live in a register at this point, so the
+        // compiler cannot sink the per-row loads back into the branches.
+        const char* kPrelude =
+            "#include <math.h>\n#include <stddef.h>\n#include <stdint.h>\n"
+            "#if defined(__GNUC__) || defined(__clang__)\n"
+            "#define restrict __restrict__\n#define LIGNUM_KEEP(v) __asm__(\"\" : \"+r\"(v))\n"
+            "#else\n#define LIGNUM_KEEP(v)\n#endif\n\n";
 
         int run(const std::string& command) {
             return std::system(command.c_str());
@@ -138,31 +238,49 @@ namespace lignum {
         CompileStats local;
         CompileStats& st = stats ? *stats : local;
 
-        // 1. Generate C: tree functions split into translation units for a parallel build.
+        // 1. Generate C. Trees are grouped into blocks; a block function walks its trees for every
+        // row of a chunk, so the code of one block stays hot in the instruction cache and branch
+        // predictor (one pass over all trees per row thrashes both). Each row's sum is carried
+        // across blocks in `out`, in model order, so results stay bit-identical.
         auto t0 = Clock::now();
+        const size_t block_trees = std::max<size_t>(1, options.block_trees);
+        const size_t n_blocks = std::max<size_t>(1, (f.n_trees + block_trees - 1) / block_trees);
         const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-        const size_t parts = std::clamp<size_t>(options.jobs > 0 ? options.jobs : hw, 1, std::max<size_t>(1, f.n_trees));
-        std::vector<std::string> sources(parts + 1);
-        Generator gen(f);
+        const size_t parts = std::clamp<size_t>(options.jobs > 0 ? options.jobs : hw, 1, n_blocks);
+        const size_t K = model.n_outputs;
+        std::vector<std::string> sources(parts);
+        Generator gen(f, model.leaf_values, model.float32);
+        const char* acc = gen.acc();
         for (size_t p = 0; p < parts; p++) {
-            const size_t begin = f.n_trees * p / parts, end = f.n_trees * (p + 1) / parts;
             std::ostringstream src;
             src << kPrelude;
-            for (size_t t = begin; t < end; t++) gen.tree(src, t);
-            src << "void lignum_eval_" << p << "(const uint16_t* restrict c, const uint64_t* restrict d, int32_t* restrict leaves) {\n";
-            for (size_t t = begin; t < end; t++) src << "  leaves[" << t << "] = tree_" << t << "(c, d);\n";
-            src << "}\n";
+            if (p == 0) binning(src, f);
+            for (size_t b = n_blocks * p / parts; b < n_blocks * (p + 1) / parts; b++) {
+                const size_t begin = b * block_trees, end = std::min(begin + block_trees, f.n_trees);
+                std::vector<bool> outputs(K, false), locals(f.n_features, false);
+                for (size_t t = begin; t < end; t++) {
+                    gen.locals(t, locals);
+                    outputs[K > 1 ? model.tree_outputs[t] : 0] = true;
+                }
+                src << "void lignum_block_" << b << "(const uint16_t* restrict codes, const uint64_t* restrict decisions, size_t n, double* restrict out) {\n"
+                    << "  for (size_t i = 0; i < n; i++) {\n"
+                    << "    const uint16_t* restrict c = codes + i * " << f.n_features << ";\n"
+                    << "    const uint64_t* restrict d = decisions" << (f.decision_words ? " + i * " + std::to_string(f.decision_words) : std::string()) << ";\n"
+                    << "    (void)c; (void)d;\n";
+                for (size_t k = 0; k < K; k++) {
+                    if (outputs[k]) src << "    " << acc << " s" << k << " = (" << acc << ")out[i * " << K << " + " << k << "];\n";
+                }
+                for (size_t j = 0; j < locals.size(); j++) {
+                    if (locals[j]) src << "    int32_t v" << j << " = (int16_t)c[" << j << "]; LIGNUM_KEEP(v" << j << ");\n";
+                }
+                for (size_t t = begin; t < end; t++) gen.tree(src, t, "s" + std::to_string(K > 1 ? model.tree_outputs[t] : 0));
+                for (size_t k = 0; k < K; k++) {
+                    if (outputs[k]) src << "    out[i * " << K << " + " << k << "] = (double)s" << k << ";\n";
+                }
+                src << "  }\n}\n";
+            }
             sources[p] = src.str();
         }
-        std::ostringstream main_src;
-        main_src << kPrelude;
-        for (size_t p = 0; p < parts; p++) {
-            main_src << "void lignum_eval_" << p << "(const uint16_t* restrict c, const uint64_t* restrict d, int32_t* restrict leaves);\n";
-        }
-        main_src << "void lignum_eval(const uint16_t* restrict c, const uint64_t* restrict d, int32_t* restrict leaves) {\n";
-        for (size_t p = 0; p < parts; p++) main_src << "  lignum_eval_" << p << "(c, d, leaves);\n";
-        main_src << "}\n";
-        sources[parts] = main_src.str();
         st.codegen_ms = ms_since(t0);
 
         size_t hash = std::hash<std::string>{}(options.compiler + " " + options.flags);
@@ -211,8 +329,14 @@ namespace lignum {
         compiled->library = library.string();
         compiled->handle = dlopen(library.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (!compiled->handle) throw std::runtime_error(std::string("dlopen failed: ") + dlerror());
-        compiled->eval = reinterpret_cast<CompiledForest::EvalFn>(dlsym(compiled->handle, "lignum_eval"));
-        if (!compiled->eval) throw std::runtime_error("lignum_eval not found in the compiled library.");
+        for (size_t b = 0; b < n_blocks; b++) {
+            const std::string name = "lignum_block_" + std::to_string(b);
+            auto fn = reinterpret_cast<CompiledForest::BlockFn>(dlsym(compiled->handle, name.c_str()));
+            if (!fn) throw std::runtime_error(name + " not found in the compiled library.");
+            compiled->blocks.push_back(fn);
+        }
+        compiled->bin = reinterpret_cast<CompiledForest::BinFn>(dlsym(compiled->handle, "lignum_bin"));
+        if (!compiled->bin) throw std::runtime_error("lignum_bin not found in the compiled library.");
         st.load_ms = ms_since(t0);
         return compiled;
     #endif

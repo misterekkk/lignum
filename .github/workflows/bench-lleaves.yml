@@ -1,7 +1,8 @@
 name: Benchmark vs lleaves
 
 # Fast iteration loop for kernel work: lignum vs lleaves (the strongest competitor) on LightGBM
-# models only, on x86-64 and aarch64 Linux, with lignum built both generic and host-tuned.
+# models only, on x86-64 and aarch64 Linux, with lignum built both generic and host-tuned
+# (the generic run also measures the experimental compiled mode, lignum-compiled).
 # Shared runners are noisy: compare lignum with lleaves within one job, not across runs.
 on:
   push:
@@ -16,7 +17,7 @@ on:
       args:
         description: "Arguments for benchmarks/bench.py"
         required: false
-        default: "--only lightgbm,lightgbm-cat,lightgbm-real-diabetes,lightgbm-real-covtype --rows 300000 --trees 500 --repeats 5 --latency-budget 1"
+        default: "--only lightgbm,lightgbm-cat,lightgbm-real-diabetes,lightgbm-real-covtype,lightgbm-real-california,lightgbm-real-adult,lightgbm-real-bank --rows 300000 --trees 500 --repeats 5 --latency-budget 1"
 
 concurrency:
   group: bench-lleaves-${{ github.ref }}
@@ -26,7 +27,7 @@ env:
   # Compile flags of the experimental kernel variant measured next to the default build
   # (empty = skip).
   EXPERIMENT_CXX_FLAGS: ""
-  BENCH_ARGS: ${{ github.event.inputs.args || '--only lightgbm,lightgbm-cat,lightgbm-real-diabetes,lightgbm-real-covtype --rows 300000 --trees 500 --repeats 5 --latency-budget 1' }}
+  BENCH_ARGS: ${{ github.event.inputs.args || '--only lightgbm,lightgbm-cat,lightgbm-real-diabetes,lightgbm-real-covtype,lightgbm-real-california,lightgbm-real-adult,lightgbm-real-bank --rows 300000 --trees 500 --repeats 5 --latency-budget 1' }}
 
 jobs:
   bench:
@@ -57,8 +58,8 @@ jobs:
       - name: CPU info
         run: lscpu | grep -E "Model name|^CPU\(s\)|Flags" | cut -c1-200
 
-      - name: lignum (generic build) vs lleaves
-        run: python benchmarks/bench.py --engines lignum,lleaves $BENCH_ARGS
+      - name: lignum (generic build, interpreter and compiled mode) vs lleaves
+        run: python benchmarks/bench.py --engines lignum,lignum-compiled,lleaves $BENCH_ARGS
 
       - name: Rebuild lignum with LIGNUM_NATIVE=ON
         run: CMAKE_ARGS="-DLIGNUM_NATIVE=ON" python -m pip install --force-reinstall --no-deps .
@@ -87,9 +88,9 @@ jobs:
               for line in open(f):
                   if line.startswith("## "):
                       section = line[3:].strip()
-                  m = re.match(r"\| (lignum|lleaves) \| [^|]* \| ([\d.]+) \|[^|]*\| ([\d.]+) \| ([\d.,]+) \| ([\d.,]+) \| ([\d.,]+) \| ([\d.,]+) \|", line)
+                  m = re.match(r"\| (lignum-compiled|lignum|lleaves) \| [^|]* \| ([\d.]+) \|[^|]*\| ([\d.]+) \| ([\d.,]+) \| ([\d.,]+) \| ([\d.,]+) \| ([\d.,]+) \|", line)
                   if m:
-                      print(f"{section:14s} {m.group(1):8s} [{build:15s}] batch {m.group(2)} s | 1 thread {m.group(3)} s | "
+                      print(f"{section:14s} {m.group(1):15s} [{build:15s}] batch {m.group(2)} s | 1 thread {m.group(3)} s | "
                             f"1 row {m.group(5)} µs (1 thr) | 100 rows {m.group(6)} µs, {m.group(7)} µs (1 thr)")
           EOF
 

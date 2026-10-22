@@ -454,11 +454,11 @@ namespace lignum {
         }
 
         template <typename K>
-        void run_rows(const K& kernel, size_t n_samples, double* out, int n_threads) {
+        void run_rows(const K& kernel, size_t n_samples, double* out, int n_threads, size_t max_block = N_BLOCK) {
             // Enough blocks for every thread (two each, for balance across P/E cores), but never
-            // larger than N_BLOCK, which keeps a tile of trees hot in cache for the whole block.
+            // larger than max_block, which keeps a tile of trees hot in cache for the whole block.
             const size_t per_thread = (n_samples + 2 * n_threads - 1) / (2 * n_threads);
-            const size_t block = std::clamp<size_t>(round_up(per_thread, 4), 4, N_BLOCK);
+            const size_t block = std::clamp<size_t>(round_up(per_thread, 4), 4, max_block);
 
             #pragma omp parallel for schedule(dynamic) num_threads(n_threads)
             for (omp_iterator_t i_start = 0; i_start < static_cast<omp_iterator_t>(n_samples); i_start += block) {
@@ -476,6 +476,13 @@ namespace lignum {
             #define LIGNUM_BINNED_MIN_ROWS 1
         #endif
         constexpr size_t kMinRowsForBinned = LIGNUM_BINNED_MIN_ROWS;
+
+        // Row chunk of the compiled mode, in bytes of per-row buffers (M4, single thread:
+        // Covertype 545 ms with 256 rows -> 517 ms with 2 MB; 8 MB gains only 1% more).
+        #ifndef LIGNUM_COMPILED_CHUNK_KB
+            #define LIGNUM_COMPILED_CHUNK_KB 2048
+        #endif
+        constexpr size_t kCompiledChunkBytes = size_t{LIGNUM_COMPILED_CHUNK_KB} * 1024;
 
         Strategy choose_strategy(size_t n_samples, int n_threads) {
             if (n_threads <= 1 || n_samples < kMinRowsForThreads) return Strategy::Serial;
@@ -639,6 +646,9 @@ namespace lignum {
                     decision_buffer.resize((i_end - i_begin) * nw);
                     uint16_t* codes = buffer.data();
                     uint64_t* decisions = decision_buffer.data();
+                    // Compiled trees come with their own binning of the numeric features.
+                    if (m_.compiled) m_.compiled->bin(&X_[i_begin * n_features_], n_features_, i_end - i_begin, codes);
+                    const bool numeric = !m_.compiled;
                     for (size_t i = i_begin; i < i_end; i++) {
                         const double* row = &X_[i * n_features_];
                         uint16_t* rc = &codes[(i - i_begin) * nd];
@@ -646,6 +656,7 @@ namespace lignum {
                             const double x = row[f_.feature_of[j]];
                             const uint8_t kind = f_.feature_kind[j];
                             if (kind == feature_kind::Numeric) {
+                                if (!numeric) continue;
                                 const uint32_t lo = f_.cut_offsets[j];
                                 rc[j] = bin_of(&f_.cuts[lo], f_.cut_offsets[j + 1] - lo, x);
                             } else {
@@ -671,14 +682,8 @@ namespace lignum {
                         for (size_t c = 0; c < K; c++) out[i * K + c] = static_cast<double>(static_cast<Acc>(m_.base_scores[c]));
                     }
                     if (m_.compiled) {
-                        // Compiled trees: the generated code returns every tree's leaf for a row; the
-                        // sum stays here, in model order, so results are unchanged.
-                        thread_local std::vector<int32_t> leaves;
-                        leaves.resize(f_.n_trees);
-                        for (size_t i = i_begin; i < i_end; i++) {
-                            m_.compiled->eval(&codes[(i - i_begin) * nd], &decisions[(i - i_begin) * nw], leaves.data());
-                            for (size_t t = 0; t < f_.n_trees; t++) add(out, i, t, leaves[t]);
-                        }
+                        // Compiled trees: blocks in model order, each adding its trees to every row.
+                        for (const auto block : m_.compiled->blocks) block(codes, decisions, i_end - i_begin, &out[i_begin * K]);
                         finish_rows<Acc, Multi>(m_, raw_score_, i_begin, i_end, out);
                         return;
                     }
@@ -773,6 +778,20 @@ namespace lignum {
             const BinnedKernel<Acc, Multi> kernel(model, *model.binned, X, n_features, raw_score);
             const int n_threads = resolve_threads(n_jobs);
             if (strategy == Strategy::Auto) strategy = choose_strategy(n_samples, n_threads);
+            if (model.compiled) {
+                // Compiled blocks walk a whole chunk of rows per block: larger chunks keep a
+                // block's branch history useful for longer, bounded so the chunk's codes,
+                // decision bits and sums stay in L2.
+                const BinnedForest& f = *model.binned;
+                const size_t per_row = f.n_features * sizeof(uint16_t) + f.decision_words * sizeof(uint64_t) + model.n_outputs * sizeof(double);
+                const size_t rows = std::clamp<size_t>(kCompiledChunkBytes / per_row / 4 * 4, N_BLOCK, 1 << 16);
+                if (strategy != Strategy::Serial) {
+                    run_rows(kernel, n_samples, out, n_threads, rows);
+                    return;
+                }
+                for (size_t i = 0; i < n_samples; i += rows) kernel.predict_rows(i, std::min(i + rows, n_samples), out);
+                return;
+            }
             if (strategy == Strategy::Serial) run_serial(kernel, n_samples, out);
             else                              run_rows(kernel, n_samples, out, n_threads);
         }

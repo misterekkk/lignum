@@ -75,18 +75,21 @@ class Model:
         """Number of model outputs: the number of classes for multiclass models, otherwise 1."""
         return self._c_model.n_outputs
 
-    def compile(self, compiler: str = "cc", flags: str = "-O2", work_dir: str = "", jobs: int = 0) -> dict:
+    def compile(self, compiler: str = "cc", flags: str = "-O2", work_dir: str = "", jobs: int = 0,
+                block_trees: int = 16) -> dict:
         """
         Experimental: compile the trees to native code with the system C compiler.
 
-        Each tree becomes C code with constant thresholds; binning, threads and the summation of
-        leaves stay in lignum, so predictions are unchanged (bit-identical). Libraries are cached
+        Each tree becomes C code with constant thresholds and leaf values. Trees are grouped in
+        blocks of `block_trees`, and a block is walked for a whole chunk of rows before the next
+        one; binning and threads stay in lignum and every row sums its trees in model order, so
+        predictions are unchanged (bit-identical). Libraries are cached
         by content in `work_dir` (default: a `lignum_compiled` folder in the temp directory).
         Linux and macOS only.
 
         Returns timings: codegen_ms, compile_ms, load_ms, source_bytes, cached, library.
         """
-        return dict(self._c_model.compile(compiler, flags, str(work_dir), jobs))
+        return dict(self._c_model.compile(compiler, flags, str(work_dir), jobs, block_trees))
 
     def decompile(self) -> None:
         """Go back to the interpreter."""
