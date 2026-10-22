@@ -19,9 +19,10 @@ on:
         required: false
         default: "none"
 
+# A push cancels the previous push build of its branch, never a manual (publishing) run.
 concurrency:
-  group: wheels-${{ github.ref }}
-  cancel-in-progress: true
+  group: wheels-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   wheels:
