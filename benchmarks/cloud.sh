@@ -45,7 +45,16 @@ PY=.venv/bin/python
 OUT="$HOME/lignum-bench-$(hostname)-$(uname -m)-$(date +%Y%m%d-%H%M)"
 mkdir -p "$OUT"
 touch "$OUT/.start"   # reports newer than this are the ones from this run
-{ lscpu; echo; nproc; echo; free -h; echo; echo "lignum commit $COMMIT"; } > "$OUT/machine.txt"
+{
+    lscpu; echo; nproc; echo; free -h; echo
+    echo "governor: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo 'n/a (VM)')"
+    gcc --version | head -1
+    # The defaults are measured on purpose: OMP_PROC_BIND pins the main thread at libgomp load, so
+    # thread pools started from Python (lleaves) would share one core; OMP_WAIT_POLICY=active
+    # leaves idle OpenMP threads spinning next to the other engines.
+    env | grep -E '^(OMP|GOMP|KMP)_' || echo "no OMP_* / GOMP_* / KMP_* variables"
+    echo "lignum commit $COMMIT"
+} > "$OUT/machine.txt"
 head -20 "$OUT/machine.txt"
 
 start=$(date +%s)
