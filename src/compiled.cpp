@@ -415,7 +415,10 @@ namespace lignum {
 
         void* open_handle(const std::string& library) {
         #if defined(_WIN32)
-            void* handle = static_cast<void*>(LoadLibraryW(std::filesystem::path(library).wstring().c_str()));
+            // LoadLibrary appends ".dll" to a name without an extension; a trailing dot prevents it.
+            std::wstring name = std::filesystem::path(library).wstring();
+            if (!std::filesystem::path(library).has_extension()) name += L".";
+            void* handle = static_cast<void*>(LoadLibraryW(name.c_str()));
             if (!handle) throw std::runtime_error("LoadLibrary failed for " + library + " (error " + std::to_string(GetLastError()) + ")");
         #else
             void* handle = dlopen(library.c_str(), RTLD_NOW | RTLD_LOCAL);
