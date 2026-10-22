@@ -57,7 +57,7 @@ The following benchmarks show direct head-to-head comparisons on a synthetic dat
 * **[`tests/`](./tests)** – GoogleTest suite (`tests/cpp`) and parity tests against LightGBM/XGBoost (`tests/python`).
 * **[`benchmarks/`](./benchmarks)** – benchmark scripts.
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for the design and [TASKS.md](./TASKS.md) for the roadmap.
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for the design.
 
 ---
 

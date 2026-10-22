@@ -129,7 +129,7 @@ namespace lignum {
             return cmp_dir<(Kind & tree_kind::ZeroMissing) != 0>(x, kn.thresholds[k], kn.dirs[k]);
         }
 
-        // Where the branchy traversal is used (measured, see TASKS.md "Branchy traversal"):
+        // Where the branchy traversal is used (measured with bench-lleaves.yml, 300k rows, 500 trees):
         //   LIGNUM_BRANCHY_TAIL (default 1): leftover rows (fewer than four, e.g. a single row);
         //     faster everywhere (one row: -16..-18% on x86-64/aarch64 Linux, -16% on M4).
         //   LIGNUM_BRANCHY_CAT (default 1, 0 on Apple): 4-row walks in trees with categorical

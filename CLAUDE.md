@@ -1,8 +1,9 @@
 # Lignum — rules for working in this repo
 
 Lignum is a production inference engine for LightGBM/XGBoost models (C++20 core, Python bindings).
-Read [ARCHITECTURE.md](ARCHITECTURE.md) before touching the kernel or parsers; the roadmap lives in [TASKS.md](TASKS.md);
-the current state and next steps are in [HANDOFF.md](HANDOFF.md). Published on PyPI as `pylignum`, imported as `lignum`.
+Read [ARCHITECTURE.md](ARCHITECTURE.md) before touching the kernel or parsers. The roadmap with past measurements
+(`TASKS.md`) and the session handoff (`HANDOFF.md`) are local, untracked notes: read them when present.
+Published on PyPI as `pylignum`, imported as `lignum`.
 
 ## Non-negotiable rules
 

@@ -1,7 +1,8 @@
 name: Wheels
 
 # Builds the wheels and the sdist on every change to the build, and publishes them on request:
-# run the workflow by hand with target=testpypi or pypi (trusted publishing, see HANDOFF.md).
+# run the workflow by hand with target=testpypi or pypi (trusted publishing; the pypi environment
+# needs the owner's approval).
 on:
   push:
     branches: [dev/v0.2, main]

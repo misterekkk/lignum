@@ -166,5 +166,5 @@ their indices.
 
 ## Known limitations
 
-See [TASKS.md](TASKS.md): no multi-target / vector-leaf models, no LightGBM linear trees or random
-forests (rejected at load time).
+No multi-target / vector-leaf models, no LightGBM linear trees or random forests (rejected at load
+time).

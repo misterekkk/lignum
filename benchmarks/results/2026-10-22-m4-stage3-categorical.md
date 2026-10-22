@@ -24,6 +24,6 @@ Latency = median per call. Mismatch = rows not bit-identical to the native libra
 
 - Model: 1000 trees, 36,897 numeric / 6,019 mask / 12,149 bitset splits; bitsets total ~1.4 MB.
 - Same data and tree shape without categorical features (100k rows, 200 trees): 0.014 s vs 0.049 s
-  with them. Experiments (see TASKS.md Stage 3) put the overhead in the categorical comparison
+  with them. Experiments put the overhead in the categorical comparison
   itself: float→int conversion plus a dependent bitset load (mostly L2) lengthen every step that
   hits a categorical slot. lleaves embeds bitsets as constants and is 1.4× faster on this model.

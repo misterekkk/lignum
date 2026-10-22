@@ -19,7 +19,7 @@ import numpy as np
 from . import _core
 
 __all__ = ["Model", "load"]
-__version__ = "0.2.0.dev0"
+__version__ = "0.2.0"
 
 
 def _is_pandas(X) -> bool:
