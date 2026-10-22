@@ -141,7 +141,7 @@ Weak spots:
 - [x] Exact input binning: per-feature 16-bit codes once per row, integer comparisons, 3 tree levels per 64-byte node (`src/binned.*`); default for batches of 8+ rows, stored in the binary format (0.6)
 - [x] Categorical decisions precomputed per row (category -> decision bits table per feature); a categorical slot reads one bit from L1
 - [x] Zero-as-missing in the binned kernel (zero band = one bin, branch-free override)
-- [ ] Validate indices stored in mapped model files (untrusted files can index out of bounds)
+- [x] Validate every index in loaded model files (children strictly forward, leaves, features, categorical tables): 0.15-0.64 ms per load; XGBoost JSON child order checked (no cycles); fuzz test under ASan/UBSan in CI
 - [ ] Single rows: measure the binned kernel for 1-7 rows (currently they keep the KNode walk)
 
 ### Binned kernel results (CI `bench-lleaves.yml`, 300k rows, 500 trees, 4 threads)

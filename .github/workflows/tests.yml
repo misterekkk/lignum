@@ -36,6 +36,21 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
 
+  sanitizers:
+    name: C++ tests with ASan + UBSan (incl. fuzzing of model files)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DLIGNUM_BUILD_TESTS=ON -DLIGNUM_SANITIZE=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
   python:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}

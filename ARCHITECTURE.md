@@ -118,9 +118,11 @@ n_features, n_outputs, n_cat_words, section sizes), followed by 64-byte aligned 
 leaves, tree kinds, base scores, tree outputs (multiclass only), categorical bitsets and, when the
 `Binned` flag is set, a `BinnedFileHeader` followed by the binned kernel's sections (nodes, roots,
 tree kinds, dense features, cuts, zero bins, categorical decision tables).
-Loading validates the version and the file size, then maps the file read-only (0.02 ms for the
-benchmark models, binned kernel included). Indices stored inside nodes are not validated, so only
-load files you trust. Older versions are rejected; re-export from JSON.
+Loading validates the version and the file size, maps the file read-only and then checks every
+stored index (`src/validate.cpp`): children must point strictly forward (so a walk always ends),
+leaves, features, categorical bitsets and decision tables must be in range. This takes 0.15-0.64 ms
+for the benchmark models. `tests/cpp/test_fuzz.cpp` corrupts files at random and runs under
+ASan/UBSan in CI. Older versions are rejected; re-export from JSON.
 
 ## APIs
 

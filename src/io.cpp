@@ -1,6 +1,7 @@
 #include <lignum/model.hpp>
 #include "io.hpp"
 #include "binned.hpp"
+#include "validate.hpp"
 
 #include <fstream>
 #include <stdexcept>
@@ -340,6 +341,7 @@ namespace lignum {
             model.binned = f;
         }
 
+        validate_model(model);
         return model;
     }
 

@@ -95,8 +95,13 @@ namespace lignum {
                 } else {
                     node->threshold_or_value = xgboost_threshold(t.split_condition.at(node_id));
                 }
-                node->left = build_tree(t, static_cast<size_t>(t.left[node_id]));
-                node->right = build_tree(t, static_cast<size_t>(t.right.at(node_id)));
+                // XGBoost numbers children after their parent; anything else would be a cycle.
+                const int64_t left = t.left[node_id], right = t.right.at(node_id);
+                if (left <= static_cast<int64_t>(node_id) || right <= static_cast<int64_t>(node_id)) {
+                    throw std::runtime_error("Malformed XGBoost tree: child index does not follow its parent.");
+                }
+                node->left = build_tree(t, static_cast<size_t>(left));
+                node->right = build_tree(t, static_cast<size_t>(right));
                 return node;
             }
 

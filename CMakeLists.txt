@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.18...3.31)
 project(lignum LANGUAGES CXX)
 
 option(LIGNUM_BUILD_TESTS "Build the GoogleTest suite" OFF)
+option(LIGNUM_SANITIZE "Build with sanitizers (tests, not releases)" OFF)
+set(LIGNUM_SANITIZERS "address,undefined" CACHE STRING "Sanitizers for LIGNUM_SANITIZE (ASan hangs on some macOS versions: use undefined there)")
 option(LIGNUM_NATIVE "Tune for the build machine (-march/-mcpu=native). Never enable for distributed wheels." OFF)
 if(SKBUILD)
     set(_lignum_c_default OFF)
@@ -19,6 +21,11 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+if(LIGNUM_SANITIZE AND NOT MSVC)
+    add_compile_options(-fsanitize=${LIGNUM_SANITIZERS} -fno-omit-frame-pointer -fno-sanitize-recover=all)
+    add_link_options(-fsanitize=${LIGNUM_SANITIZERS})
+endif()
+
 # ---------------------------------------------------------------------------
 # Core library
 # ---------------------------------------------------------------------------
@@ -31,6 +38,7 @@ add_library(lignum STATIC
     src/model.cpp
     src/parsers/lightgbm.cpp
     src/parsers/xgboost.cpp
+    src/validate.cpp
     extern/simdjson/simdjson.cpp
 )
 
