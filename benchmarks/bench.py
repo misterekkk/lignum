@@ -505,6 +505,13 @@ def environment() -> dict:
     cpu = platform.processor()
     if sys.platform == "darwin":
         cpu = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip()
+    elif sys.platform.startswith("linux"):
+        try:  # "Model name" is the CPU on x86-64 and the core (e.g. Neoverse-N1) on aarch64
+            lscpu = subprocess.run(["lscpu"], capture_output=True, text=True).stdout
+            name = next((l.split(":", 1)[1].strip() for l in lscpu.splitlines() if l.startswith("Model name")), "")
+            cpu = f"{name} ({platform.machine()})" if name else cpu
+        except OSError:
+            pass
     return {
         "date": dt.datetime.now().isoformat(timespec="seconds"),
         "commit": commit + ("-dirty" if dirty else ""),
