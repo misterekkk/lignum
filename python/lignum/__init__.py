@@ -7,6 +7,8 @@ C++ engine for direct JSON inference and mmap-based binary loading.
 """
 
 import os
+import warnings
+
 import numpy as np
 
 from . import _core
@@ -76,20 +78,62 @@ class Model:
         return self._c_model.n_outputs
 
     def compile(self, compiler: str = "cc", flags: str = "-O2", work_dir: str = "", jobs: int = 0,
-                block_trees: int = 16) -> dict:
+                block_trees: int = 16, library: str | os.PathLike | None = None, fallback: bool = False) -> dict:
         """
         Experimental: compile the trees to native code with the system C compiler.
 
-        Each tree becomes C code with constant thresholds and leaf values. Trees are grouped in
-        blocks of `block_trees`, and a block is walked for a whole chunk of rows before the next
-        one; binning and threads stay in lignum and every row sums its trees in model order, so
-        predictions are unchanged (bit-identical). Libraries are cached
-        by content in `work_dir` (default: a `lignum_compiled` folder in the temp directory).
-        Linux and macOS only.
+        Each tree becomes C code with constant thresholds; leaves are read from per-block
+        tables. Trees are grouped in blocks of `block_trees`, and a block is walked for a whole
+        chunk of rows before the next one; binning of categorical features, threads and
+        transforms stay in lignum and every row sums its trees in model order, so predictions
+        are unchanged (bit-identical). Libraries are cached by content in `work_dir` (default:
+        a `lignum_compiled` folder in the temp directory). Linux and macOS only.
 
-        Returns timings: codegen_ms, compile_ms, load_ms, source_bytes, cached, library.
+        Parameters
+        ----------
+        library : path, optional
+            Also write the compiled library here, e.g. next to the `.bin` model, so production
+            can attach it with `lignum.load(model_path, compiled=library)` without a compiler.
+        fallback : bool, default=False
+            When the compiler is missing or fails, warn and keep the interpreter instead of
+            raising. The returned dict then has `compiled=False` and the `error`.
+
+        Returns
+        -------
+        dict
+            `compiled`, timings (`codegen_ms`, `compile_ms`, `load_ms`), `source_bytes`,
+            `cached` and the `library` path.
+
+        Examples
+        --------
+        ```python
+        model = lignum.load("model.json", format="lightgbm")
+        model.save("model.bin")
+        model.compile(library="model.so")      # build machine: needs a C compiler
+
+        model = lignum.load("model.bin", compiled="model.so")  # production: no compiler
+        ```
         """
-        return dict(self._c_model.compile(compiler, flags, str(work_dir), jobs, block_trees))
+        try:
+            stats = dict(self._c_model.compile(compiler, flags, str(work_dir), jobs, block_trees,
+                                               "" if library is None else os.fspath(library)))
+        except RuntimeError as error:
+            if not fallback:
+                raise
+            warnings.warn(f"lignum: compiled mode unavailable, using the interpreter ({error})", RuntimeWarning, stacklevel=2)
+            return {"compiled": False, "error": str(error)}
+        stats["compiled"] = True
+        return stats
+
+    def load_compiled(self, library: str | os.PathLike) -> None:
+        """
+        Attach a library built earlier by `compile(library=...)` for this model.
+
+        The library records which model it was generated from and the lignum ABI; a library
+        for another model or lignum version raises `RuntimeError`. Loading runs the library's
+        native code, so only load libraries you trust (like a pickle).
+        """
+        self._c_model.load_compiled(os.fspath(library))
 
     def decompile(self) -> None:
         """Go back to the interpreter."""
@@ -131,7 +175,8 @@ class Model:
         self._c_model.save(str(filepath))
 
 
-def load(filepath: str, format: str = "auto", binned: bool = True) -> Model:
+def load(filepath: str, format: str = "auto", binned: bool = True,
+         compiled: str | os.PathLike | None = None) -> Model:
     """
     Load a trained model from a JSON or Lignum binary file.
 
@@ -146,6 +191,10 @@ def load(filepath: str, format: str = "auto", binned: bool = True) -> Model:
         Prepare the binned kernel: inputs are mapped once per row to integer bin codes and
         categorical decisions are precomputed, so the tree walk compares small integers. Results are identical either way; False keeps
         only the direct traversal (lower memory use).
+    compiled : path, optional
+        Library written by `Model.compile(library=...)` for this model; predictions then use
+        the compiled trees without compiling again. Needs `binned=True`. A library for another
+        model or lignum version raises `RuntimeError`. Only load libraries you trust.
 
     Returns
     -------
@@ -168,5 +217,7 @@ def load(filepath: str, format: str = "auto", binned: bool = True) -> Model:
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
 
-    c_model = _core.load(str(filepath), format, binned)
-    return Model(c_model)
+    model = Model(_core.load(str(filepath), format, binned))
+    if compiled is not None:
+        model.load_compiled(compiled)
+    return model

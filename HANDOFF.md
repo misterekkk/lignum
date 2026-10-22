@@ -121,8 +121,10 @@ zamiast 23), `-O3`, `-mcpu=native`, bloki 8-64 (szybkość ta sama, kompilacja r
    `-mllvm -enable-tail-merge=false` daje ~4% (tylko clang; gcc: `-fno-crossjumping`).
 4. Automatyczny wybór trybu: przy `compile()` zmierzyć interpreter i kod skompilowany na próbce
    (np. 10k wierszy z danych użytkownika lub modelu) i używać szybszego; osobno dla małych batchy.
-5. API: zapis skompilowanej biblioteki obok `.bin` (bez kompilacji przy starcie), Windows (MSVC/clang-cl),
-   ostrzeżenie gdy brak kompilatora.
+5. ~~API: zapis skompilowanej biblioteki obok `.bin`~~ zrobione: `compile(library="m.so")`,
+   `lignum.load("m.bin", compiled="m.so")` (~2 ms), odcisk modelu + wersja ABI w bibliotece
+   (niezgodność = `RuntimeError`), `compile(fallback=True)` gdy brak kompilatora. Zostaje Windows
+   (MSVC/clang-cl) i C API dla `load_compiled`.
 
 ## Co jeszcze otwarte (pełna lista w `TASKS.md`)
 

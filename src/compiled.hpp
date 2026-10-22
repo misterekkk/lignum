@@ -30,6 +30,7 @@ namespace lignum {
         std::string compiler = "cc";
         std::string flags = "-O2";
         std::string work_dir;  // empty: system temp directory
+        std::string output;    // also copy the library here (to ship it next to the model file)
         int jobs = 0;          // translation units compiled in parallel; 0 = hardware threads
         int block_trees = 16;  // trees per block function (larger blocks compile slower, run about the same)
     };
@@ -41,7 +42,18 @@ namespace lignum {
         std::string library;
     };
 
-    // Requires the binned kernel (Model::binned). Throws std::runtime_error on compiler errors.
+    // Requires the binned kernel (Model::binned). Throws std::runtime_error when the compiler is
+    // missing or fails.
     std::shared_ptr<const CompiledForest> compile_forest(const Model& model, const CompileOptions& options, CompileStats* stats);
+
+    // Attaches a library built earlier by compile_forest (e.g. shipped next to the model file).
+    // The library records the fingerprint of the model it was generated from and the ABI of the
+    // generated functions; a library for another model or lignum version is rejected with
+    // std::runtime_error. Loading runs the library's code: only load libraries you trust.
+    std::shared_ptr<const CompiledForest> load_compiled(const Model& model, const std::string& library);
+
+    // Stable 64-bit hash of everything the generated code depends on (trees, cuts, leaves,
+    // outputs, numeric precision) and of the generator's ABI.
+    uint64_t compiled_fingerprint(const Model& model);
 
 } // namespace lignum

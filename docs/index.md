@@ -68,3 +68,29 @@ fast_model = lignum.load("lignum_model.bin", format="binary")
 preds = fast_model.predict(X, n_jobs=-1)
 
 ```
+### Scenario C: Compiled mode (experimental, Linux and macOS)
+
+For the highest throughput, compile the trees to native code with the system C compiler. Predictions stay
+bit-identical to the source library; on real data the compiled trees are typically 2-4x faster than the
+interpreter. Compiling 500 trees takes a few seconds, so compile once on a machine with a compiler and ship
+the library next to the binary model:
+
+```python
+import lignum
+
+# Build machine (needs gcc or clang)
+model = lignum.load("model_lightgbm.json", format="lightgbm")
+model.save("lignum_model.bin")
+model.compile(library="lignum_model.so")
+
+# Production (no compiler needed): attaching the library takes about 2 ms
+model = lignum.load("lignum_model.bin", compiled="lignum_model.so")
+preds = model.predict(X)
+```
+
+- A library records the model it was generated from and the lignum version of the generated code; loading it
+  for another model or version raises `RuntimeError`, so stale libraries cannot give wrong predictions.
+- Loading a library runs its native code: only load libraries you built or trust, as with pickle files.
+- `model.compile(fallback=True)` keeps the interpreter with a warning when no compiler is available.
+- Both modes stay available: `model.decompile()` returns to the interpreter, `model.uses_compiled` tells which
+  one predicts. The interpreter can be faster on data whose splits are hard to predict, so measure on your data.

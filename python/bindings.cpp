@@ -58,13 +58,14 @@ NB_MODULE(_core, m) {
         nb::arg("strategy") = "auto",
         "Returns model prediction for input data.")
         
-        .def("compile", [](Model& self, const std::string& compiler, const std::string& flags, const std::string& work_dir, int jobs, int block_trees) {
+        .def("compile", [](Model& self, const std::string& compiler, const std::string& flags, const std::string& work_dir, int jobs, int block_trees, const std::string& output) {
             CompileOptions options;
             options.compiler = compiler;
             options.flags = flags;
             options.work_dir = work_dir;
             options.jobs = jobs;
             options.block_trees = block_trees;
+            options.output = output;
             CompileStats stats;
             {
                 nb::gil_scoped_release release;
@@ -78,8 +79,16 @@ NB_MODULE(_core, m) {
             result["cached"] = stats.cached;
             result["library"] = stats.library;
             return result;
-        }, nb::arg("compiler") = "cc", nb::arg("flags") = "-O2", nb::arg("work_dir") = "", nb::arg("jobs") = 0, nb::arg("block_trees") = 16,
+        }, nb::arg("compiler") = "cc", nb::arg("flags") = "-O2", nb::arg("work_dir") = "", nb::arg("jobs") = 0, nb::arg("block_trees") = 16, nb::arg("output") = "",
            "Experimental: compiles the trees to native code with the system compiler.")
+        .def("load_compiled", [](Model& self, const std::string& library) {
+            std::shared_ptr<const CompiledForest> compiled;
+            {
+                nb::gil_scoped_release release;
+                compiled = load_compiled(self, library);
+            }
+            self.compiled = compiled;
+        }, nb::arg("library"), "Attaches a library built earlier by compile() for this model.")
         .def("decompile", [](Model& self) { self.compiled = nullptr; }, "Drops the compiled trees.")
         .def_prop_ro("uses_compiled", [](const Model& self) { return self.compiled != nullptr; })
         .def("save", &Model::save, nb::arg("filepath"), "Saves lignum format model to binary.")

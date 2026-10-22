@@ -6,6 +6,7 @@ add_executable(lignum_tests
     test_c_api.cpp
     test_categorical.cpp
     test_fuzz.cpp
+    test_compiled.cpp
 )
 
 target_link_libraries(lignum_tests PRIVATE lignum GTest::gtest_main)
