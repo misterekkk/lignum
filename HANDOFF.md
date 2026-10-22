@@ -1,182 +1,113 @@
 # Handoff — stan projektu i jak kontynuować
 
-Plik dla nowej sesji (człowiek lub agent). Najpierw przeczytaj `CLAUDE.md` (zasady), potem ten plik,
-potem `ARCHITECTURE.md` (jak działa silnik) i `TASKS.md` (roadmapa + wszystkie pomiary).
-Stan na 2026-10-22, branch `dev/v0.2` (wypchnięty na GitHub, `main` = stary stan sprzed prac).
+Dla nowej sesji (człowiek lub agent). Kolejność czytania: `CLAUDE.md` (zasady), ten plik,
+`ARCHITECTURE.md` (jak działa silnik), `TASKS.md` (roadmapa + pomiary), `git log` (szczegóły).
+Stan na 2026-10-22 (późny wieczór), branch `dev/v0.2` (wypchnięty). `main` = stary stan sprzed prac
+plus sam plik `.github/workflows/wheels.yml` (żeby GitHub pokazywał „Run workflow”).
 
 ## Co to jest
 
 Lignum: silnik predykcji dla modeli LightGBM / XGBoost (rdzeń C++20, Python przez nanobind, C API).
-Cele, które ustaliliśmy: **wyniki bit w bit identyczne** z biblioteką źródłową, natychmiastowe
-wczytanie modelu (mmap), niskie opóźnienie przy strumieniowaniu wierszy, dobra przepustowość.
+Cele: **wyniki bit w bit identyczne** z biblioteką źródłową, natychmiastowe wczytanie (`.bin` przez
+mmap), niskie opóźnienie, wysoka przepustowość. Na PyPI jako **`pylignum`**, import `import lignum`
+(nazwa `lignum` na PyPI należy do niezwiązanego loggera JSON).
 
-## Co zrobiliśmy (chronologicznie, szczegóły w `git log` i `TASKS.md`)
+## Co jest zrobione (szczegóły w `TASKS.md` i `git log`)
 
-1. **Porządki**: nowy branch od `main`, stary eksperyment z kategoriami zarchiwizowany na
-   `dev/new-features`, R usunięty (tag `v0.1-with-R`), układ `include/lignum`, `src`, `python`,
-   `tests/{cpp,python}`, jeden root `CMakeLists.txt` + `pyproject.toml`.
-2. **Poprawność (bit-exact)**: znalezione i naprawione błędy — XGBoost liczy we float32 (progi,
-   akumulacja, base_score, softmax), LightGBM `missing_type` None/Zero, zerowanie |x|<=1e-35,
-   `sigmoid:`, `cross_entropy_lambda`, kolejność sumowania drzew. Testy porównują `assert_array_equal`.
-3. **Strategie** `serial` / `rows` / `auto` (małe batche bez OpenMP, bloki liczone z liczby wątków),
-   przeplatanie 4 drzew dla pojedynczych wierszy.
-4. **Multiclass** (LightGBM, XGBoost), **kategorie** LightGBM i XGBoost (semantyka zweryfikowana
-   empirycznie), C API + `liblignum`, walidacja plików modelu, fuzz test pod ASan/UBSan w CI.
-5. **Kernel z binami** (domyślny): wejście mapowane raz na wiersz na 16-bitowe kody (biny dla cech
-   numerycznych — dokładnie, kody kategorii), węzeł `BNode` = 3 poziomy drzewa w 64 B, decyzje
-   kategoryczne liczone z góry (tablica kategoria -> bity decyzji; pomysł autora projektu), w drzewie
-   jeden bit z L1. Zapisywany w formacie binarnym 0.6 (wczytanie 0.02 ms + walidacja 0.15-0.64 ms).
-   Stary kernel (`KNode`) zostaje dla `load(..., binned=False)`; każdy test Pythona idzie przez oba.
-6. **Benchmarki**: `benchmarks/bench.py` (wszyscy konkurenci), `bench-lleaves.yml` w CI (x86 + ARM,
-   automatycznie przy zmianach w `src/`), zbiory rzeczywiste (`benchmarks/datasets.py`: California,
-   Covertype, Adult, Bank, Diabetes) + 20 testów zgodności na nich.
-7. **Tryb kompilowany (eksperyment, ostatnia rzecz)** — opis niżej.
+- **Poprawność**: semantyka LightGBM / XGBoost (float32, missing None/Zero, strefa zera, kategorie,
+  kolejność sumowania). Każdy test Pythona idzie przez 3 kernele: `binned`, `direct`, `compiled`
+  (`tests/python/conftest.py`).
+- **Interpreter**: kernel z binami (domyślny, `BNode` = 3 poziomy w 64 B) i bezpośredni (`KNode`).
+- **Tryb kompilowany** (`src/compiled.*`): drzewa → C → biblioteka współdzielona. Bloki 16 drzew po
+  porcjach wierszy ~2 MB, liście w tablicach, wygenerowane binowanie, najczęstsze cechy bloku w
+  rejestrach (`LIGNUM_COMPILED_LOCALS`: 16 ARM / 10 x86), pary liści jako select. Biblioteka obok
+  modelu: `compile(library=...)`, `load(..., compiled=...)` (~2 ms), odcisk modelu + ABI.
+  `compile(fallback=True)`, `autotune(X)` → `compiled_min_rows`. Linux, macOS, **Windows** (cl przez
+  vswhere/vcvarsall, MinGW gcc, clang; LoadLibrary).
+- **Formaty**: LightGBM `model.txt` i JSON, XGBoost JSON i `.ubj`, `.bin`; `format="auto"` rozpoznaje
+  po zawartości. Drzewa liniowe i random forest LightGBM są odrzucane (wcześniej JSON liczył je źle).
+- **Arrow** (C Data / C Stream Interface, bez libarrow): `predict()` przyjmuje pyarrow / polars /
+  wszystko z `__arrow_c_array__` / `__arrow_c_stream__`; kernel z binami binuje kolumny prosto z
+  buforów. C API: `LignumModelPredictArrow`.
+- **C API**: wczytanie, predykcja (macierz i Arrow), tryb kompilowany.
+- **Wheele** (`.github/workflows/wheels.yml`, cibuildwheel v4.2.1): manylinux_2_28 x86_64/aarch64,
+  macOS 15+ arm64/x86_64, Windows x64, sdist; Python 3.10, 3.11 + abi3 dla 3.12+. OpenMP: auditwheel
+  (libgomp), delvewheel (vcomp140), macOS: `@rpath` najpierw Homebrew (ta sama kopia co LightGBM /
+  XGBoost — dwie kopie = `OMP: Error #15`), potem kopia w `lignum/.dylibs`.
+- **Dokumentacja**: strona Starlight (Astro) w `docs/` — przewodniki, koncepcje, benchmarki,
+  referencja API generowana z docstringów (`docs/scripts/api_reference.py`). Deploy na GitHub Pages
+  z `main` (`.github/workflows/docs.yml`). Logo: propozycja A (drzewo binarne) w `docs/assets/`.
 
-## Gdzie jesteśmy wydajnościowo (najważniejsze liczby)
+## Wyniki (pełne tabele: `docs/src/content/docs/benchmarks.md`, `benchmarks/results/`)
 
-- Wobec natywnego LightGBM/XGBoost i TL2cgen: szybciej praktycznie wszędzie (2-8x).
-- Wobec **lleaves** (najsilniejszy konkurent, LLVM, tylko LightGBM, nie bit-exact):
-  - małe batche (1 i 100 wierszy, ustawienia domyślne): **wygrywamy 2-6x** wszędzie;
-  - kategorie o wysokiej liczności (Diabetes, syntetyczne kategorie): **wygrywamy** także duże batche;
-  - **duże batche na typowych danych rzeczywistych (California, Covertype, Adult, Bank): lleaves
-    2-4x szybszy** — skoki w kodzie skompilowanym są tam przewidywane prawie bezbłędnie, a interpreter
-    nie korzysta z przewidywalności. Wykluczone przyczyny: binowanie, multiclass, kolejność wierszy,
-    przeplatanie. To był powód eksperymentu z kompilacją.
+- Tryb kompilowany vs lleaves (500 drzew, dane rzeczywiste): szybszy na wszystkich 7 modelach na ARM
+  i na x86 (Covertype na 1 wątku remis); M4: szybszy wszędzie poza Covertype na 1 wątku (~5%).
+  Diabetes (kategorie) 5-6x. Kompilacja 4-12 s vs lleaves 13-280 s. lleaves nie jest bit-exact.
+- Pojedynczy wiersz: 2-9 µs skompilowany, 5-13 µs interpreter.
+- Arrow: interpreter tak szybki jak z numpy; skompilowany Covertype +2.5%.
+- Wczytanie: `model.txt` szybszy niż JSON (Covertype 7 vs 14 ms), `.ubj` 1.7x wolniejszy niż JSON
+  (jednorazowe, nie warto optymalizować), `.bin` < 1 ms.
 
-## Tryb kompilowany (`src/compiled.*`, `model.compile()`)
+## W toku przy przekazaniu
 
-Jak działa: z `BinnedForest` generujemy kod C, kompilujemy równolegle systemowym `cc -O2 -fPIC`
-(N plików), linkujemy do `.so` (cache po hashu źródła), `dlopen`. Wygenerowana biblioteka:
-- `lignum_bin`: binowanie cech numerycznych (stałe progi, rozwinięte wyszukiwanie binarne,
-  liniowe zliczanie dla <= 8 progów) — te same kody co `bin_of`;
-- `lignum_block_<b>`: blok 16 drzew (`block_trees`) przechodzi przez całą porcję wierszy
-  (~2 MB buforów na porcję, `LIGNUM_COMPILED_CHUNK_KB`), zanim ruszy następny blok; liście to
-  stałe hex-float dodawane do sum wiersza w kolejności drzew. Kody wiersza wczytywane raz do
-  zmiennych lokalnych (`int16`: NaN = -1, bez zawijania), pusty `asm` nie pozwala kompilatorowi
-  przenieść odczytów z powrotem do gałęzi; para liści = select zamiast skoku.
-Decyzje kategoryczne, wątki i transformacje zostają w Lignum, więc wynik jest bit-exact. Każdy
-test Pythona idzie też w wariancie `compiled` (`tests/python/conftest.py`). Tylko Linux/macOS.
+- **Publikacja na TestPyPI**: ręczny run „Wheels” z `target=testpypi` na `dev/v0.2` (run 39833456450,
+  uruchomiony ponownie po tym, jak mój push anulował pierwszy). Sprawdzić wynik w Actions; potem
+  instalacja w czystym venv:
+  `pip install --pre -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ pylignum`.
+- Konfiguracja PyPI jest gotowa: pending publishers na pypi.org i test.pypi.org (`pylignum`,
+  `misterekkk/lignum`, `wheels.yml`, środowiska `pypi` / `testpypi`), środowiska w repo (`pypi` z
+  wymaganym zatwierdzeniem przez właściciela).
 
-Wyniki na M4 (500 drzew, ms, 1 wątek / 10 wątków; kompilacja 6-12 s, lleaves 13-134 s):
+## Następne kroki (ustalone z autorem)
 
-| model | interpreter | skompilowany | lleaves |
-|---|---:|---:|---:|
-| California | 85.3 / 12.4 | **22.6 / 3.7** | 35.7 / 6.4 |
-| Covertype | 1674 / 253 | 493 / 74.9 | **388 / 67.2** |
-| Adult | 226 / 31.7 | **47.6 / 8.2** | 55.9 / 13.0 |
-| Bank | 226 / 33.3 | **51.9 / 8.9** | 61.6 / 10.7 |
-| Diabetes | 969 / 136 | **296 / 42.8** | 1508 / 273 |
+1. **TestPyPI** → sprawdzić instalację na Linux/macOS/Windows → wydanie **0.2.0**: `__version__ =
+   "0.2.0"` w `python/lignum/__init__.py` (jedyne źródło wersji), scalić `dev/v0.2` → `main`, run
+   „Wheels” z `target=pypi`, zatwierdzić w środowisku `pypi`. Każda wersja może trafić na (Test)PyPI
+   tylko raz — testy na `0.2.0.devN`.
+2. **README** (główny, `README.md`) do przepisania: jest nieaktualny (stare porównania z Treelite,
+  „Quick Local Setup”). Ma być krótki: logo, `pip install pylignum`, przykład, 3-4 punkty, mała
+  tabela benchmarków, link do strony. `python/README.md` (opis na PyPI) jest aktualny.
+3. **Strona**: przejrzeć treść z autorem, po scaleniu do `main` sprawdzić deploy. Lokalnie:
+   `cd docs && npm install && python scripts/api_reference.py && npm run dev`.
+4. **Pomiary w chmurze (Hetzner)**: CCX23/CCX33 (dedykowane vCPU, AMD EPYC) — stabilne wyniki x86;
+   CAX (Ampere Altra, ARM, współdzielone vCPU) — sprawdzenie ARM. Na świeżym Ubuntu 24.04:
+   `curl -LsSf https://raw.githubusercontent.com/misterekkk/lignum/dev/v0.2/benchmarks/cloud.sh | bash`
+   (~30-40 min, raporty w `~/lignum-bench-*.tar.gz`, `scp` do domu). Serwer usunąć po testach
+   (wyłączony też jest rozliczany). Szczególnie ciekawe: `autotune` na modelu syntetycznym (na EPYC
+   9V45 interpreter wygrywał z kodem skompilowanym), p99 pojedynczego wiersza, build `LIGNUM_NATIVE`.
+5. Ryzen autora (Windows): na razie bez WSL; tryb kompilowany działa natywnie (VS Build Tools z
+   „Desktop development with C++”), lleaves / TL2cgen tylko na Linuksie.
 
-CI (`bench-lleaves.yml`, commit `d6bce3f`, 4 vCPU, build generic, s: 4 wątki / 1 wątek; pełne
-raporty w `benchmarks/results/ci/2026-10-22-gh-*-d6bce3f.md`, 0 niezgodności bit-exact):
+## Otwarte (mniej pilne, pełna lista w `TASKS.md`)
 
-| model | x86 interpreter | x86 skompilowany | x86 lleaves | ARM interpreter | ARM skompilowany | ARM lleaves |
-|---|---:|---:|---:|---:|---:|---:|
-| syntetyczny numeryczny | **0.412 / 0.961** | 0.414 / 1.390 | 0.422 / 1.341 | 0.331 / 1.309 | **0.213 / 0.856** | 0.334 / 1.329 |
-| syntetyczny z kategoriami | 0.840 / 2.749 | **0.534 / 1.743** | 0.944 / 2.880 | 0.717 / 2.832 | **0.252 / 1.012** | 0.888 / 3.539 |
-| Diabetes | 0.380 / 1.139 | **0.199 / 0.602** | 0.482 / 1.380 | 0.315 / 1.209 | **0.097 / 0.371** | 0.628 / 2.484 |
-| Covertype | 0.858 / 2.167 | 0.246 / 0.646 | **0.202 / 0.496** | 0.742 / 2.775 | **0.184 / 0.707** | 0.206 / 0.740 |
-| California | 0.037 / 0.108 | **0.015 / 0.043** | 0.018 / 0.050 | 0.034 / 0.134 | **0.008 / 0.033** | 0.015 / 0.058 |
-| Adult | 0.090 / 0.288 | **0.028 / 0.097** | 0.034 / 0.115 | 0.080 / 0.316 | **0.016 / 0.068** | 0.025 / 0.099 |
-| Bank | 0.098 / 0.281 | **0.037 / 0.078** | 0.039 / 0.081 | 0.088 / 0.331 | **0.022 / 0.069** | 0.027 / 0.087 |
+- Covertype na 1 wątku ~5% za lleaves (kształt kodu; `-mllvm -enable-tail-merge=false` daje ~4%,
+  tylko clang).
+- macOS < 15: własny build libomp z niższym `MACOSX_DEPLOYMENT_TARGET` zamiast Homebrew.
+- Wheele musllinux, Windows ARM; drzewa liniowe / random forest LightGBM (gdyby ktoś potrzebował).
+- FlatBuffers: decyzja — nie w rdzeniu (aplikacja czyta swój schemat i podaje `double*` / Arrow).
 
-Po `9ef1786` (tablice liści, lokalne tylko dla 16 / 10 najczęstszych cech; x86 to tym razem EPYC
-7763, inny procesor niż wyżej, więc porównywać tylko w obrębie kolumny; s, 4 wątki / 1 wątek):
+## Pułapki, na które już wpadliśmy
 
-| model | x86 interpreter | x86 skompilowany | x86 lleaves | ARM interpreter | ARM skompilowany | ARM lleaves |
-|---|---:|---:|---:|---:|---:|---:|
-| syntetyczny numeryczny | 0.684 / 1.596 | **0.401 / 1.304** | 0.560 / 1.813 | 0.334 / 1.341 | **0.208 / 0.835** | 0.333 / 1.330 |
-| syntetyczny z kategoriami | 1.231 / 3.737 | **0.485 / 1.614** | 2.013 / 4.872 | 0.710 / 2.823 | **0.249 / 0.986** | 0.887 / 3.535 |
-| Diabetes | 0.556 / 1.584 | **0.180 / 0.555** | 1.210 / 2.680 | 0.315 / 1.225 | **0.096 / 0.373** | 0.628 / 2.472 |
-| Covertype | 1.372 / 3.286 | **0.326 / 0.795** | 0.367 / 0.795 | 0.736 / 2.776 | **0.173 / 0.659** | 0.205 / 0.719 |
-| California | 0.056 / 0.153 | **0.017 / 0.044** | 0.029 / 0.069 | 0.033 / 0.135 | **0.008 / 0.033** | 0.015 / 0.057 |
-| Adult | 0.129 / 0.399 | **0.031 / 0.098** | 0.048 / 0.151 | 0.079 / 0.315 | **0.016 / 0.067** | 0.025 / 0.100 |
-| Bank | 0.146 / 0.410 | **0.043 / 0.086** | 0.054 / 0.108 | 0.088 / 0.331 | **0.022 / 0.068** | 0.027 / 0.088 |
+- **Push zmian w `src/`, `python/`, `CMakeLists.txt` uruchamia „Wheels”**. Kolejka jest już
+  rozdzielona (push nie anuluje ręcznego runu), ale nie pushować w trakcie publikacji bez potrzeby.
+- „Run workflow” jest widoczny tylko dla workflow obecnych na domyślnej gałęzi (`main`).
+- Windows: stos 1 MB (rekurencja w parserach musi mieć limity i wykrywanie cykli); `LoadLibrary`
+  dopisuje `.dll` do nazwy bez rozszerzenia; pliki testowe zapisywać w trybie binarnym.
+- Apple libc++ nie ma `std::from_chars` dla `double` — liczby z tekstu idą przez simdjson.
+- macOS: dwie kopie libomp w procesie = crash; wheel bierze najpierw Homebrew.
+- Sam M4 mylił przy decyzjach o kernelu — mierzyć też x86 i ARM (`bench-lleaves.yml`,
+  `EXPERIMENT_CXX_FLAGS`). Runnery GitHuba są współdzielone: porównywać silniki w obrębie joba.
+- ASan na tym Macu się zawiesza — lokalnie `-DLIGNUM_SANITIZERS=undefined`, ASan w CI.
+- GitHub API: agent czyta logi / artefakty i uruchamia workflow tokenem z `git credential fill`.
 
-Skompilowany jest najszybszy w każdym wierszu poza remisem na Covertype (x86, 1 wątek). Na x86
-`LIGNUM_COMPILED_LOCALS=16` daje to samo co 10 (raport `*-locals16.md`), więc zostaje 10.
-
-Pojedynczy wiersz (1 wątek): skompilowany 1.9-2.3 µs na x86 / 3.7-4.5 µs na ARM, interpreter 5-8 /
-7-11 µs, lleaves 6-15 / 10-62 µs. Wyjątek: syntetyczny numeryczny na x86 (niezależne cechy, skoki
-nieprzewidywalne) — bezskokowy interpreter wygrywa na 1 wątku (0.96 vs 1.39 s) i przy 100 wierszach
-(169 vs 307 µs). Kryterium wyboru trybu to więc przewidywalność skoków, nie rozmiar batcha.
-
-Kod Covertype (`lignum_block_*`, M4): progi są natychmiastowymi w `cmp w, #imm` (30.9k, zero
-odczytów z tablic), liście to stałe 64-bit budowane w kodzie (`mov` + 3x `movk` + `fmov`, 94k
-`movk`), progi binowania > 8 cięć w tablicach `.rodata`. Odczyty: 1.4k odczytów kodów wiersza
-(było 15.6k) + 6.1k odczytów ze stosu — zmiennych lokalnych jest więcej niż rejestrów (51 cech +
-7 sum), więc kompilator je rozlewa; lleaves ma ~4.3k odczytów łącznie.
-
-Co nie pomogło: porównania na surowych `double` (stała 64-bit = 5 instrukcji; California 38 ms
-zamiast 23), `-O3`, `-mcpu=native`, bloki 8-64 (szybkość ta sama, kompilacja rośnie z rozmiarem).
-
-**Następne kroki** (w tej kolejności):
-1. Ryzen (dedykowana maszyna, `benchmarks/README.md`, `--engines lignum,lignum-compiled,lleaves`),
-   także p99 pojedynczego wiersza.
-2. Mniej instrukcji w drzewach: liście z tablicy w `.rodata` (`adrp`+`ldr` zamiast 5 instrukcji,
-   kod ~35% mniejszy) i mniej rozlewania: bloki układane tak, by drzewa w bloku dzieliły cechy
-   (dowolna kolejność między klasami w multiclass jest dozwolona, w obrębie klasy nie), albo
-   lokalne tylko dla najczęściej używanych cech bloku.
-3. Covertype na x86: IR lleaves tym samym clangiem = 374 ms na M4, więc to kształt kodu;
-   `-mllvm -enable-tail-merge=false` daje ~4% (tylko clang; gcc: `-fno-crossjumping`).
-4. Automatyczny wybór trybu: przy `compile()` zmierzyć interpreter i kod skompilowany na próbce
-   (np. 10k wierszy z danych użytkownika lub modelu) i używać szybszego; osobno dla małych batchy.
-5. ~~API: zapis skompilowanej biblioteki obok `.bin`~~ zrobione: `compile(library="m.so")`,
-   `lignum.load("m.bin", compiled="m.so")` (~2 ms), odcisk modelu + wersja ABI w bibliotece
-   (niezgodność = `RuntimeError`), `compile(fallback=True)` gdy brak kompilatora. Zostaje Windows
-   (MSVC/clang-cl) i C API dla `load_compiled`.
-
-## Stan po 2026-10-22 (wieczór): Windows, C API, autotune, Arrow
-
-- **Windows**: tryb kompilowany działa (`compiler="auto"`: `cl` z PATH, potem Visual Studio przez
-  `vswhere` + `vcvarsall`, potem MinGW `gcc`, potem `clang`); biblioteki `.dll` przez `LoadLibrary`.
-  Testy C++ i Pythona w CI (`windows-latest`) obejmują tryb kompilowany. MSVC nie ma inline asm
-  na x64, więc `LIGNUM_KEEP` jest tam pusty (wolniej, nadal bit-exact).
-- **C API**: `LignumModelCompile`, `LignumModelLoadCompiled`, `LignumModelDecompile`,
-  `LignumModelUsesCompiled`, `LignumModelPredictArrow`.
-- **Biblioteka obok modelu**: `compile(library=...)`, `load(..., compiled=...)` (~2 ms), odcisk
-  modelu + ABI w bibliotece, `compile(fallback=True)`.
-- **autotune**: `model.autotune(X_sample)` / `compile(autotune=...)` ustawia `compiled_min_rows`
-  (od ilu wierszy kod skompilowany); na M4 wychodzi 1 (kompilowany zawsze szybszy).
-- **Arrow**: `predict()` przyjmuje obiekty z `__arrow_c_array__` / `__arrow_c_stream__` (pyarrow,
-  polars, ...), bez zależności od libarrow/pyarrow w rdzeniu; kolumny wg pozycji, typy numeryczne,
-  bool, null, słownikowe (kody kategorii), bitmapy ważności, offsety; bit-exact z macierzą float64.
-  Narzut vs gotowa macierz: Covertype kompilowany +6% (1 wątek) / +15% (10 wątków), reszta w
-  szumie; vs konwersja tabeli w numpy 3.2x szybciej.
-
-**Ryzen (Windows, bez WSL)**: potrzebny kompilator C++ do zbudowania Lignum i C do trybu
-kompilowanego — Visual Studio 2022 Build Tools z „Desktop development with C++” wystarczy (cl
-znajdzie się sam). Potem: `python -m pip install ".[test]"`, `python -m pytest tests/python`,
-`python benchmarks/bench.py --engines lignum,lignum-compiled --only lightgbm-real-covtype,...`.
-lleaves i TL2cgen nie działają natywnie na Windows, więc tam porównanie tylko lignum vs natywne
-biblioteki; z lleaves dalej przez WSL2/Linux.
-
-## Co jeszcze otwarte (pełna lista w `TASKS.md`)
-
-- Pomiar na dedykowanej maszynie x86 (Ryzen autora): instrukcja w `benchmarks/README.md`
-  (Linux/WSL2; lleaves i TL2cgen nie działają natywnie na Windows). Benchmark raportuje p99.
-- Etap 5: Arrow / zero-copy streaming (główny przypadek użycia autora: strumieniowanie z Kafki).
-- Etap 6: PyPI (cibuildwheel, bez `-march=native`, dołączanie OpenMP).
-- Decyzja strategiczna: tryb kompilowany jako opcja dla przepustowości vs pozycjonowanie jako
-  interpreter (opóźnienie, start, dokładność, kategorie).
-- Porządki przed wydaniem: README z uczciwymi benchmarkami, scalenie `dev/v0.2` -> `main`.
-
-## Jak pracować (praktycznie)
+## Jak pracować
 
 ```bash
-make venv && make bench-deps         # .venv (Python 3.12, uv) + konkurenci do benchmarków
-make py-build                        # instalacja edytowalna (po zmianach w C++ zawsze przebudować)
-make test                            # C++ (GoogleTest) + Python (każdy test dla obu kerneli)
+make venv && make bench-deps      # .venv (Python 3.12, uv) + konkurenci do benchmarków
+make py-build                     # instalacja edytowalna (po zmianach w C++ zawsze przebudować)
+make test                         # C++ (GoogleTest) + Python (każdy test w 3 kernelach)
 .venv/bin/python benchmarks/bench.py --engines lignum,lignum-compiled,lleaves \
     --only lightgbm-real-covtype,lightgbm-real-diabetes --trees 500
+.venv/bin/python benchmarks/bench_arrow.py
+cd docs && npm run build          # strona (najpierw python scripts/api_reference.py)
 ```
-
-- Eksperymenty kernela mierzymy na x86 i ARM: flagi w `EXPERIMENT_CXX_FLAGS` w
-  `.github/workflows/bench-lleaves.yml`, push na `dev/v0.2`, wyniki w artefaktach (~5 min).
-  Sam M4 nas już kilka razy zmylił.
-- Flagi eksperymentalne w kodzie: `LIGNUM_BRANCHY_TAIL/CAT` (domyślne ustalone pomiarami),
-  `LIGNUM_BINNED_BRANCHY`, `LIGNUM_BINNED_MIN_ROWS`, `LIGNUM_NATIVE`, `LIGNUM_SANITIZE(RS)`.
-- ASan na tym Macu (Apple clang 17, macOS 26) zawiesza się nawet na hello world — lokalnie
-  `-DLIGNUM_SANITIZERS=undefined`, ASan działa w CI na Linuksie.
-- GitHub API: bez logowania limit 60 zapytań/h; agent czytał logi/artefakty przez token z
-  `git credential fill` (tylko odczyt).

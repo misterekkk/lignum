@@ -4,6 +4,17 @@
 Runtime: preparation time, large-batch throughput (all threads, one thread), latency for 1 and 100
 rows (median, and p99 for one row on one thread) and bit-exactness. Reports go to `results/`.
 
+## Running on a cloud server
+
+`cloud.sh` does everything on a fresh Ubuntu 24.04 server (e.g. Hetzner CCX with dedicated vCPUs, or
+CAX for ARM): installs the toolchain, builds lignum, runs `bench.py` (interpreter, compiled, lleaves,
+native; real and synthetic models), `bench_arrow.py`, the host-tuned build and `autotune`, and packs
+the reports into `~/lignum-bench-<host>-<date>.tar.gz`. About 30-40 minutes.
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/misterekkk/lignum/dev/v0.2/benchmarks/cloud.sh | bash
+```
+
 ## Running on a dedicated machine
 
 Linux (or WSL2 on Windows; lleaves and TL2cgen are not supported natively on Windows):
