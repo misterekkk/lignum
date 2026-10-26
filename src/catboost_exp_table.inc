@@ -1,6 +1,6 @@
 // Mantissas (low 52 bits) of 2^(i/2048), i = 0..2047, correctly rounded to double: the table
-// fmath::expd builds with ::pow where pow is correctly rounded (glibc, macOS). Fixed here so
-// MSVC's pow, which differs on some entries, cannot change results. Generated with mpmath:
+// CatBoost's Windows build uses for fmath::expd (MSVC's pow differs on some entries). Other
+// platforms compute the table with the system pow, as CatBoost does. Generated with mpmath:
 //   bits(float(mpmath.power(2, mpmath.mpf(i) / 2048))) & (2**52 - 1)  (200-bit precision)
     0x0000000000000ULL, 0x00162f3904052ULL, 0x002c605e2e8cfULL, 0x0042936faa3d8ULL,
     0x0058c86da1c0aULL, 0x006eff583fc3dULL, 0x0085382faef83ULL, 0x009b72f41a12bULL,

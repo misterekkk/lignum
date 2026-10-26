@@ -157,13 +157,31 @@ namespace lignum {
             static constexpr int kBits = 11;
             static constexpr uint64_t kSize = uint64_t{1} << kBits;
             static constexpr uint64_t kAdj = (uint64_t{1} << (kBits + 10)) - (uint64_t{1} << kBits);
-            static constexpr uint64_t table[kSize] = {
-                #include "catboost_exp_table.inc"
-            };
-            // ln 2 rounded to double, what ::log(2.0) gives where log is correctly rounded.
+            // fmath fills the table with ::pow(2, i/2048) at run time, so it is the platform's pow:
+            // CatBoost and lignum share the system libm on Linux and macOS (whose x86_64 pow is
+            // not correctly rounded at two entries), while CatBoost's Windows build matches the
+            // correctly rounded table and MSVC's pow does not.
+            uint64_t table[kSize];
+            // ln 2 rounded to double (what ::log(2.0) gives on every platform we test).
             static constexpr double kLn2 = 0.69314718055994530942;
             double a = static_cast<double>(kSize) / kLn2;
             double ra = 1 / a;
+
+            FmathExpTable() {
+            #ifdef _WIN32
+                static constexpr uint64_t rounded[kSize] = {
+                    #include "catboost_exp_table.inc"
+                };
+                std::memcpy(table, rounded, sizeof(table));
+            #else
+                for (uint64_t i = 0; i < kSize; i++) {
+                    const double v = std::pow(2.0, static_cast<double>(i) * (1.0 / static_cast<double>(kSize)));
+                    uint64_t bits;
+                    std::memcpy(&bits, &v, 8);
+                    table[i] = bits & ((uint64_t{1} << 52) - 1);
+                }
+            #endif
+            }
         };
 
         [[maybe_unused]] double fmath_expd(double x, const FmathExpTable& c) {
