@@ -108,16 +108,23 @@ def test_regression(tmp_path, loss, ctrs, model_format):
 
 
 @pytest.mark.parametrize("nan_mode", ["Min", "Max"])
-def test_nan_modes_and_many_borders(tmp_path, nan_mode, model_format):
+@pytest.mark.parametrize("border_count", [1024, 32])
+def test_nan_modes_and_many_borders(tmp_path, nan_mode, border_count, model_format):
+    """Buckets of features with up to 256 borders are counted, of those with more searched; NaN
+    goes below or above every border."""
     rng = np.random.default_rng(7)
     df, _ = make_frame(rng, cards=(5,))
     df.loc[rng.random(len(df)) < 0.2, "x1"] = np.nan
     y = np.sin(6 * df.x0) + df.x0 + np.nan_to_num(df.x1, nan=2.0) + (df.c0 == "v0_1")
-    # More than 255 borders in use needs 16-bit buckets.
-    m, path, j = train(cb.CatBoostRegressor, df, y, tmp_path, model_format, nan_mode=nan_mode, border_count=1024, iterations=400, depth=6)
-    assert max(len(f.get("borders") or []) for f in j["features_info"]["float_features"]) > 255
+    m, path, j = train(cb.CatBoostRegressor, df, y, tmp_path, model_format, nan_mode=nan_mode, border_count=border_count, iterations=400, depth=6)
+    most = max(len(f.get("borders") or []) for f in j["features_info"]["float_features"])
+    assert most > 256 if border_count == 1024 else most <= 32  # > 255 also needs 16-bit buckets
     t = probe_rows(df, j)
-    np.testing.assert_array_equal(lignum.load(path).predict(t, raw_score=True), m.predict(t, prediction_type="RawFormulaVal"))
+    model = lignum.load(path)
+    want = m.predict(t, prediction_type="RawFormulaVal")
+    np.testing.assert_array_equal(model.predict(t, raw_score=True), want)
+    for i in list(range(10)) + list(range(150, 160)) + list(range(200, 210)):  # single rows: NaN, borders
+        np.testing.assert_array_equal(model.predict(t.iloc[i:i + 1], raw_score=True), want[i:i + 1])
 
 
 def test_input_forms_and_threads(tmp_path):

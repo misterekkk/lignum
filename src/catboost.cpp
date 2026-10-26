@@ -367,9 +367,14 @@ namespace lignum {
             index_conditions(f);
         }
 
-        // bucket_of over a feature's padded borders without branches: a fixed number of halvings
-        // (log2 of the padded size), each a conditional move. x is not NaN; +inf padding is never
-        // below x, so the count is the same. 19% -> 9% of a numeric model's time on 200k rows.
+        // Features with at most this many borders get their buckets by counting the borders below
+        // the value (no branches on any compiler); more borders use bucket_search.
+        constexpr size_t kCountBorders = 256;
+
+        // bucket_of over a feature's padded borders: a fixed number of halvings (log2 of the padded
+        // size). Written as a conditional move, which ARM compilers keep (csel) and x86 ones turn
+        // into a data-dependent branch, so only for features with many borders. x is not NaN; +inf
+        // padding is never below x, so the count is the same.
         inline uint16_t bucket_search(const std::vector<float>& search, float x) {
             const float* base = search.data();
             size_t n = search.size();
@@ -1214,6 +1219,7 @@ namespace lignum {
             std::vector<uint16_t> index;
             std::vector<double> sums;
             std::vector<uint8_t> conditions;  // single-row path
+            std::vector<float> values;        // one float feature of the block
 
             void prepare(const ObliviousForest& f, size_t rows) {
                 auto grow = [](auto& v, size_t n) { if (v.size() < n) v.resize(n); };
@@ -1224,6 +1230,7 @@ namespace lignum {
                 grow(prefixes, f.prefix_levels * rows);
                 grow(index, rows);
                 grow(sums, rows * f.dim);
+                grow(values, rows);
                 if (rows == 1 && f.row_conditions) grow(conditions, f.condition_begin.back() + 8);  // + 8: stores of 8 bytes
             }
         };
@@ -1332,9 +1339,25 @@ namespace lignum {
                 const ObliviousForest::Float& ff = f.floats[k];
                 const uint16_t nan_bucket = ff.nan_as_true ? static_cast<uint16_t>(ff.borders.size()) : 0;
                 uint16_t* b = buckets + k * stride;
-                for (size_t r = 0; r < rows; r++) {
-                    const float x = static_cast<float>(X[r * n_features + ff.column]);
-                    b[r] = std::isnan(x) ? nan_bucket : bucket_search(ff.search, x);
+                if (ff.borders.size() > kCountBorders) {
+                    for (size_t r = 0; r < rows; r++) {
+                        const float x = static_cast<float>(X[r * n_features + ff.column]);
+                        b[r] = std::isnan(x) ? nan_bucket : bucket_search(ff.search, x);
+                    }
+                    continue;
+                }
+                // Count the borders below each value, border by border over the block's rows:
+                // compares and adds the compiler vectorises, with no select it could turn into a
+                // branch (x86 compilers did that to bucket_search's conditional move). NaN is below
+                // every border here; AsTrue puts it above.
+                float* x = s.values.data();
+                for (size_t r = 0; r < rows; r++) x[r] = static_cast<float>(X[r * n_features + ff.column]);
+                std::fill(b, b + rows, uint16_t{0});
+                for (const float border : ff.borders) {
+                    for (size_t r = 0; r < rows; r++) b[r] = static_cast<uint16_t>(b[r] + (x[r] > border));
+                }
+                if (ff.nan_as_true) {
+                    for (size_t r = 0; r < rows; r++) b[r] = std::isnan(x[r]) ? nan_bucket : b[r];
                 }
             }
             for (size_t c = 0; c < f.cat_columns.size(); c++) {
@@ -1518,7 +1541,15 @@ namespace lignum {
             for (size_t k = 0; k < F; k++) {
                 const ObliviousForest::Float& ff = f.floats[k];
                 const float v = static_cast<float>(x[ff.column]);
-                buckets[k] = std::isnan(v) ? (ff.nan_as_true ? static_cast<uint16_t>(ff.borders.size()) : 0) : bucket_search(ff.search, v);
+                if (std::isnan(v)) {
+                    buckets[k] = ff.nan_as_true ? static_cast<uint16_t>(ff.borders.size()) : 0;
+                } else if (ff.borders.size() > kCountBorders) {
+                    buckets[k] = bucket_search(ff.search, v);
+                } else {  // the borders below v, counted without branches (vectorised over the borders)
+                    uint32_t below = 0;
+                    for (const float border : ff.borders) below += v > border;
+                    buckets[k] = static_cast<uint16_t>(below);
+                }
             }
             for (size_t c = 0; c < f.cat_columns.size(); c++) hashes[c] = static_cast<uint32_t>(x[f.cat_columns[c]]);
             for (size_t k = 0; k < H; k++) {
