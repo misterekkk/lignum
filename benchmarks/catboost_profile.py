@@ -37,10 +37,7 @@ CASES = ["none", "catboost-batch", "lignum-batch", "catboost-row", "lignum-row"]
 # Default build (float buckets per feature, u8, groups of 4 trees) and one change at a time.
 # Default build and one change at a time; -m flags only where the CPU has the instructions.
 # "LIGNUM_ISA=generic" is not a flag but the environment of the run (the kernel chosen at run time).
-VARIANTS = ["default (AVX2 kernel where the CPU has it):", "generic kernel:LIGNUM_ISA=generic",
-            "index lanes:-DLIGNUM_CATBOOST_INDEX_SIMD=1", "index lanes, generic:-DLIGNUM_CATBOOST_INDEX_SIMD=1 LIGNUM_ISA=generic",
-            "index intrinsics:-DLIGNUM_CATBOOST_INDEX_SIMD=2",
-            "index intrinsics, generic:-DLIGNUM_CATBOOST_INDEX_SIMD=2 LIGNUM_ISA=generic"]
+VARIANTS = ["default (AVX2 kernel where the CPU has it):", "generic kernel:LIGNUM_ISA=generic"]
 # The functions whose assembly is printed (built with -DLIGNUM_CATBOOST_ASM, so they are not inlined).
 ASM_FUNCTIONS = [r"tree_index_ge<6, unsigned char, unsigned char>", r"tree_index<6, unsigned char, unsigned char>",
                  r"add_leaves<4, 1, unsigned char>", r"float_buckets<unsigned char>"]
@@ -87,8 +84,11 @@ def assembly(library: Path) -> list[str]:
             out.append(f"### `{wanted}`: not found\n")
         for m in found:  # one per kernel build (generic, avx2)
           out.append(f"### `{m.group(1)[:160]}`\n")
-          for body in sorted(loops(m.group(2).splitlines()), key=len)[:3]:  # innermost (shortest) loops
-              vec = sum(bool(re.search(r"%[xyz]mm|\bv[0-9]+\b|\bq[0-9]+\b", l)) for l in body)
+          # The loops with the most vector instructions first (the main vectorised loop; the
+          # shortest loops are usually its scalar tails), then the shortest.
+          vector = lambda body: sum(bool(re.search(r"%[xyz]mm|\bv[0-9]+\b|\bq[0-9]+\b", l)) for l in body)
+          for body in sorted(loops(m.group(2).splitlines()), key=lambda b: (-vector(b), len(b)))[:3]:
+              vec = vector(body)
               stack = sum(bool(re.search(r"%rsp|\[sp", l)) for l in body)
               out.append(f"loop of {len(body)} instructions, {vec} vector, {stack} stack:\n\n```\n" + "\n".join(body[:70]) + "\n```\n")
     return out

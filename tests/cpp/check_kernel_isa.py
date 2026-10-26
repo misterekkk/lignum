@@ -4,9 +4,9 @@ AVX2 / AVX-512 kernels. Anywhere else they would run on CPUs without AVX2, e.g. 
 or template that the linker took from the AVX2 object for every caller.
 
 MSVC compiles the whole AVX2 object with /arch:AVX2 and its libraries carry no symbol names, so
-there the object file itself is checked: every function it defines with external linkage must be
-in the avx2 namespace (any other one, e.g. an instantiated std::fill, could replace the generic
-copy at link time).
+there the object file itself is checked: no function it defines with external linkage outside the
+avx2 namespace (e.g. a standard-library helper, which could replace the generic copy at link time)
+may contain VEX instructions.
 
 Usage: python check_kernel_isa.py <library>
        python check_kernel_isa.py --msvc <dumpbin> <catboost_kernel_avx2.obj>
@@ -46,17 +46,41 @@ def check_library(library: str) -> int:
     return 1 if bad else 0
 
 
+def msvc_vex_functions(dumpbin: str, obj: str) -> dict:
+    """Function name -> its first VEX instruction, from `dumpbin /disasm` of an object file."""
+    text = subprocess.run([dumpbin, "/nologo", "/disasm", obj], capture_output=True, text=True, check=True).stdout
+    function, found = None, {}
+    for line in text.splitlines():
+        m = re.match(r"^(\S+)(?: \(.*\))?:$", line)
+        if m:
+            function = m.group(1)
+            continue
+        # "  0000000000000010: C5 FB 10 04 C8     vmovsd      xmm0,mmword ptr [rax+rcx*8]"
+        m = re.match(r"^\s+[0-9A-F]+: (?:[0-9A-F]{2} )+\s+([a-z][a-z0-9]*)\b(.*)$", line)
+        if function and m and (m.group(1).startswith("v") or "ymm" in m.group(2)):
+            found.setdefault(function, line.strip())
+    return found
+
+
 def check_msvc_object(dumpbin: str, obj: str) -> int:
     text = subprocess.run([dumpbin, "/nologo", "/symbols", obj], capture_output=True, text=True, check=True).stdout
     functions = [m.groups() for m in map(COFF_FUNCTION.search, text.splitlines()) if m]
     kernel = [name for name, _ in functions if MSVC_KERNEL in name]
-    bad = [(name, rest.strip()) for name, rest in functions if MSVC_KERNEL not in name]
     if not any(name.startswith("?predict_block@avx2@") for name in kernel):
         print(f"no lignum::catboost_kernel::avx2::predict_block in {obj}: the AVX2 kernel is missing")
         return 1
+    # Shared functions without VEX instructions (pointer helpers of the standard library) are
+    # harmless whichever copy the linker takes; ones with VEX are not.
+    vex = msvc_vex_functions(dumpbin, obj)
+    if not vex:
+        print(f"no VEX instruction in {obj}: was it compiled with /arch:AVX2?")
+        return 1
+    shared = [(name, rest.strip()) for name, rest in functions if MSVC_KERNEL not in name]
+    bad = [(name, undecorated) for name, undecorated in shared if name in vex]
     for name, undecorated in bad:
-        print(f"external function outside the AVX2 kernel: {name} {undecorated}")
-    print(f"{len(kernel)} external functions in the AVX2 kernel, {len(bad)} elsewhere")
+        print(f"AVX in a shared function outside the AVX2 kernel: {name} {undecorated}\n    {vex[name]}")
+    print(f"{len(vex)} functions with AVX in the object, {len(shared)} shared functions outside the kernel, "
+          f"{len(bad)} of them with AVX")
     return 1 if bad else 0
 
 

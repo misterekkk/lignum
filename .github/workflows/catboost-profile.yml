@@ -80,7 +80,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install lignum and CatBoost
-        run: python -m pip install ".[test]"
+        run: python -m pip install ".[test]" polars
 
       - name: Cache datasets
         uses: actions/cache@v4
