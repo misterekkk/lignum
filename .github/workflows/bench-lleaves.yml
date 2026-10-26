@@ -1,8 +1,9 @@
 name: Benchmark vs lleaves
 
 # Fast iteration loop for kernel work: lignum vs lleaves (the strongest competitor) on LightGBM
-# models only, on x86-64 and aarch64 Linux, with lignum built both generic and host-tuned
-# (the generic run also measures the experimental compiled mode, lignum-compiled).
+# models, on x86-64 and aarch64 Linux, with lignum built both generic and host-tuned
+# (the generic run also measures the experimental compiled mode, lignum-compiled), and the generic
+# build against CatBoost's Python package and C API on CatBoost models (bench_catboost.py).
 # Shared runners are noisy: compare lignum with lleaves within one job, not across runs.
 on:
   push:
@@ -11,6 +12,8 @@ on:
       - 'src/**'
       - 'include/**'
       - 'CMakeLists.txt'
+      - 'benchmarks/bench_catboost.py'
+      - 'benchmarks/catboost_capi.cpp'
       - '.github/workflows/bench-lleaves.yml'
   workflow_dispatch:
     inputs:
@@ -61,6 +64,11 @@ jobs:
       - name: lignum (generic build, interpreter and compiled mode) vs lleaves
         run: python benchmarks/bench.py --engines lignum,lignum-compiled,lleaves $BENCH_ARGS
 
+      - name: CatBoost models (generic build) vs CatBoost's Python package and C API
+        run: |
+          python -m pip install polars
+          python benchmarks/bench_catboost.py --rows 300000 --repeats 5 --latency-budget 0.5
+
       - name: Rebuild lignum with LIGNUM_NATIVE=ON
         run: CMAKE_ARGS="-DLIGNUM_NATIVE=ON" python -m pip install --force-reinstall --no-deps .
 
@@ -79,10 +87,12 @@ jobs:
         run: |
           python - <<'EOF'
           import glob, re
+          for f in glob.glob("benchmarks/results/2*-catboost.md"):
+              print(open(f).read())
           for f in sorted(glob.glob("benchmarks/results/2*.md")):
-              if "-m4-" in f:
+              if "-m4-" in f or f.endswith("-catboost.md"):
                   continue
-              runs = [g for g in sorted(glob.glob("benchmarks/results/2*.md")) if "-m4-" not in g]
+              runs = [g for g in sorted(glob.glob("benchmarks/results/2*.md")) if "-m4-" not in g and not g.endswith("-catboost.md")]
               build = ["generic+lleaves", "native", "experiment"][runs.index(f)] if len(runs) <= 3 else f
               section = None
               for line in open(f):
