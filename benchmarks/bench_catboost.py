@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import platform
@@ -215,8 +216,9 @@ def build_capi(cmake_args: list[str]) -> Path:
     """liblignum (C API, Release, plus cmake_args) and benchmarks/catboost_capi.cpp, in
     benchmarks/.cache/capi; one build directory per set of arguments."""
     build = CACHE / "capi"
-    tag = "".join(ch if ch.isalnum() else "_" for ch in " ".join(cmake_args))[:60]
-    libdir = build / ("lignum" + (f"-{tag}" if tag else ""))
+    joined = " ".join(cmake_args)
+    tag = "".join(ch if ch.isalnum() else "_" for ch in joined)[:40] + "-" + hashlib.sha1(joined.encode()).hexdigest()[:8]
+    libdir = build / ("lignum" + (f"-{tag}" if joined else ""))
     subprocess.run(["cmake", "-S", str(ROOT), "-B", str(libdir), "-DCMAKE_BUILD_TYPE=Release", *cmake_args], check=True,
                    stdout=subprocess.DEVNULL)
     subprocess.run(["cmake", "--build", str(libdir), "--target", "lignum_c", "--parallel"], check=True,

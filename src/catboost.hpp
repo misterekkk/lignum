@@ -29,6 +29,8 @@ namespace lignum {
             bool nan_as_true = false;  // NaN is above every border (CatBoost AsTrue), otherwise below
             std::vector<float> borders;  // strictly increasing
             std::vector<float> search;   // derived at load: borders, then +inf up to a power of two
+            std::vector<float> fine;     // derived: borders, then +inf to whole blocks of 16 plus one block
+            std::vector<float> coarse;   // derived: the last border of each block of 16 (fine[16 k + 15])
         };
         struct OneHot {
             uint32_t cat = 0;  // index into cat_columns
@@ -94,6 +96,7 @@ namespace lignum {
         std::vector<uint32_t> split_condition;  // per split
         std::vector<uint16_t> split_range;      // per split: `bucket >= t` is (uint16_t)(bucket - t) <= range
         bool row_conditions = false;            // single rows through condition bytes (few sources per split)
+        bool small_buckets = false;             // derived: every source's buckets fit in a byte (<= 255)
         std::vector<uint32_t> run_end;          // runs of consecutive trees of one depth: last tree + 1
         std::vector<uint8_t> run_depth;         // and their depth
 

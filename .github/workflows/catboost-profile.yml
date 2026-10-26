@@ -3,12 +3,15 @@ name: CatBoost profile
 # Work per row of lignum and CatBoost (C API) on CatBoost models, counted by cachegrind on x86-64
 # and aarch64: instructions, memory reads and writes, simulated cache misses and branch
 # mispredictions, lignum's hot source lines, and stack accesses in its kernel (objdump).
-# Runs when this file or the profiling scripts change, or by hand.
+# Every variant of the CatBoost kernel (LIGNUM_CATBOOST_FLOATS, LIGNUM_CATBOOST_U8) is built and
+# measured in the same job, with CatBoost as the reference. Runs when this file or the profiling
+# script change, or by hand.
 on:
   push:
     branches: [main, 'dev/**']
     paths:
       - 'benchmarks/catboost_profile.py'
+      - 'src/catboost.cpp'
       - '.github/workflows/catboost-profile.yml'
   workflow_dispatch:
 
@@ -39,10 +42,7 @@ jobs:
           path: benchmarks/.cache/datasets
           key: datasets-v1
 
-      - name: Train the models and write the C API data (20k rows)
-        run: python benchmarks/bench_catboost.py --datasets california,adult,covtype --rows 20000 --repeats 1 --latency-budget 0.1 --cmake-args=-DCMAKE_CXX_FLAGS=-g
-
-      - name: Profile
+      - name: Profile every kernel variant (float buckets search / count / two levels, u16 / u8)
         run: python benchmarks/catboost_profile.py --datasets california,adult,covtype --rows 20000 | tee profile.md
 
       - uses: actions/upload-artifact@v4

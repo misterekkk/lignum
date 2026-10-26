@@ -279,11 +279,20 @@ namespace lignum {
 
         // Float borders padded with +inf to a power of two, for bucket_search.
         void pad_borders(ObliviousForest& f) {
+            constexpr float inf = std::numeric_limits<float>::infinity();
             for (ObliviousForest::Float& x : f.floats) {
                 size_t n = 1;
                 while (n < x.borders.size()) n <<= 1;
                 x.search = x.borders;
-                x.search.resize(n, std::numeric_limits<float>::infinity());
+                x.search.resize(n, inf);
+                // Two levels (bucket_two_level): count the coarse borders below the value, then the
+                // 16 borders of the block that follows. The extra block of +inf keeps that block in
+                // range when the value is above every coarse border.
+                const size_t blocks = (x.borders.size() + 15) / 16;
+                x.fine = x.borders;
+                x.fine.resize((blocks + 1) * 16, inf);
+                x.coarse.clear();
+                for (size_t k = 0; k < blocks; k++) x.coarse.push_back(x.fine[16 * k + 15]);
             }
         }
 
@@ -347,6 +356,13 @@ namespace lignum {
             // splits) 0.62 vs 0.92 µs, covtype (53) 1.02 vs 1.23, bank (268, 2969) 1.60 vs 1.67;
             // adult (364, 2981) 2.25 vs 2.08, diabetes (1228, 2943) 6.7 vs 5.1.
             f.row_conditions = n_sources * 10 <= f.split_source.size();
+            f.small_buckets = true;
+            for (const auto& x : f.floats) f.small_buckets &= x.borders.size() <= 255;
+            for (const auto& x : f.one_hots) f.small_buckets &= x.values.size() <= 255;
+            for (const auto& c : f.ctrs) {
+                f.small_buckets &= c.missing_bucket <= 255;
+                for (uint16_t b : c.entry_buckets) f.small_buckets &= b <= 255;
+            }
             f.run_end.clear();
             f.run_depth.clear();
             for (size_t t = 0; t < f.n_trees(); t++) {
@@ -367,15 +383,31 @@ namespace lignum {
             index_conditions(f);
         }
 
-        // Features with at most this many borders get their buckets by counting the borders below
-        // the value (no branches on any compiler); more borders use bucket_search. On ARM the
-        // search keeps its conditional move and is faster (CI, Neoverse-N2, 1 thread: california
-        // 0.181 s counting vs 0.163 s searching; x86 EPYC: 0.154 vs 0.230 s), so ARM always searches.
-        #if defined(__aarch64__) || defined(_M_ARM64)
-            constexpr size_t kCountBorders = 0;
-        #else
-            constexpr size_t kCountBorders = 256;
+        // How a float feature's bucket (the number of its borders below the value) is computed;
+        // LIGNUM_CATBOOST_FLOATS chooses for experiments (CI measures each on x86-64 and aarch64):
+        //   0: bucket_search, a binary search written as conditional moves; ARM compilers keep
+        //      them (csel), x86 ones make a data-dependent branch of each (clang: ucomiss; ja);
+        //   1: count the borders one by one (vectorised over a block's rows, no select at all);
+        //      features with more than kCountBorders borders search;
+        //   2: bucket_two_level, every 16th border and then 16 borders.
+        // CI, 1 thread, california (8 features, 986 borders): Neoverse-N2 search 0.163 s, count
+        // 0.181 s; EPYC 7763 search 0.230 s, count 0.154 s.
+        #ifndef LIGNUM_CATBOOST_FLOATS
+            #if defined(__aarch64__) || defined(_M_ARM64)
+                #define LIGNUM_CATBOOST_FLOATS 0
+            #else
+                #define LIGNUM_CATBOOST_FLOATS 1
+            #endif
         #endif
+        constexpr int kFloatMode = LIGNUM_CATBOOST_FLOATS;
+        constexpr size_t kCountBorders = 256;
+
+        // Buckets of a block as bytes when every source fits (ObliviousForest::small_buckets):
+        // twice as many per vector, and unsigned byte compares exist in SSE2 (16-bit ones do not).
+        #ifndef LIGNUM_CATBOOST_U8
+            #define LIGNUM_CATBOOST_U8 0
+        #endif
+        constexpr bool kSmallBuckets = LIGNUM_CATBOOST_U8 != 0;
 
         // bucket_of over a feature's padded borders: a fixed number of halvings (log2 of the padded
         // size). Written as a conditional move, which ARM compilers keep (csel) and x86 ones turn
@@ -390,6 +422,31 @@ namespace lignum {
                 n -= half;
             }
             return static_cast<uint16_t>((base - search.data()) + (*base < x));
+        }
+
+        // The borders below x in two levels: c coarse borders (the last of each block of 16) are
+        // below x, so are the 16 c borders of those blocks, plus the ones of block c below x.
+        // Both are sums of comparisons, without selects. x is not NaN.
+        inline uint16_t bucket_two_level(const ObliviousForest::Float& ff, float x) {
+            uint32_t blocks = 0;
+            for (const float border : ff.coarse) blocks += x > border;
+            const float* fine = ff.fine.data() + 16 * static_cast<size_t>(blocks);
+            uint32_t below = 0;
+            for (int j = 0; j < 16; j++) below += x > fine[j];
+            return static_cast<uint16_t>(16 * blocks + below);
+        }
+
+        // The bucket of a float feature's value that is not NaN, as kFloatMode chooses.
+        inline uint16_t float_bucket(const ObliviousForest::Float& ff, float x) {
+            if constexpr (kFloatMode == 2) return bucket_two_level(ff, x);
+            if constexpr (kFloatMode == 1) {
+                if (ff.borders.size() <= kCountBorders) {
+                    uint32_t below = 0;
+                    for (const float border : ff.borders) below += x > border;
+                    return static_cast<uint16_t>(below);
+                }
+            }
+            return bucket_search(ff.search, x);
         }
 
         // Number of strictly increasing borders below x: the bucket with x > borders[k] <=> bucket >= k + 1.
@@ -1226,6 +1283,8 @@ namespace lignum {
             std::vector<double> sums;
             std::vector<uint8_t> conditions;  // single-row path
             std::vector<float> values;        // one float feature of the block
+            std::vector<uint32_t> counts;     // per row: coarse borders below the value (two levels)
+            std::vector<uint8_t> small;       // buckets as bytes (ObliviousForest::small_buckets)
 
             void prepare(const ObliviousForest& f, size_t rows) {
                 auto grow = [](auto& v, size_t n) { if (v.size() < n) v.resize(n); };
@@ -1237,6 +1296,8 @@ namespace lignum {
                 grow(index, rows);
                 grow(sums, rows * f.dim);
                 grow(values, rows);
+                grow(counts, rows);
+                if (kSmallBuckets && f.small_buckets) grow(small, f.n_sources() * rows);
                 if (rows == 1 && f.row_conditions) grow(conditions, f.condition_begin.back() + 8);  // + 8: stores of 8 bytes
             }
         };
@@ -1246,34 +1307,36 @@ namespace lignum {
             return scratch;
         }
 
-        // Leaf indices (16 bits: depth <= 16) of one tree for a block of rows. With the depth known
-        // at compile time, all levels are done in one pass over the rows with the index in a
-        // register. Both split kinds are one unsigned range test, `(uint16_t)(bucket - t) <= range`:
-        // range 0xffff - t for `bucket >= t`, 0 for the one-hot `bucket == t`. (Two comparisons
-        // joined with `&` stopped the loop from vectorising: 3x slower.)
-        template <int Depth>
-        void tree_index(const uint16_t* buckets, size_t stride, const uint16_t* source, const uint16_t* threshold,
+        // Leaf indices (16 bits: depth <= 16) of one tree for a block of rows, from buckets of type B
+        // (uint16_t, or uint8_t when every source fits). With the depth known at compile time, all
+        // levels are done in one pass over the rows with the index in a register. Both split kinds
+        // are one unsigned range test, (B)(bucket - t) <= range: range max - t for `bucket >= t`,
+        // 0 for the one-hot `bucket == t`. (Two comparisons joined with `&` stopped the loop from
+        // vectorising: 3x slower.)
+        template <int Depth, typename B>
+        void tree_index(const B* buckets, size_t stride, const uint16_t* source, const uint16_t* threshold,
                         const uint8_t* equal, size_t rows, uint16_t* index) {
-            const uint16_t* b[Depth];
-            uint16_t lo[Depth], range[Depth];
+            const B* b[Depth];
+            B lo[Depth], range[Depth];
             for (int d = 0; d < Depth; d++) {
                 b[d] = buckets + source[d] * stride;
-                lo[d] = threshold[d];
-                range[d] = equal[d] ? uint16_t{0} : static_cast<uint16_t>(0xffff - threshold[d]);
+                lo[d] = static_cast<B>(threshold[d]);
+                range[d] = equal[d] ? B{0} : static_cast<B>(static_cast<B>(~B{0}) - threshold[d]);
             }
             for (size_t r = 0; r < rows; r++) {
                 uint16_t v = 0;
-                for (int d = 0; d < Depth; d++) v |= static_cast<uint16_t>((static_cast<uint16_t>(b[d][r] - lo[d]) <= range[d]) << d);
+                for (int d = 0; d < Depth; d++) v |= static_cast<uint16_t>((static_cast<B>(b[d][r] - lo[d]) <= range[d]) << d);
                 index[r] = v;
             }
         }
 
         // Any depth, one pass over the rows per level.
-        void tree_index_any(const uint16_t* buckets, size_t stride, const uint16_t* source, const uint16_t* threshold,
+        template <typename B>
+        void tree_index_any(const B* buckets, size_t stride, const uint16_t* source, const uint16_t* threshold,
                             const uint8_t* equal, uint32_t depth, size_t rows, uint16_t* index) {
             std::fill(index, index + rows, uint16_t{0});
             for (uint32_t d = 0; d < depth; d++) {
-                const uint16_t* b = buckets + source[d] * stride;
+                const B* b = buckets + source[d] * stride;
                 const uint16_t t = threshold[d];
                 if (equal[d]) {
                     for (size_t r = 0; r < rows; r++) index[r] |= static_cast<uint16_t>((b[r] == t) << d);
@@ -1283,7 +1346,8 @@ namespace lignum {
             }
         }
 
-        void tree_index_dispatch(const uint16_t* buckets, size_t stride, const uint16_t* source, const uint16_t* threshold,
+        template <typename B>
+        void tree_index_dispatch(const B* buckets, size_t stride, const uint16_t* source, const uint16_t* threshold,
                                  const uint8_t* equal, uint32_t depth, size_t rows, uint16_t* index) {
             switch (depth) {
                 case 0: std::fill(index, index + rows, uint16_t{0}); break;
@@ -1305,8 +1369,8 @@ namespace lignum {
         // per tree and output). Dim outputs per row, 0: any, from the model. The sums are a local
         // array: on the heap the compiler cannot keep them apart from the leaves (7 classes: 0.149
         // instead of 0.100 s for 200k rows).
-        template <int Dim>
-        void phase2(const ObliviousForest& f, const uint16_t* buckets, size_t stride, size_t rows, Scratch& s, double* out) {
+        template <int Dim, typename B>
+        void phase2(const ObliviousForest& f, const B* buckets, size_t stride, size_t rows, Scratch& s, double* out) {
             double local[Dim > 0 ? kBlock * Dim : 1];
             const size_t dim = Dim > 0 ? Dim : f.dim;
             double* sums = Dim > 0 ? local : s.sums.data();
@@ -1334,38 +1398,51 @@ namespace lignum {
             }
         }
 
-        void predict_block(const ObliviousForest& f, const double* X, size_t n_features, size_t rows, double* out, Scratch& s) {
-            const size_t F = f.floats.size(), H = f.one_hots.size();
-            const size_t stride = rows;
-            s.prepare(f, rows);
-            uint16_t* buckets = s.buckets.data();
-
-            // Phase 1: buckets of every source.
-            for (size_t k = 0; k < F; k++) {
-                const ObliviousForest::Float& ff = f.floats[k];
-                const uint16_t nan_bucket = ff.nan_as_true ? static_cast<uint16_t>(ff.borders.size()) : 0;
-                uint16_t* b = buckets + k * stride;
-                if (ff.borders.size() > kCountBorders) {
-                    for (size_t r = 0; r < rows; r++) {
-                        const float x = static_cast<float>(X[r * n_features + ff.column]);
-                        b[r] = std::isnan(x) ? nan_bucket : bucket_search(ff.search, x);
-                    }
-                    continue;
+        // Buckets of one float feature for a block of rows (kFloatMode). Counting compares without
+        // selects, so NaN (below every border) needs no test; AsTrue puts it above afterwards.
+        template <typename B>
+        void float_buckets(const ObliviousForest::Float& ff, const double* X, size_t n_features, size_t rows, B* b, Scratch& s) {
+            const B nan_bucket = ff.nan_as_true ? static_cast<B>(ff.borders.size()) : B{0};
+            const bool count = kFloatMode == 1 && ff.borders.size() <= kCountBorders;
+            if (kFloatMode == 0 || (kFloatMode == 1 && !count)) {
+                for (size_t r = 0; r < rows; r++) {
+                    const float x = static_cast<float>(X[r * n_features + ff.column]);
+                    b[r] = std::isnan(x) ? nan_bucket : static_cast<B>(bucket_search(ff.search, x));
                 }
-                // Count the borders below each value, border by border over the block's rows:
-                // compares and adds the compiler vectorises, with no select it could turn into a
-                // branch (x86 compilers did that to bucket_search's conditional move). NaN is below
-                // every border here; AsTrue puts it above.
-                float* x = s.values.data();
-                for (size_t r = 0; r < rows; r++) x[r] = static_cast<float>(X[r * n_features + ff.column]);
-                std::fill(b, b + rows, uint16_t{0});
+                return;
+            }
+            float* x = s.values.data();
+            for (size_t r = 0; r < rows; r++) x[r] = static_cast<float>(X[r * n_features + ff.column]);
+            if (count) {  // border by border over the rows: compares and adds the compiler vectorises
+                std::fill(b, b + rows, B{0});
                 for (const float border : ff.borders) {
-                    for (size_t r = 0; r < rows; r++) b[r] = static_cast<uint16_t>(b[r] + (x[r] > border));
+                    for (size_t r = 0; r < rows; r++) b[r] = static_cast<B>(b[r] + (x[r] > border));
                 }
-                if (ff.nan_as_true) {
-                    for (size_t r = 0; r < rows; r++) b[r] = std::isnan(x[r]) ? nan_bucket : b[r];
+            } else {      // two levels: coarse borders over the rows, then each row's block of 16
+                uint32_t* blocks = s.counts.data();
+                std::fill(blocks, blocks + rows, 0u);
+                for (const float border : ff.coarse) {
+                    for (size_t r = 0; r < rows; r++) blocks[r] += x[r] > border;
+                }
+                for (size_t r = 0; r < rows; r++) {
+                    const float* fine = ff.fine.data() + 16 * static_cast<size_t>(blocks[r]);
+                    uint32_t below = 0;
+                    for (int j = 0; j < 16; j++) below += x[r] > fine[j];
+                    b[r] = static_cast<B>(16 * blocks[r] + below);
                 }
             }
+            if (ff.nan_as_true) {
+                for (size_t r = 0; r < rows; r++) b[r] = std::isnan(x[r]) ? nan_bucket : b[r];
+            }
+        }
+
+        template <typename B>
+        void predict_block_typed(const ObliviousForest& f, const double* X, size_t n_features, size_t rows, double* out, Scratch& s, B* buckets) {
+            const size_t F = f.floats.size(), H = f.one_hots.size();
+            const size_t stride = rows;
+
+            // Phase 1: buckets of every source.
+            for (size_t k = 0; k < F; k++) float_buckets(f.floats[k], X, n_features, rows, buckets + k * stride, s);
             for (size_t c = 0; c < f.cat_columns.size(); c++) {
                 uint32_t* h = s.hashes.data() + c * stride;
                 const uint32_t column = f.cat_columns[c];
@@ -1374,10 +1451,10 @@ namespace lignum {
             for (size_t k = 0; k < H; k++) {
                 const ObliviousForest::OneHot& oh = f.one_hots[k];
                 const uint32_t* h = s.hashes.data() + oh.cat * stride;
-                uint16_t* b = buckets + (F + k) * stride;
+                B* b = buckets + (F + k) * stride;
                 for (size_t r = 0; r < rows; r++) {
-                    uint16_t v = 0;
-                    for (size_t j = 0; j < oh.values.size(); j++) v = oh.values[j] == h[r] ? static_cast<uint16_t>(j + 1) : v;
+                    B v = 0;
+                    for (size_t j = 0; j < oh.values.size(); j++) v = oh.values[j] == h[r] ? static_cast<B>(j + 1) : v;
                     b[r] = v;
                 }
             }
@@ -1399,11 +1476,11 @@ namespace lignum {
                         uint64_t* c = s.combination.data();
                         std::copy(hash, hash + rows, c);
                         for (const auto& [source, threshold] : proj.floats) {
-                            const uint16_t* b = buckets + source * stride;
+                            const B* b = buckets + source * stride;
                             for (size_t r = 0; r < rows; r++) c[r] = combine_hash(c[r], b[r] >= threshold ? 1 : 0);
                         }
                         for (const auto& [source, value] : proj.one_hots) {
-                            const uint16_t* b = buckets + source * stride;
+                            const B* b = buckets + source * stride;
                             for (size_t r = 0; r < rows; r++) c[r] = combine_hash(c[r], b[r] == value ? 1 : 0);
                         }
                         combination = c;
@@ -1426,8 +1503,8 @@ namespace lignum {
             for (size_t k = 0; k < f.ctrs.size(); k++) {
                 const ObliviousForest::Ctr& ctr = f.ctrs[k];
                 const uint32_t* entries = s.entries.data() + ctr.table * stride;
-                uint16_t* b = buckets + (F + H + k) * stride;
-                for (size_t r = 0; r < rows; r++) b[r] = entries[r] ? ctr.entry_buckets[entries[r] - 1] : ctr.missing_bucket;
+                B* b = buckets + (F + H + k) * stride;
+                for (size_t r = 0; r < rows; r++) b[r] = static_cast<B>(entries[r] ? ctr.entry_buckets[entries[r] - 1] : ctr.missing_bucket);
             }
 
             switch (f.dim) {
@@ -1442,6 +1519,15 @@ namespace lignum {
                 case 9: phase2<9>(f, buckets, stride, rows, s, out); break;
                 case 10: phase2<10>(f, buckets, stride, rows, s, out); break;
                 default: phase2<0>(f, buckets, stride, rows, s, out); break;
+            }
+        }
+
+        void predict_block(const ObliviousForest& f, const double* X, size_t n_features, size_t rows, double* out, Scratch& s) {
+            s.prepare(f, rows);
+            if (kSmallBuckets && f.small_buckets) {
+                predict_block_typed<uint8_t>(f, X, n_features, rows, out, s, s.small.data());
+            } else {
+                predict_block_typed<uint16_t>(f, X, n_features, rows, out, s, s.buckets.data());
             }
         }
 
@@ -1549,12 +1635,8 @@ namespace lignum {
                 const float v = static_cast<float>(x[ff.column]);
                 if (std::isnan(v)) {
                     buckets[k] = ff.nan_as_true ? static_cast<uint16_t>(ff.borders.size()) : 0;
-                } else if (ff.borders.size() > kCountBorders) {
-                    buckets[k] = bucket_search(ff.search, v);
-                } else {  // the borders below v, counted without branches (vectorised over the borders)
-                    uint32_t below = 0;
-                    for (const float border : ff.borders) below += v > border;
-                    buckets[k] = static_cast<uint16_t>(below);
+                } else {
+                    buckets[k] = float_bucket(ff, v);
                 }
             }
             for (size_t c = 0; c < f.cat_columns.size(); c++) hashes[c] = static_cast<uint32_t>(x[f.cat_columns[c]]);
