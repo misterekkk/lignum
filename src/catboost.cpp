@@ -144,6 +144,59 @@ namespace lignum {
         return hash_len16(hash_len16(v.first, w.first) + shift_mix(y) * k1 + z, hash_len16(v.second, w.second) + x);
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // CatBoost's exp (NCB::FastExpWithInfInplace). On x86 it is herumi's fmath::expd_v, whose SSE2
+    // and AVX2 loops do the same double operations as this scalar copy (no FMA): a 2^11-entry table
+    // of 2^(i/2048), the index and exponent taken from x * 2048/ln2 + 3 * 2^51, and a cubic
+    // correction. The vector loops clamp x to [-708.396..., 709.7827...]; only arguments beyond
+    // that (results near 0 or overflow) could differ from CatBoost's scalar tail.
+
+    namespace {
+
+        struct FmathExpTable {
+            static constexpr int kBits = 11;
+            static constexpr uint64_t kSize = uint64_t{1} << kBits;
+            static constexpr uint64_t kAdj = (uint64_t{1} << (kBits + 10)) - (uint64_t{1} << kBits);
+            uint64_t table[kSize];
+            double a, ra;
+            FmathExpTable() : a(static_cast<double>(kSize) / std::log(2.0)), ra(1 / a) {
+                for (uint64_t i = 0; i < kSize; i++) {
+                    const double v = std::pow(2.0, static_cast<double>(i) * (1.0 / static_cast<double>(kSize)));
+                    uint64_t bits;
+                    std::memcpy(&bits, &v, 8);
+                    table[i] = bits & ((uint64_t{1} << 52) - 1);
+                }
+            }
+        };
+
+        [[maybe_unused]] double fmath_expd(double x, const FmathExpTable& c) {
+            constexpr double kC1 = 1.0, kC2 = 0.16666666685227835064, kC3 = 3.0000000027955394;
+            x = std::min(x, 709.78272569338397);
+            x = std::max(x, -708.39641853226408);
+            const double b = static_cast<double>(uint64_t{3} << 51);
+            const double d = x * c.a + b;
+            uint64_t bits;
+            std::memcpy(&bits, &d, 8);
+            const uint64_t iax = c.table[bits & (FmathExpTable::kSize - 1)];
+            const double t = (d - b) * c.ra - x;
+            const uint64_t u = (((bits + FmathExpTable::kAdj) >> FmathExpTable::kBits) << 52) | iax;
+            double scale;
+            std::memcpy(&scale, &u, 8);
+            const double y = (((kC3 - t) * (t * t)) * kC2 - t) + kC1;
+            return y * scale;
+        }
+
+    } // namespace
+
+    void catboost_exp(double* x, size_t n) {
+    #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+        static const FmathExpTable table;
+        for (size_t i = 0; i < n; i++) x[i] = fmath_expd(x[i], table);
+    #else
+        for (size_t i = 0; i < n; i++) x[i] = std::exp(x[i]);
+    #endif
+    }
+
     uint32_t catboost_hash(std::string_view category) {
         return static_cast<uint32_t>(city_hash64(category.data(), category.size()));
     }

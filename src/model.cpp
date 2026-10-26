@@ -880,8 +880,9 @@ namespace lignum {
             if (model.oblivious) {
                 with_outputs(model, n_samples, out, raw_score, [&](double* dst, bool raw) {
                     predict_oblivious(*model.oblivious, X, n_samples, n_features, dst, resolve_threads(n_jobs), strategy);
-                    if (model.n_outputs > 1) finish_rows<double, true>(model, raw, 0, n_samples, dst);
-                    else                     finish_rows<double, false>(model, raw, 0, n_samples, dst);
+                    if (!raw && model.transform == transform::Exp) catboost_exp(dst, n_samples * model.n_outputs);  // CatBoost's own exp
+                    else if (model.n_outputs > 1) finish_rows<double, true>(model, raw, 0, n_samples, dst);
+                    else                          finish_rows<double, false>(model, raw, 0, n_samples, dst);
                 });
                 return;
             }

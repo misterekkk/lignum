@@ -169,6 +169,11 @@ output transforms are shared with the other models.
 - **Phase 2, per tree**: a symmetric tree is one node. The leaf index is
   `Σ (bucket[src_d] >= t_d) << d` (`==` for one-hot) over the block, branch-free and vectorisable.
   Leaves are added in model order in double, then `scale * sum + bias`.
+- **Outputs**: the sigmoid is the shared one. `exp` (Poisson, Tweedie) is CatBoost's
+  `FastExpWithInfInplace`, which differs by platform:
+  - x86: herumi's `fmath::expd_v`, a table-based approximation (`catboost_exp`, a scalar copy of the
+    SSE2/AVX2 loops), which differs from `std::exp` in the last bit on about a third of the values;
+  - other platforms: `std::exp`.
 - **Verification**: bit-exact against CatBoost on binary and regression models (`tests/python/test_catboost.py`).
   Covered: CTR complexity 1-4, every CPU CTR type, NaN modes, more than 255 borders, unseen
   categories and CityHash for every length branch. CatBoost's own JSON loader is lossy, so the

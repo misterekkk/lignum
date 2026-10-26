@@ -82,6 +82,10 @@ namespace lignum {
         Model load_catboost_json(const std::string& filepath);
     }
 
+    // exp as CatBoost's predict computes it (Poisson / Tweedie, softmax): on x86 fmath::expd_v, a
+    // table-based approximation, elsewhere std::exp. In place.
+    void catboost_exp(double* x, size_t n);
+
     // Raw scores (scale * sum + bias) of n_samples rows into out (n_samples x dim). Categorical
     // columns hold category hashes (catboost_hash) as doubles.
     void predict_oblivious(const ObliviousForest& forest, const double* X, size_t n_samples, size_t n_features,
