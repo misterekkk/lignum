@@ -178,6 +178,7 @@ namespace lignum {
     };
 
     void Model::save(const std::string& filepath) const {
+        if (oblivious) throw std::runtime_error("Saving CatBoost models in the lignum binary format is not supported yet.");
         std::ofstream out(filepath, std::ios::binary);
         if (!out) throw std::runtime_error("Can't save the file.");
 

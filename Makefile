@@ -5,7 +5,7 @@ CPP_BUILD_DIR ?= build/cpp
 
 venv:
 	uv venv --python 3.12 .venv
-	uv pip install --python $(PYTHON) numpy pandas scikit-learn lightgbm xgboost pytest nanobind scikit-build-core pyarrow ninja
+	uv pip install --python $(PYTHON) numpy pandas scikit-learn lightgbm xgboost catboost pytest nanobind scikit-build-core pyarrow ninja
 
 # Competitor engines for benchmarks/bench.py (lleaves 1.3 needs llvmlite < 0.45).
 bench-deps:

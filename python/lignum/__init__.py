@@ -1,9 +1,10 @@
 """
-lignum: bit-exact, fast inference for LightGBM and XGBoost models.
+lignum: bit-exact, fast inference for LightGBM, XGBoost and CatBoost models.
 
-`lignum.load(path)` reads LightGBM (`model.txt`, JSON) and XGBoost (JSON, UBJSON) models or lignum's
-own `.bin` file; `Model.predict` takes numpy arrays or Arrow data. Predictions equal the library's
-`predict` bit for bit, with the interpreter or with trees compiled to native code (`Model.compile`).
+`lignum.load(path)` reads LightGBM (`model.txt`, JSON), XGBoost (JSON, UBJSON) and CatBoost (JSON)
+models or lignum's own `.bin` file; `Model.predict` takes numpy arrays, pandas DataFrames or Arrow
+data. Predictions equal the library's `predict` bit for bit, with the interpreter or with trees
+compiled to native code (`Model.compile`).
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import numpy as np
 
 from . import _core
 
-__all__ = ["Model", "load"]
+__all__ = ["Model", "load", "catboost_hash"]
 __version__ = "0.2.0"
 
 
@@ -26,9 +27,30 @@ def _is_pandas(X) -> bool:
     return type(X).__module__.split(".")[0] == "pandas"
 
 
+def catboost_hash(category) -> int:
+    """
+    CatBoost's hash of a category: a string, or an integer (hashed as its decimal text, like
+    CatBoost). `Model.predict` hashes categorical columns itself; use this to build a float64
+    matrix by hand, with the hash in each categorical column.
+    """
+    return _core.catboost_hash(category)
+
+
+def _category_hashes(column) -> np.ndarray:
+    """Hashes of one categorical column (pandas Series or 1-D array) as float64."""
+    if _is_pandas(column) and str(column.dtype) == "category":
+        codes = column.cat.codes.to_numpy()
+        if (codes < 0).any():
+            raise ValueError(f"Categorical column {column.name!r} has missing values; CatBoost needs a category "
+                             "(e.g. the string 'nan') in every row.")
+        return _core._catboost_hashes(column.cat.categories.to_numpy(dtype=object))[codes]
+    values = column.to_numpy(dtype=object) if _is_pandas(column) else np.asarray(column, dtype=object)
+    return _core._catboost_hashes(values)
+
+
 class Model:
     """
-    A loaded LightGBM or XGBoost model.
+    A loaded LightGBM, XGBoost or CatBoost model.
 
     Create it with `lignum.load()`. Predictions use the interpreter, or the compiled trees after
     `compile()` / `load(..., compiled=...)`; both give the same, bit-identical results.
@@ -36,6 +58,35 @@ class Model:
 
     def __init__(self, _c_model):
         self._c_model = _c_model
+        self._categorical = frozenset(_c_model.categorical_features)
+
+    def _catboost_matrix(self, X) -> np.ndarray:
+        """float64 matrix with category hashes in the categorical columns (CatBoost models)."""
+        categorical = self._c_model.categorical_features
+        if isinstance(X, (list, tuple)):
+            return _core._catboost_rows(X, categorical)
+        if _is_pandas(X):
+            if X.ndim == 1:  # a Series is one row
+                return _core._catboost_rows(X.tolist(), categorical)
+            if len(X) <= 64:  # few rows: one object array (categoricals give their values), converted in C++
+                return _core._catboost_rows(X.to_numpy(dtype=object), categorical)
+            out = np.empty(X.shape, dtype=np.float64)
+            for j in range(X.shape[1]):
+                column = X.iloc[:, j]
+                out[:, j] = _category_hashes(column) if j in self._categorical else column.to_numpy(dtype=np.float64, na_value=np.nan)
+            return out
+        if isinstance(X, np.ndarray) and X.dtype.kind in "fc" and self._categorical:
+            raise ValueError("This CatBoost model has categorical features; pass them as strings or integers "
+                             "(an object array, a list or a pandas DataFrame), not floats.")
+        A = np.asarray(X, dtype=object if not (isinstance(X, np.ndarray) and X.dtype.kind in "iu") else X.dtype)
+        if A.ndim == 1:  # one row
+            A = A.reshape(1, -1)
+        if A.ndim != 2:
+            raise ValueError("Input must be 2-D (rows x features), or one row.")
+        out = np.empty(A.shape, dtype=np.float64)
+        for j in range(A.shape[1]):
+            out[:, j] = _category_hashes(A[:, j]) if j in self._categorical else A[:, j].astype(np.float64)
+        return out
 
     def predict(self, X: np.ndarray, raw_score: bool = False, n_jobs: int = -1, strategy: str = "auto") -> np.ndarray:
         """
@@ -54,6 +105,9 @@ class Model:
             table, nulls are NaN and dictionary (categorical) columns give their category codes.
             Predictions equal those for the same float64 matrix. pandas DataFrames are converted
             with numpy; pass `pyarrow.Table.from_pandas(df)` for categorical columns.
+            CatBoost models with categorical features take their categories as strings or
+            integers: a pandas DataFrame, a numpy object array, or a list (one row) or list of
+            rows; see `categorical_features` and `catboost_hash`.
         raw_score : bool, default=False
             Whether to output raw scores (leaf values) instead of transformed predictions.
         n_jobs : int, default=-1
@@ -90,6 +144,8 @@ class Model:
                 return self._c_model.predict_arrow(schema, array, raw_score, n_jobs, strategy)
             if hasattr(X, "__arrow_c_stream__"):
                 return self._c_model.predict_arrow_stream(X.__arrow_c_stream__(), raw_score, n_jobs, strategy)
+        if self._categorical:
+            return self._c_model.predict(self._catboost_matrix(X), raw_score, n_jobs, strategy)
         X_arr = np.ascontiguousarray(X, dtype=np.float64)
         return self._c_model.predict(X_arr, raw_score, n_jobs, strategy)
 
@@ -256,6 +312,11 @@ class Model:
         return self._c_model.uses_binned
 
     @property
+    def categorical_features(self) -> list[int]:
+        """Columns that hold categories (CatBoost models with categorical features), in order."""
+        return list(self._c_model.categorical_features)
+
+    @property
     def n_features(self) -> int:
         """Minimum number of columns the input must have."""
         return self._c_model.n_features
@@ -290,10 +351,11 @@ def load(filepath: str, format: str = "auto", binned: bool = True,
     ----------
     filepath : str
         Path to the model file on disk.
-    format : {'auto', 'lignum', 'lightgbm', 'xgboost'}, default='auto'
+    format : {'auto', 'lignum', 'lightgbm', 'xgboost', 'catboost'}, default='auto'
         Library of the model. The file's own bytes tell which of its formats it is, so 'auto'
         loads a lignum `.bin`, a LightGBM `model.txt` (`save_model`) or `dump_model()` JSON,
-        and an XGBoost `.json` or `.ubj` (`save_model`). Naming the library only adds a check.
+        an XGBoost `.json` or `.ubj` (`save_model`) and a CatBoost JSON
+        (`save_model(..., format="json")`). Naming the library only adds a check.
     binned : bool, default=True
         Prepare the binned kernel: inputs are mapped once per row to integer bin codes and
         categorical decisions are precomputed, so the tree walk compares small integers. Results are identical either way; False keeps

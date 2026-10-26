@@ -4,8 +4,8 @@
 
 # lignum
 
-Fast inference for LightGBM and XGBoost models, with predictions that are **bit-identical** to the
-library that trained them.
+Fast inference for LightGBM, XGBoost and CatBoost models, with predictions that are
+**bit-identical** to the library that trained them.
 
 ```bash
 pip install pylignum
@@ -14,7 +14,7 @@ pip install pylignum
 ```python
 import lignum
 
-model = lignum.load("model.txt")    # LightGBM model.txt / JSON, XGBoost .json / .ubj
+model = lignum.load("model.txt")    # LightGBM model.txt / JSON, XGBoost .json / .ubj, CatBoost .json
 preds = model.predict(X)            # numpy array, or Arrow data (pyarrow, polars, ...)
 ```
 
@@ -36,6 +36,8 @@ The package is installed as `pylignum` and imported as `lignum`.
   ```
 
   `model.autotune(X_sample)` measures both on your data and uses each where it is faster.
+- **CatBoost with categorical features.** CTRs and combinations of categories included; categories
+  come as strings or integers from pandas, numpy object arrays or lists. One row in a few µs.
 - **Arrow input without copies.** `predict` reads pyarrow tables and batches, polars data frames and
   any object with the Arrow PyCapsule interface directly; dictionary columns are categories.
 - **C API** for services in other languages (`include/lignum/c_api.h`), with Arrow input as well.

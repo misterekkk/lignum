@@ -135,3 +135,6 @@ benchmarks/.cache/
 TASKS.md
 HANDOFF.md
 /notes/
+
+# CatBoost training logs
+catboost_info/

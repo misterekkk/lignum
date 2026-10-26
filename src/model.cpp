@@ -3,6 +3,7 @@
 #include "binned.hpp"
 #include "columns.hpp"
 #include "compiled.hpp"
+#include "catboost.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -875,6 +876,15 @@ namespace lignum {
                                             std::to_string(model.n_features) + ".");
             }
             if (n_samples == 0) return;
+
+            if (model.oblivious) {
+                with_outputs(model, n_samples, out, raw_score, [&](double* dst, bool raw) {
+                    predict_oblivious(*model.oblivious, X, n_samples, n_features, dst, resolve_threads(n_jobs), strategy);
+                    if (model.n_outputs > 1) finish_rows<double, true>(model, raw, 0, n_samples, dst);
+                    else                     finish_rows<double, false>(model, raw, 0, n_samples, dst);
+                });
+                return;
+            }
 
             // Batches use the binned kernel when available; a few rows keep the direct traversal.
             const bool binned = model.binned && n_samples >= kMinRowsForBinned;

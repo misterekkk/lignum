@@ -3,7 +3,7 @@
 <h1 align="center">lignum</h1>
 
 <p align="center">
-  Fast inference for LightGBM and XGBoost models, with predictions <b>bit-identical</b> to the library that trained them.
+  Fast inference for LightGBM, XGBoost and CatBoost models, with predictions <b>bit-identical</b> to the library that trained them.
 </p>
 
 <p align="center">
@@ -19,7 +19,7 @@ pip install pylignum
 ```python
 import lignum
 
-model = lignum.load("model.txt")    # LightGBM model.txt / JSON, XGBoost .json / .ubj
+model = lignum.load("model.txt")    # LightGBM model.txt / JSON, XGBoost .json / .ubj, CatBoost .json
 preds = model.predict(X)            # numpy array, or Arrow data (pyarrow, polars, ...)
 ```
 
@@ -34,6 +34,8 @@ Windows; Python 3.10+.
   code in a few seconds (`model.compile()`); `model.autotune(X)` picks the faster one per batch size.
 - **Instant start.** `model.save("model.bin")` writes a binary file that loads by memory mapping in
   under a millisecond.
+- **CatBoost included.** Categorical features, CTRs and their combinations, bit-exact; one row from a
+  list in ~7 µs, CatBoost itself takes ~50 µs ([details](https://misterekkk.github.io/lignum/guides/catboost/)).
 - **Arrow and C.** `predict` reads pyarrow, polars and any Arrow PyCapsule object without copies;
   a C API (`include/lignum/c_api.h`) serves other languages.
 

@@ -1,7 +1,9 @@
 #include <lignum/lignum.hpp>
+#include "catboost.hpp"
 #include "columns.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstring>
 #include <exception>
@@ -132,6 +134,158 @@ namespace lignum {
             return c;
         }
 
+        // Strings of an Arrow utf8 ('u'), large_utf8 ('U') or utf8_view ('vu') array, or binary
+        // ('z', 'Z', 'vz') bytes, read in place.
+        struct Strings {
+            char kind = 0;  // 'u': int32 offsets, 'U': int64 offsets, 'v': 16-byte views
+            const uint8_t* validity = nullptr;
+            const int32_t* offsets32 = nullptr;
+            const int64_t* offsets64 = nullptr;
+            const char* data = nullptr;
+            const uint8_t* views = nullptr;
+            const ArrowArray* array = nullptr;
+            int64_t offset = 0;
+
+            bool valid(int64_t i) const {
+                const int64_t k = offset + i;
+                return !validity || ((validity[k >> 3] >> (k & 7)) & 1);
+            }
+
+            std::string_view at(int64_t i) const {
+                const int64_t k = offset + i;
+                if (kind == 'u') return {data + offsets32[k], static_cast<size_t>(offsets32[k + 1] - offsets32[k])};
+                if (kind == 'U') return {data + offsets64[k], static_cast<size_t>(offsets64[k + 1] - offsets64[k])};
+                // View: int32 length; up to 12 bytes inline, else prefix, buffer index, offset.
+                const uint8_t* view = views + 16 * k;
+                int32_t length, buffer, start;
+                std::memcpy(&length, view, 4);
+                if (length <= 12) return {reinterpret_cast<const char*>(view + 4), static_cast<size_t>(length)};
+                std::memcpy(&buffer, view + 8, 4);
+                std::memcpy(&start, view + 12, 4);
+                if (buffer < 0 || 2 + buffer >= array->n_buffers - 1) throw std::invalid_argument("Malformed Arrow string view.");
+                return {static_cast<const char*>(array->buffers[2 + buffer]) + start, static_cast<size_t>(length)};
+            }
+        };
+
+        bool strings_of(const char* format, const ArrowArray& array, int64_t batch_offset, Strings& s) {
+            if (!format) return false;
+            const std::string_view f(format);
+            if (f == "u" || f == "z") s.kind = 'u';
+            else if (f == "U" || f == "Z") s.kind = 'U';
+            else if (f == "vu" || f == "vz") s.kind = 'v';
+            else return false;
+            if (array.n_buffers < (s.kind == 'v' ? 2 : 3)) throw std::invalid_argument("Malformed Arrow string array.");
+            s.offset = batch_offset + array.offset;
+            s.validity = array.null_count == 0 ? nullptr : static_cast<const uint8_t*>(array.buffers[0]);
+            s.array = &array;
+            if (s.kind == 'v') {
+                s.views = static_cast<const uint8_t*>(array.buffers[1]);
+            } else {
+                if (s.kind == 'u') s.offsets32 = static_cast<const int32_t*>(array.buffers[1]);
+                else               s.offsets64 = static_cast<const int64_t*>(array.buffers[1]);
+                s.data = static_cast<const char*>(array.buffers[2]);
+            }
+            return true;
+        }
+
+        // CatBoost hashes integer categories as their decimal text.
+        template <typename T>
+        uint32_t integer_hash(T value) {
+            char text[32];
+            const auto [end, ec] = std::to_chars(text, text + sizeof(text), value);
+            (void)ec;
+            return catboost_hash(std::string_view(text, static_cast<size_t>(end - text)));
+        }
+
+        bool is_integer(Kind k) {
+            return k == Kind::Int8 || k == Kind::UInt8 || k == Kind::Int16 || k == Kind::UInt16 || k == Kind::Int32 ||
+                   k == Kind::UInt32 || k == Kind::Int64 || k == Kind::UInt64;
+        }
+
+        // Hash of element i of an integer column (exact for 64-bit values, unlike Column::value).
+        uint32_t integer_hash_at(const Column& c, int64_t i) {
+            const int64_t k = c.offset + i;
+            switch (c.kind) {
+                case Kind::Int8:   return integer_hash(static_cast<int>(static_cast<const int8_t*>(c.data)[k]));
+                case Kind::UInt8:  return integer_hash(static_cast<unsigned>(static_cast<const uint8_t*>(c.data)[k]));
+                case Kind::Int16:  return integer_hash(static_cast<int>(static_cast<const int16_t*>(c.data)[k]));
+                case Kind::UInt16: return integer_hash(static_cast<unsigned>(static_cast<const uint16_t*>(c.data)[k]));
+                case Kind::Int32:  return integer_hash(static_cast<const int32_t*>(c.data)[k]);
+                case Kind::UInt32: return integer_hash(static_cast<const uint32_t*>(c.data)[k]);
+                case Kind::Int64:  return integer_hash(static_cast<const int64_t*>(c.data)[k]);
+                case Kind::UInt64: return integer_hash(static_cast<const uint64_t*>(c.data)[k]);
+                default:           return 0;
+            }
+        }
+
+        // A categorical column of a CatBoost model: strings, integers, or a dictionary of either
+        // (hashed once per dictionary value). Values become CatBoost's category hashes.
+        struct CatColumn {
+            Strings strings;               // kind != 0: a string column
+            Column integers;               // otherwise: integers, or the indices of a dictionary
+            std::vector<double> dictionary;  // hashes of the dictionary values (dictionary columns)
+            std::string name;
+
+            [[noreturn]] void missing() const {
+                throw std::invalid_argument("Categorical " + name + " has nulls; CatBoost needs a category in every row.");
+            }
+
+            double hash(int64_t i) const {
+                if (strings.kind) {
+                    if (!strings.valid(i)) missing();
+                    return static_cast<double>(catboost_hash(strings.at(i)));
+                }
+                if (!integers.valid(integers.offset + i)) missing();
+                if (dictionary.empty()) return static_cast<double>(integer_hash_at(integers, i));
+                const double index = integers.value(i);
+                if (!(index >= 0 && index < static_cast<double>(dictionary.size()))) {
+                    throw std::invalid_argument("Dictionary index out of range in " + name + ".");
+                }
+                const double h = dictionary[static_cast<size_t>(index)];
+                if (h < 0) missing();  // a null dictionary value
+                return h;
+            }
+        };
+
+        CatColumn cat_column(const ArrowSchema& schema, const ArrowArray& array, int64_t batch_offset, size_t j) {
+            CatColumn c;
+            c.name = column_name(schema, j);
+            const auto unsupported = [&] {
+                return std::invalid_argument("Categorical " + c.name + " must hold strings, integers or a dictionary of them (got Arrow type '" +
+                                             std::string(schema.format ? schema.format : "") + "').");
+            };
+            if (schema.dictionary) {
+                if (!array.dictionary) throw std::invalid_argument("Missing Arrow dictionary in " + c.name + ".");
+                if (!kind_of(schema.format, c.integers.kind) || !is_integer(c.integers.kind)) throw unsupported();
+                if (array.n_buffers < 2) throw std::invalid_argument("Malformed Arrow array in " + c.name + ".");
+                c.integers.offset = batch_offset + array.offset;
+                c.integers.validity = array.null_count == 0 ? nullptr : static_cast<const uint8_t*>(array.buffers[0]);
+                c.integers.data = array.buffers[1];
+                const ArrowArray& dict = *array.dictionary;
+                Strings values;
+                Column ints;
+                c.dictionary.resize(static_cast<size_t>(std::max<int64_t>(dict.length, 0)));
+                if (strings_of(schema.dictionary->format, dict, 0, values)) {
+                    for (int64_t k = 0; k < dict.length; k++) {
+                        c.dictionary[static_cast<size_t>(k)] = values.valid(k) ? static_cast<double>(catboost_hash(values.at(k))) : -1.0;
+                    }
+                } else if (kind_of(schema.dictionary->format, ints.kind) && is_integer(ints.kind) && dict.n_buffers >= 2) {
+                    ints.offset = dict.offset;
+                    ints.validity = dict.null_count == 0 ? nullptr : static_cast<const uint8_t*>(dict.buffers[0]);
+                    ints.data = dict.buffers[1];
+                    for (int64_t k = 0; k < dict.length; k++) c.dictionary[static_cast<size_t>(k)] = static_cast<double>(integer_hash_at(ints, k));
+                } else {
+                    throw unsupported();
+                }
+                if (c.dictionary.empty()) c.dictionary.push_back(-1.0);  // keeps the dictionary path for an empty dictionary
+                return c;
+            }
+            if (strings_of(schema.format, array, batch_offset, c.strings)) return c;
+            if (!kind_of(schema.format, c.integers.kind) || !is_integer(c.integers.kind)) throw unsupported();
+            c.integers = column(schema, array, batch_offset, j);
+            return c;
+        }
+
         int threads_for(int n_jobs) {
         #ifdef _OPENMP
             return n_jobs > 0 ? n_jobs : omp_get_max_threads();
@@ -177,13 +331,18 @@ namespace lignum {
         if (n <= 0) return;
 
         // Features are the first n_features columns, by position (like the columns of a matrix).
+        // Categorical columns of CatBoost models become category hashes.
+        std::vector<char> is_cat(nf, 0);
+        if (model.oblivious) for (uint32_t c : model.oblivious->cat_columns) is_cat[c] = 1;
         std::vector<Column> columns(nf);
+        std::vector<CatColumn> cats(nf);
         for (size_t j = 0; j < nf; j++) {
             if (!schema.children[j] || !batch.children[j]) throw std::invalid_argument("Missing Arrow column " + std::to_string(j) + ".");
             if (batch.children[j]->length < batch.offset + n) {
                 throw std::invalid_argument("Arrow " + column_name(*schema.children[j], j) + " is shorter than the batch.");
             }
-            columns[j] = column(*schema.children[j], *batch.children[j], batch.offset, j);
+            if (is_cat[j]) cats[j] = cat_column(*schema.children[j], *batch.children[j], batch.offset, j);
+            else           columns[j] = column(*schema.children[j], *batch.children[j], batch.offset, j);
         }
         // A null row of the batch itself: all its features are missing.
         Column rows;
@@ -208,7 +367,13 @@ namespace lignum {
             for (int64_t t = 0; t < count; t += tile_rows) {
                 const int64_t rows_in_tile = std::min(tile_rows, count - t);
                 double* tile = X.data() + static_cast<size_t>(t) * nf;
-                for (size_t j = 0; j < nf; j++) fill(columns[j], start + t, rows_in_tile, tile + j, nf);
+                for (size_t j = 0; j < nf; j++) {
+                    if (!is_cat[j]) {
+                        fill(columns[j], start + t, rows_in_tile, tile + j, nf);
+                        continue;
+                    }
+                    for (int64_t i = 0; i < rows_in_tile; i++) tile[static_cast<size_t>(i) * nf + j] = cats[j].hash(start + t + i);
+                }
             }
             if (rows.validity) {
                 for (int64_t i = 0; i < count; i++) {

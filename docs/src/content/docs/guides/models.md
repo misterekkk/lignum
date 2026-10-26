@@ -1,6 +1,6 @@
 ---
 title: Model files
-description: Which LightGBM and XGBoost files lignum reads, and the binary format for production.
+description: Which LightGBM, XGBoost and CatBoost files lignum reads, and the binary format for production.
 ---
 
 `lignum.load(path)` recognises a file by its contents, not by its name:
@@ -11,10 +11,12 @@ description: Which LightGBM and XGBoost files lignum reads, and the binary forma
 | LightGBM | JSON | `json.dump(booster.dump_model(), f)` |
 | XGBoost | JSON | `booster.save_model("model.json")` |
 | XGBoost | UBJSON | `booster.save_model("model.ubj")` |
+| CatBoost | JSON | `model.save_model("model.json", format="json")` |
 | lignum | `.bin` | `model.save("model.bin")` |
 
-Every source gives the same model and the same, bit-identical predictions. `format="lightgbm"` or
-`format="xgboost"` only adds a check that the file comes from that library.
+Every source gives the same model and the same, bit-identical predictions. `format="lightgbm"`,
+`format="xgboost"` or `format="catboost"` only adds a check that the file comes from that library.
+CatBoost models have their own page: [CatBoost](../catboost/).
 
 ```python
 model = lignum.load("model.txt")                    # LightGBM

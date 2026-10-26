@@ -43,6 +43,7 @@ test = [
     "scikit-learn",
     "pandas",
     "pyarrow",
+    "catboost",
 ]
 
 [tool.scikit-build]

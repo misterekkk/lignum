@@ -19,7 +19,7 @@ export default defineConfig({
         { label: 'Start', items: ['guides/getting-started'] },
         {
           label: 'Guides',
-          items: ['guides/models', 'guides/predicting', 'guides/arrow', 'guides/compiled', 'guides/c-api'],
+          items: ['guides/models', 'guides/predicting', 'guides/catboost', 'guides/arrow', 'guides/compiled', 'guides/c-api'],
         },
         { label: 'Concepts', items: ['concepts/exactness', 'concepts/internals'] },
         { label: 'Benchmarks', items: ['benchmarks'] },

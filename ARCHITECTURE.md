@@ -144,6 +144,36 @@ command), linked, cached by source hash and loaded with dlopen / LoadLibrary. Th
 `lignum_abi` and `lignum_fingerprint` (FNV-1a of trees, cuts, leaves, outputs, precision), checked by
 `load_compiled`.
 
+## CatBoost (src/catboost.*)
+
+CatBoost models do not go through the KNode IR. `parsers::load_catboost_json` builds an
+`ObliviousForest` (held by `Model::oblivious`) and `Model::predict` sends them to its own kernel;
+output transforms are shared with the other models.
+
+- **Input**: float features as usual. A categorical column holds the category's CatBoost hash as a
+  double: `CityHash64(utf8) & 0xffffffff`, using the CityHash release in CatBoost's
+  `util/digest/city.cpp` (later releases differ above 64 bytes). Integer categories are hashed as
+  decimal text. The Python layer hashes strings and integers in C++. `predict_arrow` hashes
+  `string` / `large_string` / `string_view` and integer columns in place, and dictionaries once
+  per batch (nulls are rejected, as CatBoost does).
+- **Phase 1, per block of up to 128 rows**: every *source* gets a 16-bit bucket per row, stored
+  column-major:
+  - float feature: the number of borders below the float32 value; NaN gets 0, or every border with
+    `AsTrue` (`nan_mode=Max`);
+  - one-hot feature: 1 + index of the matching value;
+  - CTR: hash the combination with CatBoost's `CalcHash`: categories (sign-extended int32), then
+    binarised floats, then one-hot equalities. Look it up in the projection's tables (open
+    addressing). The bucket of every table entry was computed at load time with CatBoost's float
+    formula `((count + prior) / (total + prior_denom) + shift) * scale`; combinations missing from
+    the table get the bucket of the empty statistics.
+- **Phase 2, per tree**: a symmetric tree is one node. The leaf index is
+  `Σ (bucket[src_d] >= t_d) << d` (`==` for one-hot) over the block, branch-free and vectorisable.
+  Leaves are added in model order in double, then `scale * sum + bias`.
+- **Verification**: bit-exact against CatBoost on binary and regression models (`tests/python/test_catboost.py`).
+  Covered: CTR complexity 1-4, every CPU CTR type, NaN modes, more than 255 borders, unseen
+  categories and CityHash for every length branch. CatBoost's own JSON loader is lossy, so the
+  reference is the trained / `.cbm` model.
+
 ## Arrow input (src/arrow.cpp, src/columns.hpp)
 
 `predict_arrow` takes a record batch through the Arrow C Data Interface (`include/lignum/arrow.h`).
@@ -167,4 +197,5 @@ their indices.
 ## Known limitations
 
 No multi-target / vector-leaf models, no LightGBM linear trees or random forests (rejected at load
-time).
+time). CatBoost has a separate list of missing pieces: `.cbm`, multiclass, non-symmetric trees,
+text/embedding features, Arrow input and `.bin` (see the CatBoost guide).

@@ -8,6 +8,7 @@ add_executable(lignum_tests
     test_fuzz.cpp
     test_compiled.cpp
     test_arrow.cpp
+    test_catboost.cpp
 )
 
 target_link_libraries(lignum_tests PRIVATE lignum GTest::gtest_main)
