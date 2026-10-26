@@ -1,6 +1,7 @@
 #include <lignum/model.hpp>
 #include "io.hpp"
 #include "binned.hpp"
+#include "catboost.hpp"
 #include "validate.hpp"
 
 #include <fstream>
@@ -75,6 +76,7 @@ namespace lignum {
             constexpr uint8_t Float32 = 1 << 0;
             constexpr uint8_t SpecialTrees = 1 << 1;
             constexpr uint8_t Binned = 1 << 2;  // a BinnedFileHeader and its sections follow
+            constexpr uint8_t Oblivious = 1 << 3;  // CatBoost: no KNodes, the ObliviousForest arrays follow (version 0.7)
         } // namespace header_flags
 
         // Binned sections, in file order: (pointer, element size, element count).
@@ -178,11 +180,25 @@ namespace lignum {
     };
 
     void Model::save(const std::string& filepath) const {
-        if (oblivious) throw std::runtime_error("Saving CatBoost models in the lignum binary format is not supported yet.");
         std::ofstream out(filepath, std::ios::binary);
         if (!out) throw std::runtime_error("Can't save the file.");
 
         FileHeader header;
+        if (oblivious) {
+            // Version 0.7 only for CatBoost models, so older lignum versions reject them instead
+            // of reading an empty forest; other models stay 0.6.
+            header.version_minor = 7;
+            header.flags = header_flags::Oblivious;
+            header.n_outputs = static_cast<uint16_t>(n_outputs);
+            header.transform = transform;
+            header.sigmoid = sigmoid;
+            header.n_features = n_features;
+            out.write(reinterpret_cast<const char*>(&header), sizeof(FileHeader));
+            padded_write(out, reinterpret_cast<const char*>(base_scores), n_outputs * sizeof(double));
+            save_oblivious(out, *oblivious);
+            if (!out) throw std::runtime_error("Failed to write the model file.");
+            return;
+        }
         header.n_outputs = static_cast<uint16_t>(n_outputs);
         header.n_cat_words = n_cat_words;
         header.sigmoid = sigmoid;
@@ -242,7 +258,8 @@ namespace lignum {
             throw std::runtime_error("Endianness mismatch.");
         }
 
-        if (header.version_major != 0 || header.version_minor != 6) {
+        const bool is_oblivious = (header.flags & header_flags::Oblivious) != 0;
+        if (header.version_major != 0 || header.version_minor != (is_oblivious ? 7 : 6)) {
             throw std::runtime_error("Unsupported lignum binary format version " + std::to_string(header.version_major) + "." +
                                      std::to_string(header.version_minor) + "; re-export the model from JSON.");
         }
@@ -254,6 +271,26 @@ namespace lignum {
                                      header.n_cat_words * sizeof(uint32_t);
         if (header.n_outputs == 0) {
             throw std::runtime_error("Binary file declares zero outputs.");
+        }
+        if (is_oblivious) {
+            // CatBoost: the header, the bias (as base scores) and the forest arrays.
+            const size_t start = sizeof(FileHeader) + align(header.n_outputs * sizeof(double));
+            if (header.n_nodes || header.n_offsets || header.n_leaves || header.n_cat_words || binary_data->size < start) {
+                throw std::runtime_error("Binary file is truncated or corrupted.");
+            }
+            auto forest = load_oblivious(binary_data->data, binary_data->size, start);
+            if (forest->dim != header.n_outputs || forest->n_columns != header.n_features || header.transform > transform::Argmax) {
+                throw std::runtime_error("Binary file is truncated or corrupted.");
+            }
+            Model model;
+            model.n_outputs = header.n_outputs;
+            model.transform = header.transform;
+            model.sigmoid = header.sigmoid;
+            model.n_features = header.n_features;
+            model.base_scores = forest->bias.data();
+            model.oblivious = forest;
+            model.data = forest;
+            return model;
         }
         if (binary_data->size < expected_size) {
             throw std::runtime_error("Binary file is truncated or corrupted.");

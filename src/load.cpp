@@ -15,7 +15,7 @@ namespace lignum {
 
     namespace {
 
-        enum class FileKind { Lignum, LightGBMJson, XGBoostJson, CatBoostJson, Ubjson, LightGBMText, Unknown };
+        enum class FileKind { Lignum, LightGBMJson, XGBoostJson, CatBoostJson, CatBoostCbm, Ubjson, LightGBMText, Unknown };
 
         // Recognises a model file by its first bytes, not its name: lignum's magic; JSON (an
         // object whose first key follows '{'), XGBoost's when "learner" appears early, CatBoost's
@@ -29,6 +29,7 @@ namespace lignum {
             file.read(head.data(), static_cast<std::streamsize>(head.size()));
             head.resize(static_cast<size_t>(file.gcount()));
             if (head.rfind("LIGNUM", 0) == 0) return FileKind::Lignum;
+            if (head.rfind("CBM1", 0) == 0) return FileKind::CatBoostCbm;
             size_t i = head.find_first_not_of(" \t\r\n");
             if (i == std::string::npos) return FileKind::Unknown;
             if (head[i] == '{') {
@@ -84,6 +85,9 @@ namespace lignum {
             case FileKind::CatBoostJson:
                 if (lightgbm || xgboost || lignum) break;
                 return parsers::load_catboost_json(filepath);
+            case FileKind::CatBoostCbm:
+                if (lightgbm || xgboost || lignum) break;
+                return parsers::load_catboost_cbm(filepath);
             case FileKind::Lignum:
                 if (lightgbm || xgboost || catboost) throw std::invalid_argument("This is a lignum binary model; load it with format='auto'.");
                 return load_binary(filepath, binned);
@@ -103,7 +107,7 @@ namespace lignum {
                 break;
         }
         throw std::invalid_argument("Unrecognised model file " + filepath + " for format '" + fmt +
-                                    "': expected a lignum .bin, LightGBM model.txt or dump_model() JSON, or XGBoost JSON / UBJSON.");
+                                    "': expected a lignum .bin, LightGBM model.txt or dump_model() JSON, XGBoost JSON / UBJSON, or CatBoost JSON / .cbm.");
     }
 
     } // namespace

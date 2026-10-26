@@ -146,9 +146,20 @@ command), linked, cached by source hash and loaded with dlopen / LoadLibrary. Th
 
 ## CatBoost (src/catboost.*)
 
-CatBoost models do not go through the KNode IR. `parsers::load_catboost_json` builds an
-`ObliviousForest` (held by `Model::oblivious`) and `Model::predict` sends them to its own kernel;
-output transforms are shared with the other models.
+CatBoost models do not go through the KNode IR. The JSON and `.cbm` readers fill a neutral `Spec`.
+`build_model` turns it into an `ObliviousForest` (held by `Model::oblivious`), and `Model::predict`
+sends such models to their own kernel.
+
+- **`.cbm`**: `"CBM1"`, a size (`ui32`, or `0xffffffff` + `ui64`), the `TModelCore` FlatBuffer,
+  then the CTR tables. The tables are a count, then a size and a `TCtrValueTable` FlatBuffer each:
+  packed 12-byte `TBucket {ui64 hash; ui32 index}` plus a blob of int counts, or `{float sum; int
+  count}` for mean CTRs. A small bounds-checked reader (`Flat`, `FlatTable`) replaces the
+  flatbuffers library.
+- **`.bin`**: version 0.7 with the `Oblivious` flag, used only for CatBoost models. The header, the
+  bias, then the forest as 64-byte aligned arrays, each with an 8-byte count. Loading copies them
+  and checks every index (`validate`). Other models are still written as 0.6.
+- **Rows**: fewer than 4 rows take `predict_row` (scalar, no per-split loop over rows; one row is
+  2.8 µs instead of 6.4 for 500 trees). Larger batches use the block kernel below.
 
 - **Input**: float features as usual. A categorical column holds the category's CatBoost hash as a
   double: `CityHash64(utf8) & 0xffffffff`, using the CityHash release in CatBoost's
@@ -177,6 +188,9 @@ output transforms are shared with the other models.
     off by 1 ulp at two entries. Windows uses correctly rounded constants, which match CatBoost's
     Windows build;
   - other platforms: `std::exp`.
+  The softmax (`MultiClass`) subtracts the maximum, applies the same exp and divides by the sum. On
+  x86, elements in full SIMD groups (4 with AVX2, 2 with SSE2, detected like CatBoost) clamp the
+  argument; the rest use fmath's scalar `expd`, which returns exactly 0 below -708.4.
 - **Verification**: bit-exact against CatBoost on binary and regression models (`tests/python/test_catboost.py`).
   Covered: CTR complexity 1-4, every CPU CTR type, NaN modes, more than 255 borders, unseen
   categories and CityHash for every length branch. CatBoost's own JSON loader is lossy, so the
@@ -205,5 +219,4 @@ their indices.
 ## Known limitations
 
 No multi-target / vector-leaf models, no LightGBM linear trees or random forests (rejected at load
-time). CatBoost has a separate list of missing pieces: `.cbm`, multiclass, non-symmetric trees,
-text/embedding features, Arrow input and `.bin` (see the CatBoost guide).
+time). CatBoost: no non-symmetric trees and no text or embedding features (see the CatBoost guide).

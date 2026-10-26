@@ -1,4 +1,4 @@
-"""Bit-exact parity with CatBoost (symmetric trees, categorical features, CTRs).
+"""Bit-exact parity with CatBoost (symmetric trees, categorical features, CTRs), from JSON and .cbm.
 
 References are the trained models themselves (the same as `.cbm`): CatBoost's own JSON loader
 rounds leaf values, so a model loaded back from JSON into CatBoost predicts slightly differently.
@@ -40,6 +40,11 @@ def cat_names(df):
     return [c for c in df.columns if c.startswith("c")]
 
 
+@pytest.fixture(params=["json", "cbm", "bin"])
+def model_format(request):
+    return request.param
+
+
 def probe_rows(df, model_json):
     """Rows that exercise unseen categories, NaN and values exactly on float borders."""
     t = df.iloc[:1500].copy()
@@ -47,7 +52,7 @@ def probe_rows(df, model_json):
     t.loc[t.index[:100], cats[-1]] = "never seen"
     t.loc[t.index[100:150], cats[0]] = "unseen too"
     t.loc[t.index[150:200], "x0"] = np.nan
-    for f in model_json["features_info"].get("float_features", []):
+    for f in (model_json or {}).get("features_info", {}).get("float_features", []):
         borders = f.get("borders") or []
         if borders:
             col = df.columns[f["flat_feature_index"]]
@@ -55,23 +60,29 @@ def probe_rows(df, model_json):
     return t
 
 
-def train(model_cls, df, y, tmp_path, **params):
+def train(model_cls, df, y, tmp_path, fmt="json", **params):
+    """Trains, saves as JSON, .cbm and lignum's .bin; returns the model, the path in `fmt` and the parsed JSON."""
     params = {"iterations": 40, "depth": 5, "verbose": 0, "allow_writing_files": False, "random_seed": 0, "thread_count": 2, **params}
     m = model_cls(cat_features=cat_names(df), **params)
     m.fit(df, y)
-    path = tmp_path / "model.json"
-    m.save_model(str(path), format="json")
-    return m, path, json.loads(path.read_text())
+    m.save_model(str(tmp_path / "model.cbm"))
+    try:
+        m.save_model(str(tmp_path / "model.json"), format="json")
+        j = json.loads((tmp_path / "model.json").read_text())
+    except cb.CatBoostError:  # multiclass models have no JSON form
+        j = None
+    lignum.load(tmp_path / "model.cbm").save(str(tmp_path / "model.bin"))
+    return m, tmp_path / f"model.{fmt}", j
 
 
 @pytest.mark.parametrize("complexity", [1, 2, 4])
 @pytest.mark.parametrize("one_hot", [2, 10])
 @pytest.mark.parametrize("depth", [1, 4, 7])
-def test_binary(tmp_path, complexity, one_hot, depth):
+def test_binary(tmp_path, complexity, one_hot, depth, model_format):
     rng = np.random.default_rng(complexity * 100 + one_hot * 10 + depth)
     df, signal = make_frame(rng)
     y = (signal + rng.normal(size=len(df)) > 0.5).astype(int)
-    m, path, j = train(cb.CatBoostClassifier, df, y, tmp_path, depth=depth, max_ctr_complexity=complexity, one_hot_max_size=one_hot)
+    m, path, j = train(cb.CatBoostClassifier, df, y, tmp_path, model_format, depth=depth, max_ctr_complexity=complexity, one_hot_max_size=one_hot)
     t = probe_rows(df, j)
     model = lignum.load(path)
     assert model.is_catboost if hasattr(model, "is_catboost") else True
@@ -81,13 +92,13 @@ def test_binary(tmp_path, complexity, one_hot, depth):
 
 @pytest.mark.parametrize("loss", ["RMSE", "Poisson", "MAE"])
 @pytest.mark.parametrize("ctrs", [["Borders"], ["Buckets"], ["Counter", "BinarizedTargetMeanValue"]])
-def test_regression(tmp_path, loss, ctrs):
+def test_regression(tmp_path, loss, ctrs, model_format):
     rng = np.random.default_rng(len(loss) + len(ctrs))
     df, signal = make_frame(rng)
     y = np.exp(signal / 3) if loss == "Poisson" else signal * 10 + 3
     if loss == "Poisson":
         y = np.round(y)
-    m, path, j = train(cb.CatBoostRegressor, df, y, tmp_path, loss_function=loss, simple_ctr=ctrs, combinations_ctr=ctrs)
+    m, path, j = train(cb.CatBoostRegressor, df, y, tmp_path, model_format, loss_function=loss, simple_ctr=ctrs, combinations_ctr=ctrs)
     if loss == "RMSE":
         assert j["scale_and_bias"][1][0] != 0  # boost_from_average: a bias to add
     t = probe_rows(df, j)
@@ -97,13 +108,13 @@ def test_regression(tmp_path, loss, ctrs):
 
 
 @pytest.mark.parametrize("nan_mode", ["Min", "Max"])
-def test_nan_modes_and_many_borders(tmp_path, nan_mode):
+def test_nan_modes_and_many_borders(tmp_path, nan_mode, model_format):
     rng = np.random.default_rng(7)
     df, _ = make_frame(rng, cards=(5,))
     df.loc[rng.random(len(df)) < 0.2, "x1"] = np.nan
     y = np.sin(6 * df.x0) + df.x0 + np.nan_to_num(df.x1, nan=2.0) + (df.c0 == "v0_1")
     # More than 255 borders in use needs 16-bit buckets.
-    m, path, j = train(cb.CatBoostRegressor, df, y, tmp_path, nan_mode=nan_mode, border_count=1024, iterations=400, depth=6)
+    m, path, j = train(cb.CatBoostRegressor, df, y, tmp_path, model_format, nan_mode=nan_mode, border_count=1024, iterations=400, depth=6)
     assert max(len(f.get("borders") or []) for f in j["features_info"]["float_features"]) > 255
     t = probe_rows(df, j)
     np.testing.assert_array_equal(lignum.load(path).predict(t, raw_score=True), m.predict(t, prediction_type="RawFormulaVal"))
@@ -198,8 +209,6 @@ def test_errors(tmp_path):
         model.predict(np.zeros((2, df.shape[1])))
     with pytest.raises(RuntimeError, match="no compiled mode"):
         model.compile()
-    with pytest.raises(RuntimeError, match="not supported yet"):
-        model.save(str(tmp_path / "model.bin"))
 
     lossguide = cb.CatBoostClassifier(iterations=5, depth=3, verbose=0, allow_writing_files=False, grow_policy="Lossguide", cat_features=["c0"])
     lossguide.fit(df, y)
@@ -256,3 +265,34 @@ def test_arrow_input(tmp_path):
     np.testing.assert_array_equal(model.predict(frame), want)
     categorical = frame.with_columns(pl.col("c0").cast(pl.Categorical), pl.col("c2").cast(pl.Categorical))
     np.testing.assert_array_equal(model.predict(categorical), want)
+
+
+@pytest.mark.parametrize("loss", ["MultiClass", "MultiClassOneVsAll"])
+@pytest.mark.parametrize("complexity", [1, 3])
+@pytest.mark.parametrize("fmt", ["cbm", "bin"])
+def test_multiclass(tmp_path, loss, complexity, fmt):
+    """Only .cbm can hold multiclass models; CTRs over more than two classes count by target border."""
+    rng = np.random.default_rng(complexity + len(loss))
+    df, signal = make_frame(rng)
+    y = np.digitize(signal + rng.normal(size=len(df)) * 0.5, [0.3, 1.0, 1.8])  # 4 classes
+    m, path, _ = train(cb.CatBoostClassifier, df, y, tmp_path, fmt, loss_function=loss, max_ctr_complexity=complexity)
+    t = probe_rows(df, None)
+    model = lignum.load(path)
+    assert model.n_outputs == 4
+    np.testing.assert_array_equal(model.predict(t, raw_score=True), m.predict(t, prediction_type="RawFormulaVal"))
+    np.testing.assert_array_equal(model.predict(t), m.predict_proba(t))
+    for i in range(5):
+        np.testing.assert_array_equal(model.predict(t.iloc[i:i + 1]), m.predict_proba(t.iloc[i:i + 1]))
+
+
+def test_cbm_matches_json_and_loads_fast(tmp_path):
+    rng = np.random.default_rng(23)
+    df, signal = make_frame(rng)
+    m, path, j = train(cb.CatBoostClassifier, df, (signal > 0.5).astype(int), tmp_path, "cbm", iterations=200, max_ctr_complexity=4)
+    t = probe_rows(df, j)
+    from_cbm, from_json = lignum.load(path), lignum.load(tmp_path / "model.json")
+    np.testing.assert_array_equal(from_cbm.predict(t), from_json.predict(t))
+    np.testing.assert_array_equal(from_cbm.predict(t), m.predict_proba(t)[:, 1])
+    assert from_cbm.categorical_features == from_json.categorical_features
+    with pytest.raises(ValueError, match="CatBoost JSON / .cbm"):
+        lignum.load(path, format="lightgbm")

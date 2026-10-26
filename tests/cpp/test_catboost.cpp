@@ -3,8 +3,10 @@
 #include "catboost.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <random>
 #include <string>
@@ -70,7 +72,6 @@ TEST(CatBoost, HandMadeModel) {
     const std::vector<double> bad = {1.0, 0.5};
     std::vector<double> out(1);
     EXPECT_THROW(model.predict_raw(bad.data(), 1, 2, out.data(), 1), std::invalid_argument);
-    EXPECT_THROW(model.save(write_temp("catboost.bin", "")), std::runtime_error);
 }
 
 TEST(CatBoost, CorruptedFilesAreRejectedOrSafe) {
@@ -99,4 +100,100 @@ TEST(CatBoost, CorruptedFilesAreRejectedOrSafe) {
         }
     }
     EXPECT_GT(loaded, 0);
+}
+
+namespace {
+
+    const unsigned char kSmallCbm[] = {
+        #include "catboost_small_cbm.inc"
+    };
+
+    std::string small_cbm() { return std::string(reinterpret_cast<const char*>(kSmallCbm), sizeof(kSmallCbm)); }
+
+} // namespace
+
+// The fixture was written with (CatBoost 1.2.10, numpy rng seed 0):
+//   n = 600; df = DataFrame({"x0": normal(n), "c0": choice(["a","b","c","d"], n), "c1": choice(["u","v"], n)})
+//   y = (x0 > 0) ^ c0 in {a, b}
+//   CatBoostClassifier(iterations=6, depth=3, random_seed=0, cat_features=["c0","c1"],
+//                      max_ctr_complexity=2, border_count=8).fit(df, y).save_model("small.cbm")
+// and the expected values are CatBoost's predict(..., prediction_type="RawFormulaVal").
+TEST(CatBoost, CbmModel) {
+    const auto model = lignum::load(write_temp("catboost_small.cbm", small_cbm()));
+    ASSERT_TRUE(model.oblivious);
+    EXPECT_EQ(model.n_features, 3u);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const std::vector<double> X = {0.5, hash_of("a"), hash_of("u"), -1.2, hash_of("b"), hash_of("v"),
+                                   2.0, hash_of("zz"), hash_of("u"), nan, hash_of("d"), hash_of("v")};
+    EXPECT_EQ(lignum::test::predict_raw(model, X, 3),
+              (std::vector<double>{-0x1.60f24937c833cp-1, 0x1.fdeff1ed31a48p-1, 0x1.88198b1cbd9bcp-1, -0x1.5351ebab1a63cp+0}));
+}
+
+TEST(CatBoost, CorruptedCbmFilesAreRejectedOrSafe) {
+    const std::string original = small_cbm();
+    const auto path = (std::filesystem::temp_directory_path() / "lignum_fuzz_catboost.cbm").string();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const std::vector<double> X = {0.5, hash_of("a"), hash_of("u"), -1.2, hash_of("b"), hash_of("v"),
+                                   2.0, hash_of("zz"), hash_of("u"), nan, hash_of("d"), hash_of("v")};
+    std::mt19937 rng(9001);
+    int loaded = 0;
+    for (int iteration = 0; iteration < 3000; iteration++) {
+        std::string mutated = original;
+        const int flips = 1 + static_cast<int>(rng() % 8);
+        for (int k = 0; k < flips; k++) {
+            const size_t pos = rng() % mutated.size();
+            mutated[pos] = (rng() % 3 == 0) ? static_cast<char>(mutated[pos] ^ (1 << (rng() % 8))) : static_cast<char>(rng());
+        }
+        if (rng() % 10 == 0) mutated.resize(rng() % mutated.size());
+        std::ofstream(path, std::ios::binary).write(mutated.data(), static_cast<std::streamsize>(mutated.size()));
+        try {
+            const auto model = lignum::load(path, "catboost");
+            if (model.n_features > 3) continue;
+            std::vector<double> out(4 * model.output_width(false));
+            model.predict(X.data(), 4, 3, out.data(), 1);
+            loaded++;
+        } catch (const std::exception&) {
+            // Rejected: fine.
+        }
+    }
+    EXPECT_GT(loaded, 0);
+}
+
+TEST(CatBoost, BinaryFormatRoundTripAndCorruption) {
+    const auto model = lignum::load(write_temp("catboost_small2.cbm", small_cbm()));
+    const auto saved = (std::filesystem::temp_directory_path() / "lignum_catboost_small.bin").string();
+    model.save(saved);
+    const auto loaded = lignum::load(saved);
+    ASSERT_TRUE(loaded.oblivious);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const std::vector<double> X = {0.5, hash_of("a"), hash_of("u"), -1.2, hash_of("b"), hash_of("v"),
+                                   2.0, hash_of("zz"), hash_of("u"), nan, hash_of("d"), hash_of("v")};
+    EXPECT_EQ(lignum::test::predict_raw(loaded, X, 3), lignum::test::predict_raw(model, X, 3));
+
+    std::ifstream in(saved, std::ios::binary);
+    const std::string original((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const auto path = (std::filesystem::temp_directory_path() / "lignum_fuzz_catboost.bin").string();
+    std::mt19937 rng(31337);
+    int ok = 0;
+    for (int iteration = 0; iteration < 3000; iteration++) {
+        std::string mutated = original;
+        const int flips = 1 + static_cast<int>(rng() % 8);
+        for (int k = 0; k < flips; k++) {
+            // Mostly the forest arrays (past header and bias), where the indices live.
+            const size_t pos = (rng() % 4 == 0) ? rng() % mutated.size() : 128 + rng() % (mutated.size() - 128);
+            mutated[pos] = static_cast<char>(rng());
+        }
+        if (rng() % 10 == 0) mutated.resize(rng() % mutated.size());
+        std::ofstream(path, std::ios::binary).write(mutated.data(), static_cast<std::streamsize>(mutated.size()));
+        try {
+            const auto m = lignum::load(path);
+            if (m.n_features > 3) continue;
+            std::vector<double> out(4 * m.output_width(false));
+            m.predict(X.data(), 4, 3, out.data(), 1);
+            ok++;
+        } catch (const std::exception&) {
+            // Rejected: fine.
+        }
+    }
+    EXPECT_GT(ok, 0);
 }

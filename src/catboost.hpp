@@ -6,6 +6,8 @@
 #include <lignum/model.hpp>
 
 #include <cstdint>
+#include <memory>
+#include <ostream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -78,13 +80,21 @@ namespace lignum {
     };
 
     namespace parsers {
-        // CatBoost save_model(format="json").
+        // CatBoost save_model(format="json") and the native .cbm.
         Model load_catboost_json(const std::string& filepath);
+        Model load_catboost_cbm(const std::string& filepath);
     }
+
+    // The forest in lignum's binary format (after the file header), and back; loading validates
+    // every index and throws std::runtime_error on a damaged file.
+    void save_oblivious(std::ostream& out, const ObliviousForest& forest);
+    std::shared_ptr<ObliviousForest> load_oblivious(const char* data, size_t size, size_t offset);
 
     // exp as CatBoost's predict computes it (Poisson / Tweedie, softmax): on x86 fmath::expd_v, a
     // table-based approximation, elsewhere std::exp. In place.
     void catboost_exp(double* x, size_t n);
+    // CatBoost's softmax of each row of dim values, in place.
+    void catboost_softmax(double* out, size_t n_rows, size_t dim);
 
     // Raw scores (scale * sum + bias) of n_samples rows into out (n_samples x dim). Categorical
     // columns hold category hashes (catboost_hash) as doubles.

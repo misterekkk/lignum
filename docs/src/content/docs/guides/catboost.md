@@ -8,10 +8,10 @@ bit. This covers categorical features, one-hot encoding, and CTRs (CatBoost's ta
 including combinations of several categories.
 
 ```python
-model.save_model("model.json", format="json")   # CatBoost
+model.save_model("model.cbm")   # CatBoost (or format="json")
 
 import lignum
-lm = lignum.load("model.json")
+lm = lignum.load("model.cbm")   # .cbm or JSON; lm.save("model.bin") for lignum's own format
 lm.predict(df)                  # pandas DataFrame with the training columns, in order
 lm.predict(table)               # pyarrow Table / polars DataFrame: strings and categoricals read in place
 lm.predict(["a", 1.5, 7])       # one row as a list
@@ -26,17 +26,17 @@ lm.predict(["a", 1.5, 7])       # one row as a list
     `BinarizedTargetMeanValue`), including combinations of categories with each other and with
     binarised float features (`max_ctr_complexity`).
 - **Losses**: for the classifier, `predict` gives the probability of class 1 (`Logloss`,
-  `CrossEntropy`). For regression it gives what CatBoost's `predict` gives: `exp` of the raw score
+  `CrossEntropy`), or one probability per class for `MultiClass` (softmax) and
+  `MultiClassOneVsAll` (sigmoid per class). For regression it gives what CatBoost's `predict` gives: `exp` of the raw score
   for `Poisson` and `Tweedie`, the raw score otherwise.
-- **File**: JSON from `save_model(..., format="json")`.
+- **Files**: CatBoost's `.cbm` (`save_model("model.cbm")`, read directly, without the flatbuffers
+  library) and JSON (`format="json"`, which cannot hold multiclass models). `model.save("model.bin")`
+  writes lignum's format, which loads in about 0.2 ms.
 
 Not yet supported:
 
-- `.cbm` files;
-- multiclass models (CatBoost cannot write them as JSON);
 - `Depthwise` and `Lossguide` trees;
-- text and embedding features;
-- `model.save()` for CatBoost models.
+- text and embedding features.
 
 `compile()` is not needed: symmetric trees have no branches, so the interpreter is already the fast
 path. Unsupported models are rejected at load time with a message that says why.
@@ -77,8 +77,9 @@ A model with 500 trees of depth 6, 2 float and 3 categorical features, on an App
 |---|---:|---:|
 | 500k rows from a DataFrame, all threads | 0.188 s | **0.102 s** |
 | 500k rows, one thread | 0.669 s | **0.445 s** |
-| One row from a list | 49.7 µs | **7.3 µs** |
-| One row from a DataFrame | 95.9 µs | **26.3 µs** |
+| One row from a list | 49.7 µs | **3.7 µs** |
+| One row from a DataFrame | 95.9 µs | **22 µs** |
+| Loading the model | 0.8 ms (`.cbm`) | **0.2 ms** (`.bin`), 0.9 ms (`.cbm`) |
 | 500k rows from Arrow (pyarrow or polars) | 0.114 s (polars) | **0.077 s** |
 
 On large batches most of the gain is the conversion: lignum hashes categories in C++ about three
