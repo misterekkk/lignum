@@ -49,6 +49,18 @@ jobs:
           set -o pipefail
           python benchmarks/catboost_profile.py --datasets california,adult,covtype --rows 20000 | tee profile.md
 
+      # The tables as a notice too: annotations can be read without logging in.
+      - name: Tables as an annotation
+        if: always()
+        run: |
+          python - <<'EOF'
+          import os
+          lines = [l.rstrip() for l in open("profile.md") if l.startswith(("CPU", "## ", "| ", "perf stat", "Not run"))
+                   and not l.startswith(("| instructions", "|---", "| engine"))]
+          text = "\n".join(l for l in lines if not l.startswith("## Stack") and not l.startswith("## Assembly"))[:60000]
+          print("::notice title=CatBoost profile ${{ matrix.os }}::" + text.replace("%", "%25").replace("\r", "").replace("\n", "%0A"))
+          EOF
+
       - uses: actions/upload-artifact@v4
         with:
           name: catboost-profile-${{ matrix.os }}

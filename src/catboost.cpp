@@ -461,31 +461,14 @@ namespace lignum {
         // bits gathered from the deepest level up (v = 2 v + bit): one constant per level instead
         // of three (threshold, range, bit mask). With depth 6 that is 6 vector registers instead
         // of 18, which SSE2's 16 could not hold (GCC reloaded 8 of them from the stack in the hot
-        // loop). LIGNUM_CATBOOST_GE=0 uses the range test for every tree.
+        // loop). LIGNUM_CATBOOST_GE=0 uses the range test for every tree. CI (ba6d01b), 1 thread,
+        // 200k rows, range test -> plain: EPYC 9V45 california 0.058 -> 0.054 s (no stack accesses
+        // left in the loop), Neoverse-N2 0.070 -> 0.062, covtype 0.203 -> 0.190.
         #ifndef LIGNUM_CATBOOST_GE
             #define LIGNUM_CATBOOST_GE 1
         #endif
         constexpr bool kPlainSplits = LIGNUM_CATBOOST_GE != 0;
 
-        // Prefetch each tree's leaves before its indices are computed (CatBoost's evaluator does);
-        // a compiler builtin, no-op where there is none.
-        #ifndef LIGNUM_CATBOOST_PREFETCH
-            #define LIGNUM_CATBOOST_PREFETCH 0
-        #endif
-        inline void prefetch_leaves(const double* leaves, size_t count) {
-            if constexpr (LIGNUM_CATBOOST_PREFETCH != 0) {
-            #if defined(__GNUC__) || defined(__clang__)
-                const char* p = reinterpret_cast<const char*>(leaves);
-                for (size_t offset = 0; offset < count * sizeof(double); offset += 64) __builtin_prefetch(p + offset);
-            #else
-                (void)leaves;
-                (void)count;
-            #endif
-            } else {
-                (void)leaves;
-                (void)count;
-            }
-        }
 
         // bucket_of over a feature's padded borders: a fixed number of halvings (log2 of the padded
         // size). Written as a conditional move, which ARM compilers keep (csel) and x86 ones turn
@@ -1340,10 +1323,12 @@ namespace lignum {
 
     namespace {
 
-        // Rows per block; LIGNUM_CATBOOST_BLOCK for experiments (bucket and index arrays are this
-        // many rows long per source and tree).
+        // Rows per block (bucket and index arrays are this many rows long per source and tree);
+        // LIGNUM_CATBOOST_BLOCK for experiments. CI (ba6d01b), 1 thread, 200k rows, 128 -> 256:
+        // EPYC 9V45 california 0.054 -> 0.048 s, adult 0.149 -> 0.139, covtype 0.113 -> 0.104;
+        // Neoverse-N2 0.062 -> 0.059, 0.242 -> 0.228, 0.190 -> 0.174.
         #ifndef LIGNUM_CATBOOST_BLOCK
-            #define LIGNUM_CATBOOST_BLOCK 128
+            #define LIGNUM_CATBOOST_BLOCK 256
         #endif
         constexpr size_t kBlock = LIGNUM_CATBOOST_BLOCK;
         // Batches below this many rows take the per-row path (see predict_row).
@@ -1534,7 +1519,6 @@ namespace lignum {
             auto tree = [&](size_t t, int g) {
                 const uint32_t k = f.split_begin[t], depth = f.split_begin[t + 1] - k;
                 leaves[g] = f.leaves.data() + f.leaf_begin[t];
-                prefetch_leaves(leaves[g], dim << depth);
                 if (kPlainSplits && !f.tree_equal[t]) {
                     tree_index_ge_dispatch(buckets, stride, f.split_source.data() + k, f.split_threshold.data() + k,
                                            f.split_equal.data() + k, depth, rows, index + g * rows);
