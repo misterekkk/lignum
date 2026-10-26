@@ -367,7 +367,6 @@ namespace lignum {
             for (const auto& x : f.floats) f.small_buckets &= x.borders.size() <= 255;
             for (const auto& x : f.one_hots) f.small_buckets &= x.values.size() <= 255;
             for (const auto& c : f.ctrs) {
-                f.small_buckets &= c.missing_bucket <= 255;
                 for (uint16_t b : c.entry_buckets) f.small_buckets &= b <= 255;
             }
             f.run_end.clear();
@@ -684,11 +683,11 @@ namespace lignum {
                 check_borders(sc.borders, "CTR borders");
                 ObliviousForest::Ctr ctr;
                 ctr.table = tit->second;
-                ctr.entry_buckets.resize(raw.hashes.size());
+                ctr.entry_buckets.resize(raw.hashes.size() + 1);
+                ctr.entry_buckets[0] = bucket_of(sc.borders, ctr_value(sc.kind, sc.calc, raw, -1, target_border));
                 for (size_t entry = 0; entry < raw.hashes.size(); entry++) {
-                    ctr.entry_buckets[entry] = bucket_of(sc.borders, ctr_value(sc.kind, sc.calc, raw, static_cast<int64_t>(entry), target_border));
+                    ctr.entry_buckets[entry + 1] = bucket_of(sc.borders, ctr_value(sc.kind, sc.calc, raw, static_cast<int64_t>(entry), target_border));
                 }
-                ctr.missing_bucket = bucket_of(sc.borders, ctr_value(sc.kind, sc.calc, raw, -1, target_border));
                 const uint32_t s = first_ctr_source + static_cast<uint32_t>(f.ctrs.size());
                 if (s > 65535) malformed("too many features");
                 for (size_t k = 0; k < sc.borders.size(); k++) {
@@ -1390,7 +1389,7 @@ namespace lignum {
             for (size_t k = 0; k < f.ctrs.size(); k++) {
                 const ObliviousForest::Ctr& ctr = f.ctrs[k];
                 const uint32_t e = entries[ctr.table];
-                buckets[F + H + k] = e ? ctr.entry_buckets[e - 1] : ctr.missing_bucket;
+                buckets[F + H + k] = ctr.entry_buckets[e];
             }
 
             // Condition bytes: per source a run of `bucket >= j + 1` (or `== j + 1` for one-hot),
@@ -1569,8 +1568,8 @@ namespace lignum {
                 entry_begin.push_back(0);
                 for (const auto& c : f.ctrs) {
                     ctr_table.push_back(c.table);
-                    ctr_missing.push_back(c.missing_bucket);
-                    entry_buckets.insert(entry_buckets.end(), c.entry_buckets.begin(), c.entry_buckets.end());
+                    ctr_missing.push_back(c.entry_buckets[0]);  // the file keeps it apart from the entries
+                    entry_buckets.insert(entry_buckets.end(), c.entry_buckets.begin() + 1, c.entry_buckets.end());
                     entry_begin.push_back(entry_buckets.size());
                 }
             }
@@ -1633,9 +1632,10 @@ namespace lignum {
                 f.ctrs.resize(C);
                 for (size_t c = 0; c < C; c++) {
                     f.ctrs[c].table = ctr_table[c];
-                    f.ctrs[c].missing_bucket = ctr_missing[c];
-                    f.ctrs[c].entry_buckets.assign(entry_buckets.begin() + static_cast<ptrdiff_t>(entry_begin[c]),
-                                                   entry_buckets.begin() + static_cast<ptrdiff_t>(entry_begin[c + 1]));
+                    std::vector<uint16_t>& b = f.ctrs[c].entry_buckets;
+                    b.assign(1, ctr_missing[c]);
+                    b.insert(b.end(), entry_buckets.begin() + static_cast<ptrdiff_t>(entry_begin[c]),
+                             entry_buckets.begin() + static_cast<ptrdiff_t>(entry_begin[c + 1]));
                 }
             }
         }
@@ -1670,7 +1670,7 @@ namespace lignum {
                 for (uint32_t s : table.slots) { entries[t] = std::max<size_t>(entries[t], s); empty += s == 0; }
                 if (empty == 0) bad();  // the lookup stops at an empty slot
             }
-            for (const auto& c : f.ctrs) if (c.table >= f.tables.size() || c.entry_buckets.size() < entries[c.table]) bad();
+            for (const auto& c : f.ctrs) if (c.table >= f.tables.size() || c.entry_buckets.size() < entries[c.table] + 1) bad();
             const size_t N = f.leaf_begin.size();
             if (f.split_begin.size() != N + 1 || f.split_begin[0] != 0 || f.split_begin[N] != f.split_source.size() ||
                 f.split_threshold.size() != f.split_source.size() || f.split_equal.size() != f.split_source.size()) bad();

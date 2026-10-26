@@ -51,11 +51,11 @@ namespace lignum {
             uint64_t mask = 0;
         };
         // A CTR: its bucket for every table entry, computed at load time with CatBoost's float
-        // arithmetic, and the bucket of combinations missing from the table.
+        // arithmetic, indexed like Table::slots values: [0] is the bucket of combinations missing
+        // from the table, [e + 1] the bucket of entry e (one load, no test, in the kernel).
         struct Ctr {
             uint32_t table = 0;
             std::vector<uint16_t> entry_buckets;
-            uint16_t missing_bucket = 0;
         };
 
         uint32_t n_columns = 0;

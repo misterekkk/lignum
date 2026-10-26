@@ -362,8 +362,9 @@ namespace lignum::catboost_kernel::LIGNUM_CATBOOST_ISA {
             for (size_t k = 0; k < f.ctrs.size(); k++) {
                 const ObliviousForest::Ctr& ctr = f.ctrs[k];
                 const uint32_t* entries = s.entries.data() + ctr.table * stride;
+                const uint16_t* by_entry = ctr.entry_buckets.data();  // in a local: stores to b may alias the vector
                 B* b = buckets + (F + H + k) * stride;
-                for (size_t r = 0; r < rows; r++) b[r] = static_cast<B>(entries[r] ? ctr.entry_buckets[entries[r] - 1] : ctr.missing_bucket);
+                for (size_t r = 0; r < rows; r++) b[r] = static_cast<B>(by_entry[entries[r]]);
             }
 
             if (kByteIndex && f.max_depth <= 8) phase2_dim<B, uint8_t>(f, buckets, stride, rows, s, out);
