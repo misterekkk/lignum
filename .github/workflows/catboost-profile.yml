@@ -12,6 +12,7 @@ on:
     paths:
       - 'benchmarks/catboost_profile.py'
       - 'src/catboost.cpp'
+      - 'src/catboost_kernel*'
       - '.github/workflows/catboost-profile.yml'
   workflow_dispatch:
 

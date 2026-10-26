@@ -47,6 +47,20 @@ add_library(lignum STATIC
     extern/simdjson/simdjson.cpp
 )
 
+# x86-64 (GCC, Clang): the CatBoost block kernel also compiled for AVX2, chosen at run time by
+# cpuid (catboost_kernel_avx2.cpp switches the target inside the file; the build stays generic).
+# MSVC has no per-function target, so it keeps the generic kernel for now.
+if(CMAKE_OSX_ARCHITECTURES)  # macOS cross builds (e.g. x86_64 on Apple silicon): the target decides
+    string(COMPARE EQUAL "${CMAKE_OSX_ARCHITECTURES}" "x86_64" LIGNUM_TARGET_X86_64)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    set(LIGNUM_TARGET_X86_64 ON)
+endif()
+if(NOT MSVC AND LIGNUM_TARGET_X86_64)
+    target_sources(lignum PRIVATE src/catboost_kernel_avx2.cpp)
+    target_compile_definitions(lignum PRIVATE LIGNUM_CATBOOST_AVX2)
+    set(LIGNUM_CATBOOST_AVX2 ON)
+endif()
+
 # Only the C API is exported from shared objects; C++ internals stay hidden. The static archive gets
 # its own file name: on Windows the shared library's import library is lignum.lib.
 set_target_properties(lignum PROPERTIES OUTPUT_NAME lignum_static CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -35,7 +36,9 @@ KERNEL = re.compile(r"::(predict_block\w*|phase2|tree_index\w*|float_buckets|row
 CASES = ["none", "catboost-batch", "lignum-batch", "catboost-row", "lignum-row"]
 # Default build (float buckets per feature, u8, groups of 4 trees) and one change at a time.
 # Default build and one change at a time; -m flags only where the CPU has the instructions.
-VARIANTS = ["default:", "block 128:-DLIGNUM_CATBOOST_BLOCK=128", "avx2:-mavx2"]
+# "LIGNUM_ISA=generic" is not a flag but the environment of the run (the kernel chosen at run time).
+VARIANTS = ["default (AVX2 kernel where the CPU has it):", "generic kernel:LIGNUM_ISA=generic",
+            "whole build -mavx2:-mavx2"]
 # The functions whose assembly is printed (built with -DLIGNUM_CATBOOST_ASM, so they are not inlined).
 ASM_FUNCTIONS = [r"tree_index_ge<6, unsigned char, unsigned char>", r"tree_index<6, unsigned char, unsigned char>",
                  r"add_leaves<4, 1, unsigned char>", r"float_buckets<unsigned char>"]
@@ -77,15 +80,15 @@ def assembly(library: Path) -> list[str]:
     text = subprocess.run(["objdump", "-d", "-C", "--no-show-raw-insn", str(library)], capture_output=True, text=True).stdout
     out = []
     for wanted in ASM_FUNCTIONS:
-        m = re.search(r"^[0-9a-f]+ <([^>]*" + re.escape(wanted) + r"[^>]*)>:\n((?:.+\n)+?)\n", text, re.M)
-        if not m:
+        found = list(re.finditer(r"^[0-9a-f]+ <([^>]*" + re.escape(wanted) + r"[^>]*)>:\n((?:.+\n)+?)\n", text, re.M))
+        if not found:
             out.append(f"### `{wanted}`: not found\n")
-            continue
-        out.append(f"### `{m.group(1)[:140]}`\n")
-        for body in sorted(loops(m.group(2).splitlines()), key=len)[:3]:  # innermost (shortest) loops
-            vec = sum(bool(re.search(r"%[xyz]mm|\bv[0-9]+\b|\bq[0-9]+\b", l)) for l in body)
-            stack = sum(bool(re.search(r"%rsp|\[sp", l)) for l in body)
-            out.append(f"loop of {len(body)} instructions, {vec} vector, {stack} stack:\n\n```\n" + "\n".join(body[:70]) + "\n```\n")
+        for m in found:  # one per kernel build (generic, avx2)
+          out.append(f"### `{m.group(1)[:160]}`\n")
+          for body in sorted(loops(m.group(2).splitlines()), key=len)[:3]:  # innermost (shortest) loops
+              vec = sum(bool(re.search(r"%[xyz]mm|\bv[0-9]+\b|\bq[0-9]+\b", l)) for l in body)
+              stack = sum(bool(re.search(r"%rsp|\[sp", l)) for l in body)
+              out.append(f"loop of {len(body)} instructions, {vec} vector, {stack} stack:\n\n```\n" + "\n".join(body[:70]) + "\n```\n")
     return out
 
 
@@ -108,10 +111,14 @@ def ensure_data(name: str, rows: int, trees: int) -> tuple[Path, Path]:
     return model, path
 
 
-def cachegrind(exe: Path, args: list[str], out: Path) -> dict:
+def run_env(variant_env: dict) -> dict:
+    return {**os.environ, **variant_env}
+
+
+def cachegrind(exe: Path, args: list[str], out: Path, env: dict | None = None) -> dict:
     """Totals of one run: instructions, reads, writes, L1d / LLd misses, branch mispredictions."""
     proc = subprocess.run(["valgrind", "--tool=cachegrind", "--cache-sim=yes", "--branch-sim=yes",
-                           f"--cachegrind-out-file={out}", str(exe), *args], capture_output=True, text=True)
+                           f"--cachegrind-out-file={out}", str(exe), *args], capture_output=True, text=True, env=run_env(env or {}))
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr[-2000:])
     totals = {}
@@ -172,10 +179,11 @@ NO_VALGRIND = re.compile(r"-mavx512")
 PERF_EVENTS = "cycles,instructions,branch-misses,L1-dcache-load-misses"
 
 
-def perf_stat(exe: Path, args: list[str]) -> dict | None:
+def perf_stat(exe: Path, args: list[str], env: dict | None = None) -> dict | None:
     """Hardware counters of one run (Linux perf), or None where perf or the counters are missing."""
     try:
-        proc = subprocess.run(["perf", "stat", "-x", ",", "-e", PERF_EVENTS, str(exe), *args], capture_output=True, text=True)
+        proc = subprocess.run(["perf", "stat", "-x", ",", "-e", PERF_EVENTS, str(exe), *args], capture_output=True, text=True,
+                              env=run_env(env or {}))
     except OSError:
         return None
     counts = {}
@@ -201,9 +209,10 @@ def cpu_name() -> str:
         return "unknown CPU"
 
 
-def timings(exe: Path, model: Path, data: Path, library: Path) -> dict:
+def timings(exe: Path, model: Path, data: Path, library: Path, env: dict | None = None) -> dict:
     """catboost_capi's own timings (best of 5): batch on one thread, one row, 100 rows."""
-    proc = subprocess.run([str(exe), str(model), str(data), str(library), "1", "5"], capture_output=True, text=True, check=True)
+    proc = subprocess.run([str(exe), str(model), str(data), str(library), "1", "5"], capture_output=True, text=True, check=True,
+                          env=run_env(env or {}))
     return {c["case"]: c.get("best_s", c.get("median_us")) for c in map(json.loads, proc.stdout.splitlines())}
 
 
@@ -217,6 +226,8 @@ def main():
     args = parser.parse_args()
 
     variants = [v.split(":", 1) for v in args.variants.split(";")]
+    envs = {name: dict(t.split("=", 1) for t in flags.split() if t.startswith("LIGNUM_ISA=")) for name, flags in variants}
+    variants = [(name, " ".join(t for t in flags.split() if not t.startswith("LIGNUM_ISA="))) for name, flags in variants]
     skipped = [name for name, flags in variants if not cpu_supports(flags)]
     builds = {name: bench_catboost.build_capi([f"-DCMAKE_CXX_FLAGS=-g {flags}".strip()]) for name, flags in variants
               if name not in skipped}
@@ -247,15 +258,16 @@ def main():
         hot = {}
         flags = dict(variants)
         for vname, exe in builds.items():
-            t = timings(exe, model, time_data, library)
+            t = timings(exe, model, time_data, library, envs[vname])
             times = f"{t['lignum strings, 1 thread']:.3f} | {t['lignum 1 row']:.1f}"
             if NO_VALGRIND.search(flags[vname]):
                 print(f"| lignum {vname} | " + " | ".join(["—"] * 12) + f" | {times} |")
                 continue
-            batch = cachegrind(exe, a + ["lignum-batch"], work / f"{name}_{vname.replace(' ', '_')}_batch.out")
-            row = cachegrind(exe, a + ["lignum-row"], work / f"{name}_{vname.replace(' ', '_')}_row.out")
+            tag = re.sub(r"\W+", "_", vname)
+            batch = cachegrind(exe, a + ["lignum-batch"], work / f"{name}_{tag}_batch.out", envs[vname])
+            row = cachegrind(exe, a + ["lignum-row"], work / f"{name}_{tag}_row.out", envs[vname])
             print(f"| lignum {vname} | {per_row(batch, base, args.rows)} | {per_row(row, base, args.rows)} | {times} |")
-            hot[vname] = hot_lines(work / f"{name}_{vname.replace(' ', '_')}_batch.out", args.rows)
+            hot[vname] = hot_lines(work / f"{name}_{tag}_batch.out", args.rows)
         print()
         # Real CPU counters for a batch (perf stat, time data, setup subtracted), where available.
         pa = [str(model), str(time_data), str(library), "1", "1"]
@@ -264,7 +276,7 @@ def main():
         print("| engine | cycles | instructions | IPC | branch misses | L1d load misses |\n|---|---:|---:|---:|---:|---:|")
         print(f"| CatBoost | {perf_row(perf_stat(first, pa + ['catboost-batch']), p_base, args.time_rows)} |")
         for vname, exe in builds.items():
-            print(f"| lignum {vname} | {perf_row(perf_stat(exe, pa + ['lignum-batch']), p_base, args.time_rows)} |")
+            print(f"| lignum {vname} | {perf_row(perf_stat(exe, pa + ['lignum-batch'], envs[vname]), p_base, args.time_rows)} |")
         print()
         for vname, lines in hot.items():
             print(f"<details><summary>{name}, lignum {vname}: hottest lines of a batch, per row</summary>\n")
