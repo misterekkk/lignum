@@ -134,3 +134,4 @@ benchmarks/.cache/
 # Local working notes (roadmap with measurements, session handoff); not part of the project.
 TASKS.md
 HANDOFF.md
+/notes/
