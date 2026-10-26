@@ -157,16 +157,13 @@ namespace lignum {
             static constexpr int kBits = 11;
             static constexpr uint64_t kSize = uint64_t{1} << kBits;
             static constexpr uint64_t kAdj = (uint64_t{1} << (kBits + 10)) - (uint64_t{1} << kBits);
-            uint64_t table[kSize];
-            double a, ra;
-            FmathExpTable() : a(static_cast<double>(kSize) / std::log(2.0)), ra(1 / a) {
-                for (uint64_t i = 0; i < kSize; i++) {
-                    const double v = std::pow(2.0, static_cast<double>(i) * (1.0 / static_cast<double>(kSize)));
-                    uint64_t bits;
-                    std::memcpy(&bits, &v, 8);
-                    table[i] = bits & ((uint64_t{1} << 52) - 1);
-                }
-            }
+            static constexpr uint64_t table[kSize] = {
+                #include "catboost_exp_table.inc"
+            };
+            // ln 2 rounded to double, what ::log(2.0) gives where log is correctly rounded.
+            static constexpr double kLn2 = 0.69314718055994530942;
+            double a = static_cast<double>(kSize) / kLn2;
+            double ra = 1 / a;
         };
 
         [[maybe_unused]] double fmath_expd(double x, const FmathExpTable& c) {
