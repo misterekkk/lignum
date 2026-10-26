@@ -28,6 +28,7 @@ namespace lignum {
             uint32_t column = 0;
             bool nan_as_true = false;  // NaN is above every border (CatBoost AsTrue), otherwise below
             std::vector<float> borders;  // strictly increasing
+            std::vector<float> search;   // derived at load: borders, then +inf up to a power of two
         };
         struct OneHot {
             uint32_t cat = 0;  // index into cat_columns
@@ -75,7 +76,7 @@ namespace lignum {
         double scale = 1.0;
         std::vector<double> bias;  // dim entries
 
-        // Derived at load (index_prefixes, not saved): the projections' category lists as a prefix
+        // Derived at load (derive_layout, not saved): the projections' category lists as a prefix
         // tree in depth-first order, so a prefix shared by several projections is hashed once per
         // row. Node n adds category prefix_cat[n] to the hash of its parent, the latest node one
         // level up; the projections with exactly that category list follow it.

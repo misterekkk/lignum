@@ -61,11 +61,15 @@ TEST(CatBoost, HandMadeModel) {
     // x = 2.0, "b": float bucket 2, CTR 1.5 / 7 below both borders, one-hot miss -> 2 + 16.
     // x = NaN, unseen: bucket 0, CTR of a missing combination 0.5 / 1 (bucket 1) -> 1 + 16.
     // x = 0.5 on a border is not above it: like x = 0.4 -> 4 + 32 for "a".
-    const std::vector<double> X = {1.0, hash_of("a"), 2.0, hash_of("b"), nan, hash_of("zz"), 0.5, hash_of("a")};
-    EXPECT_EQ(lignum::test::predict_raw(model, X, 2), (std::vector<double>{36, 18, 17, 36}));
+    // x = +inf is above both borders (and not above the +inf padding of the search): like 2.0.
+    // x = -inf is below both borders, like NaN in the Min mode.
+    const double inf = std::numeric_limits<double>::infinity();
+    const std::vector<double> X = {1.0, hash_of("a"), 2.0, hash_of("b"), nan, hash_of("zz"), 0.5, hash_of("a"),
+                                   inf, hash_of("b"), -inf, hash_of("zz")};
+    EXPECT_EQ(lignum::test::predict_raw(model, X, 2), (std::vector<double>{36, 18, 17, 36, 18, 17}));
 
-    std::vector<double> proba(4);
-    model.predict(X.data(), 4, 2, proba.data(), 1);
+    std::vector<double> proba(6);
+    model.predict(X.data(), 6, 2, proba.data(), 1);
     EXPECT_EQ(proba[1], 1.0 / (1.0 + std::exp(-18.0)));
 
     // Categorical columns must hold hashes.
