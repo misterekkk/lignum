@@ -33,8 +33,9 @@ import datasets  # noqa: E402
 # lignum's CatBoost kernel functions (not the LightGBM / XGBoost kernels' predict_rows).
 KERNEL = re.compile(r"::(predict_block\w*|phase2|tree_index\w*|float_buckets|row_trees\w*|predict_row)(<[^(]*>)?\(")
 CASES = ["none", "catboost-batch", "lignum-batch", "catboost-row", "lignum-row"]
-VARIANTS = [f"{name} {width}:-DLIGNUM_CATBOOST_FLOATS={mode} -DLIGNUM_CATBOOST_U8={u8}"
-            for name, mode in [("search", 0), ("count", 1), ("two-level", 2)] for width, u8 in [("u16", 0), ("u8", 1)]]
+# Default build (float buckets per feature, u8, groups of 4 trees) and one change at a time.
+VARIANTS = ["default:", "group 1:-DLIGNUM_CATBOOST_GROUP=1", "group 8:-DLIGNUM_CATBOOST_GROUP=8",
+            "two-level only:-DLIGNUM_CATBOOST_FLOATS=2", "u16:-DLIGNUM_CATBOOST_U8=0"]
 
 
 def ensure_data(name: str, rows: int, trees: int) -> tuple[Path, Path]:
@@ -83,8 +84,8 @@ def per_row(run: dict, base: dict, rows: int) -> str:
 def hot_lines(out: Path, rows: int, top: int = 12) -> list[str]:
     """The lines of src/catboost.cpp with the most instructions: per row Ir, Dr, Dw, Bcm."""
     text = subprocess.run(["cg_annotate", "--threshold=0", "--auto=yes", str(out)], capture_output=True, text=True).stdout
-    part = text.split("src/catboost.cpp", 1)[-1] if "Annotated source file" in text else ""
-    part = part.split("-- Annotated source file:", 1)[0]
+    m = re.search(r"-- Annotated source file: \S*src/catboost\.cpp\n", text)
+    part = text[m.end():].split("-- Annotated source file:", 1)[0] if m else ""
     token = r"(\.|[\d,]+(?:\s+\(\s*[\d.]+%\))?)"
     found = []
     for line in part.splitlines():
@@ -131,7 +132,7 @@ def main():
     args = parser.parse_args()
 
     variants = [v.split(":", 1) for v in args.variants.split(";")]
-    builds = {name: bench_catboost.build_capi([f"-DCMAKE_CXX_FLAGS=-g {flags}"]) for name, flags in variants}
+    builds = {name: bench_catboost.build_capi([f"-DCMAKE_CXX_FLAGS=-g {flags}".strip()]) for name, flags in variants}
     library = bench_catboost.catboost_library()
     work = bench_catboost.CACHE / "profile"
     work.mkdir(parents=True, exist_ok=True)

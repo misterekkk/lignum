@@ -384,30 +384,53 @@ namespace lignum {
         }
 
         // How a float feature's bucket (the number of its borders below the value) is computed;
-        // LIGNUM_CATBOOST_FLOATS chooses for experiments (CI measures each on x86-64 and aarch64):
+        // LIGNUM_CATBOOST_FLOATS chooses for experiments (catboost-profile.yml measures each on
+        // x86-64 and aarch64):
         //   0: bucket_search, a binary search written as conditional moves; ARM compilers keep
         //      them (csel), x86 ones make a data-dependent branch of each (clang: ucomiss; ja);
         //   1: count the borders one by one (vectorised over a block's rows, no select at all);
         //      features with more than kCountBorders borders search;
-        //   2: bucket_two_level, every 16th border and then 16 borders.
-        // CI, 1 thread, california (8 features, 986 borders): Neoverse-N2 search 0.163 s, count
-        // 0.181 s; EPYC 7763 search 0.230 s, count 0.154 s.
+        //   2: bucket_two_level, every 16th border and then 16 borders;
+        //   3 (default): per feature, up to kSmallFeature borders the faster of 0 / 1 on the
+        //      architecture (ARM 0, x86 1), more borders 2.
+        // CI (94bd651), 1 thread, 200k rows, u8 buckets: california (~123 borders per feature)
+        // EPYC 7763 search 0.132 s, count 0.107, two levels 0.090; Neoverse-N2 0.071 / 0.086 /
+        // 0.064. covtype (~21 per feature) EPYC 0.299 / 0.251 / 0.290; N2 0.182 / 0.193 / 0.185.
         #ifndef LIGNUM_CATBOOST_FLOATS
-            #if defined(__aarch64__) || defined(_M_ARM64)
-                #define LIGNUM_CATBOOST_FLOATS 0
-            #else
-                #define LIGNUM_CATBOOST_FLOATS 1
-            #endif
+            #define LIGNUM_CATBOOST_FLOATS 3
         #endif
         constexpr int kFloatMode = LIGNUM_CATBOOST_FLOATS;
         constexpr size_t kCountBorders = 256;
+        constexpr size_t kSmallFeature = 32;
+        #if defined(__aarch64__) || defined(_M_ARM64)
+            constexpr int kSmallFeatureMode = 0;
+        #else
+            constexpr int kSmallFeatureMode = 1;
+        #endif
+
+        // The way (0, 1 or 2 above) a feature's buckets are computed.
+        inline int float_mode(const ObliviousForest::Float& ff) {
+            int mode = kFloatMode == 3 ? (ff.borders.size() <= kSmallFeature ? kSmallFeatureMode : 2) : kFloatMode;
+            return mode == 1 && ff.borders.size() > kCountBorders ? 0 : mode;
+        }
 
         // Buckets of a block as bytes when every source fits (ObliviousForest::small_buckets):
         // twice as many per vector, and unsigned byte compares exist in SSE2 (16-bit ones do not).
+        // CI (94bd651), 1 thread, 200k rows: california EPYC 0.101 -> 0.090 s, Neoverse-N2 0.086 ->
+        // 0.064 s; covtype 0.288 -> 0.290 / 0.206 -> 0.185 (two levels); M4 within noise.
         #ifndef LIGNUM_CATBOOST_U8
-            #define LIGNUM_CATBOOST_U8 0
+            #define LIGNUM_CATBOOST_U8 1
         #endif
         constexpr bool kSmallBuckets = LIGNUM_CATBOOST_U8 != 0;
+
+        // Trees whose leaves a block adds together (phase2): each row's sums stay in registers for
+        // a group instead of being loaded and stored per tree; still one addition per tree, in
+        // model order.
+        #ifndef LIGNUM_CATBOOST_GROUP
+            #define LIGNUM_CATBOOST_GROUP 4
+        #endif
+        constexpr int kGroup = LIGNUM_CATBOOST_GROUP;
+        static_assert(kGroup >= 1 && kGroup <= 16, "LIGNUM_CATBOOST_GROUP: 1 to 16 trees");
 
         // bucket_of over a feature's padded borders: a fixed number of halvings (log2 of the padded
         // size). Written as a conditional move, which ARM compilers keep (csel) and x86 ones turn
@@ -436,17 +459,17 @@ namespace lignum {
             return static_cast<uint16_t>(16 * blocks + below);
         }
 
-        // The bucket of a float feature's value that is not NaN, as kFloatMode chooses.
+        // The bucket of a float feature's value that is not NaN, as float_mode chooses.
         inline uint16_t float_bucket(const ObliviousForest::Float& ff, float x) {
-            if constexpr (kFloatMode == 2) return bucket_two_level(ff, x);
-            if constexpr (kFloatMode == 1) {
-                if (ff.borders.size() <= kCountBorders) {
+            switch (float_mode(ff)) {
+                case 2: return bucket_two_level(ff, x);
+                case 1: {
                     uint32_t below = 0;
                     for (const float border : ff.borders) below += x > border;
                     return static_cast<uint16_t>(below);
                 }
+                default: return bucket_search(ff.search, x);
             }
-            return bucket_search(ff.search, x);
         }
 
         // Number of strictly increasing borders below x: the bucket with x > borders[k] <=> bucket >= k + 1.
@@ -1293,7 +1316,7 @@ namespace lignum {
                 grow(entries, f.tables.size() * rows);
                 grow(combination, rows);
                 grow(prefixes, f.prefix_levels * rows);
-                grow(index, rows);
+                grow(index, kGroup * rows);
                 grow(sums, rows * f.dim);
                 grow(values, rows);
                 grow(counts, rows);
@@ -1365,10 +1388,33 @@ namespace lignum {
             }
         }
 
+        // Adds the leaves of G trees to each row's sums, tree after tree (index: G arrays of rows).
+        template <int G, int Dim>
+        inline void add_leaves(const double* const* leaves, const uint16_t* index, size_t rows, size_t dim, double* sums) {
+            if constexpr (Dim > 0) {
+                for (size_t r = 0; r < rows; r++) {
+                    double acc[Dim];
+                    for (int d = 0; d < Dim; d++) acc[d] = sums[r * Dim + d];
+                    for (int g = 0; g < G; g++) {
+                        const double* l = leaves[g] + index[g * rows + r] * Dim;
+                        for (int d = 0; d < Dim; d++) acc[d] += l[d];
+                    }
+                    for (int d = 0; d < Dim; d++) sums[r * Dim + d] = acc[d];
+                }
+            } else {
+                for (size_t r = 0; r < rows; r++) {
+                    for (int g = 0; g < G; g++) {
+                        const double* l = leaves[g] + index[g * rows + r] * dim;
+                        for (size_t d = 0; d < dim; d++) sums[r * dim + d] += l[d];
+                    }
+                }
+            }
+        }
+
         // Phase 2 for a block: leaf index per tree, leaves added in model order (one double addition
-        // per tree and output). Dim outputs per row, 0: any, from the model. The sums are a local
-        // array: on the heap the compiler cannot keep them apart from the leaves (7 classes: 0.149
-        // instead of 0.100 s for 200k rows).
+        // per tree and output), kGroup trees at a time. Dim outputs per row, 0: any, from the model.
+        // The sums are a local array: on the heap the compiler cannot keep them apart from the
+        // leaves (7 classes: 0.149 instead of 0.100 s for 200k rows).
         template <int Dim, typename B>
         void phase2(const ObliviousForest& f, const B* buckets, size_t stride, size_t rows, Scratch& s, double* out) {
             double local[Dim > 0 ? kBlock * Dim : 1];
@@ -1376,35 +1422,35 @@ namespace lignum {
             double* sums = Dim > 0 ? local : s.sums.data();
             std::fill(sums, sums + rows * dim, 0.0);
             uint16_t* index = s.index.data();
-            for (size_t t = 0; t < f.n_trees(); t++) {
+            const double* leaves[kGroup];
+            auto tree = [&](size_t t, int g) {
                 const uint32_t k = f.split_begin[t];
                 tree_index_dispatch(buckets, stride, f.split_source.data() + k, f.split_threshold.data() + k, f.split_equal.data() + k,
-                                    f.split_begin[t + 1] - k, rows, index);
-                const double* leaves = f.leaves.data() + f.leaf_begin[t];
-                if constexpr (Dim > 0) {
-                    for (size_t r = 0; r < rows; r++) {
-                        const double* l = leaves + index[r] * Dim;
-                        for (int d = 0; d < Dim; d++) sums[r * Dim + d] += l[d];
-                    }
-                } else {
-                    for (size_t r = 0; r < rows; r++) {
-                        const double* l = leaves + index[r] * dim;
-                        for (size_t d = 0; d < dim; d++) sums[r * dim + d] += l[d];
-                    }
-                }
+                                    f.split_begin[t + 1] - k, rows, index + g * rows);
+                leaves[g] = f.leaves.data() + f.leaf_begin[t];
+            };
+            size_t t = 0;
+            for (; t + kGroup <= f.n_trees(); t += kGroup) {
+                for (int g = 0; g < kGroup; g++) tree(t + g, g);
+                add_leaves<kGroup, Dim>(leaves, index, rows, dim, sums);
+            }
+            for (; t < f.n_trees(); t++) {
+                tree(t, 0);
+                add_leaves<1, Dim>(leaves, index, rows, dim, sums);
             }
             for (size_t r = 0; r < rows; r++) {
                 for (size_t d = 0; d < dim; d++) out[r * dim + d] = f.scale * sums[r * dim + d] + f.bias[d];
             }
         }
 
-        // Buckets of one float feature for a block of rows (kFloatMode). Counting compares without
+        // Buckets of one float feature for a block of rows (float_mode). Counting compares without
         // selects, so NaN (below every border) needs no test; AsTrue puts it above afterwards.
         template <typename B>
         void float_buckets(const ObliviousForest::Float& ff, const double* X, size_t n_features, size_t rows, B* b, Scratch& s) {
             const B nan_bucket = ff.nan_as_true ? static_cast<B>(ff.borders.size()) : B{0};
-            const bool count = kFloatMode == 1 && ff.borders.size() <= kCountBorders;
-            if (kFloatMode == 0 || (kFloatMode == 1 && !count)) {
+            const int mode = float_mode(ff);
+            const bool count = mode == 1;
+            if (mode == 0) {
                 for (size_t r = 0; r < rows; r++) {
                     const float x = static_cast<float>(X[r * n_features + ff.column]);
                     b[r] = std::isnan(x) ? nan_bucket : static_cast<B>(bucket_search(ff.search, x));
