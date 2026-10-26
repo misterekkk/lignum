@@ -5,6 +5,7 @@
 #include <lignum/lignum.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <charconv>
 #include <cmath>
 #include <cstring>
@@ -318,10 +319,52 @@ namespace lignum {
             }
         }
 
+        // The condition bytes of the single-row path (see ObliviousForest::condition_begin), the
+        // range test of every split, and the runs of trees of one depth.
+        void index_conditions(ObliviousForest& f) {
+            const size_t n_sources = f.n_sources();
+            std::vector<uint32_t> count(n_sources, 0);
+            for (size_t k = 0; k < f.split_source.size(); k++) {
+                const uint16_t s = f.split_source[k];
+                if (s >= n_sources) throw std::runtime_error("CatBoost split on an unknown source.");
+                count[s] = std::max<uint32_t>(count[s], f.split_threshold[k]);
+            }
+            f.condition_begin.assign(1, 0);
+            for (size_t s = 0; s < n_sources; s++) f.condition_begin.push_back(f.condition_begin.back() + count[s]);
+            f.split_condition.resize(f.split_source.size());
+            for (size_t k = 0; k < f.split_source.size(); k++) {
+                // A threshold of 0 (`bucket >= 0`, always true) has no byte: it can only come from a
+                // damaged file; byte 0 of an empty model keeps it in range.
+                const uint16_t t = f.split_threshold[k];
+                f.split_condition[k] = t ? f.condition_begin[f.split_source[k]] + t - 1 : 0;
+            }
+            f.split_range.resize(f.split_source.size());
+            for (size_t k = 0; k < f.split_source.size(); k++) {
+                f.split_range[k] = f.split_equal[k] ? uint16_t{0} : static_cast<uint16_t>(0xffff - f.split_threshold[k]);
+            }
+            // Condition bytes pay when sources are few next to splits: every source writes its
+            // bytes per row. M4, 500 trees, bytes vs comparing buckets: california (8 sources, 3000
+            // splits) 0.62 vs 0.92 µs, covtype (53) 1.02 vs 1.23, bank (268, 2969) 1.60 vs 1.67;
+            // adult (364, 2981) 2.25 vs 2.08, diabetes (1228, 2943) 6.7 vs 5.1.
+            f.row_conditions = n_sources * 10 <= f.split_source.size();
+            f.run_end.clear();
+            f.run_depth.clear();
+            for (size_t t = 0; t < f.n_trees(); t++) {
+                const uint32_t depth = f.split_begin[t + 1] - f.split_begin[t];
+                if (depth > 255) throw std::runtime_error("CatBoost tree deeper than 255.");
+                if (f.run_depth.empty() || f.run_depth.back() != depth) {
+                    f.run_end.push_back(static_cast<uint32_t>(t));
+                    f.run_depth.push_back(static_cast<uint8_t>(depth));
+                }
+                f.run_end.back() = static_cast<uint32_t>(t + 1);
+            }
+        }
+
         // Everything the kernel derives from a loaded forest.
         void derive_layout(ObliviousForest& f) {
             pad_borders(f);
             index_prefixes(f);
+            index_conditions(f);
         }
 
         // bucket_of over a feature's padded borders without branches: a fixed number of halvings
@@ -1170,6 +1213,7 @@ namespace lignum {
             std::vector<uint64_t> prefixes;  // [level][row]: hash of the current prefix-tree node per level
             std::vector<uint16_t> index;
             std::vector<double> sums;
+            std::vector<uint8_t> conditions;  // single-row path
 
             void prepare(const ObliviousForest& f, size_t rows) {
                 auto grow = [](auto& v, size_t n) { if (v.size() < n) v.resize(n); };
@@ -1180,6 +1224,7 @@ namespace lignum {
                 grow(prefixes, f.prefix_levels * rows);
                 grow(index, rows);
                 grow(sums, rows * f.dim);
+                if (rows == 1 && f.row_conditions) grow(conditions, f.condition_begin.back() + 8);  // + 8: stores of 8 bytes
             }
         };
 
@@ -1371,6 +1416,98 @@ namespace lignum {
             }
         }
 
+        // Trees [t0, t1) of one row, all of depth Depth (known at compile time: a tree's leaf index
+        // is Depth steps without a loop). Bytes: each split is one byte of the row's condition array
+        // (ObliviousForest::condition_begin); otherwise it compares the source's bucket with one
+        // unsigned range test. Dim = 0: any number of outputs. The sums carry over from the
+        // previous run, so leaves are still added in model order.
+        // M4, 500 trees of depth 6: california 1.58 -> 0.62 µs per row (bytes); the chain of 500
+        // dependent additions alone takes 0.25 µs.
+        template <int Depth, int Dim, bool Bytes>
+        void row_trees(const ObliviousForest& f, size_t t0, size_t t1, const uint16_t* buckets, const uint8_t* bits, double* io) {
+            const size_t dim = Dim > 0 ? Dim : f.dim;
+            double local[Dim > 0 ? Dim : 1];
+            double* sums = Dim > 0 ? local : io;
+            if constexpr (Dim > 0) std::copy(io, io + Dim, local);
+            const double* leaves = f.leaves.data() + f.leaf_begin[t0];
+            const size_t leaves_per_tree = dim << Depth;
+            for (size_t t = t0, k = f.split_begin[t0]; t < t1; t++, k += Depth, leaves += leaves_per_tree) {
+                uint32_t index = 0;
+                for (int d = 0; d < Depth; d++) {
+                    if constexpr (Bytes) {
+                        index |= static_cast<uint32_t>(bits[f.split_condition[k + d]]) << d;
+                    } else {
+                        const uint16_t v = static_cast<uint16_t>(buckets[f.split_source[k + d]] - f.split_threshold[k + d]);
+                        index |= static_cast<uint32_t>(v <= f.split_range[k + d]) << d;
+                    }
+                }
+                const double* l = leaves + index * dim;
+                for (size_t d = 0; d < dim; d++) sums[d] += l[d];
+            }
+            if constexpr (Dim > 0) std::copy(local, local + Dim, io);
+        }
+
+        // Trees [t0, t1) of any depths (deeper than the specialised ones).
+        void row_trees_any(const ObliviousForest& f, size_t t0, size_t t1, const uint16_t* buckets, double* sums) {
+            const size_t dim = f.dim;
+            for (size_t t = t0; t < t1; t++) {
+                uint32_t index = 0;
+                for (uint32_t k = f.split_begin[t], bit = 0; k < f.split_begin[t + 1]; k++, bit++) {
+                    const uint16_t v = static_cast<uint16_t>(buckets[f.split_source[k]] - f.split_threshold[k]);
+                    index |= static_cast<uint32_t>(v <= f.split_range[k]) << bit;
+                }
+                const double* l = f.leaves.data() + f.leaf_begin[t] + index * dim;
+                for (size_t d = 0; d < dim; d++) sums[d] += l[d];
+            }
+        }
+
+        template <int Depth, bool Bytes>
+        void row_trees_dim(const ObliviousForest& f, size_t t0, size_t t1, const uint16_t* buckets, const uint8_t* bits, double* sums) {
+            switch (f.dim) {
+                case 1: row_trees<Depth, 1, Bytes>(f, t0, t1, buckets, bits, sums); break;
+                case 2: row_trees<Depth, 2, Bytes>(f, t0, t1, buckets, bits, sums); break;
+                case 3: row_trees<Depth, 3, Bytes>(f, t0, t1, buckets, bits, sums); break;
+                case 4: row_trees<Depth, 4, Bytes>(f, t0, t1, buckets, bits, sums); break;
+                case 5: row_trees<Depth, 5, Bytes>(f, t0, t1, buckets, bits, sums); break;
+                case 6: row_trees<Depth, 6, Bytes>(f, t0, t1, buckets, bits, sums); break;
+                case 7: row_trees<Depth, 7, Bytes>(f, t0, t1, buckets, bits, sums); break;
+                case 8: row_trees<Depth, 8, Bytes>(f, t0, t1, buckets, bits, sums); break;
+                case 9: row_trees<Depth, 9, Bytes>(f, t0, t1, buckets, bits, sums); break;
+                case 10: row_trees<Depth, 10, Bytes>(f, t0, t1, buckets, bits, sums); break;
+                default: row_trees<Depth, 0, Bytes>(f, t0, t1, buckets, bits, sums); break;
+            }
+        }
+
+        template <int Depth>
+        void row_trees_kind(const ObliviousForest& f, size_t t0, size_t t1, const uint16_t* buckets, const uint8_t* bits, double* sums) {
+            if (bits) row_trees_dim<Depth, true>(f, t0, t1, buckets, bits, sums);
+            else row_trees_dim<Depth, false>(f, t0, t1, buckets, bits, sums);
+        }
+
+        // All trees of one row, run by run. bits: the row's condition bytes, or null to compare buckets.
+        void row_trees_all(const ObliviousForest& f, const uint16_t* buckets, const uint8_t* bits, double* out, Scratch& s) {
+            double* sums = s.sums.data();
+            std::fill(sums, sums + f.dim, 0.0);
+            for (size_t r = 0, t0 = 0; r < f.run_end.size(); t0 = f.run_end[r], r++) {
+                const size_t t1 = f.run_end[r];
+                switch (f.run_depth[r]) {
+                    case 0: row_trees_kind<0>(f, t0, t1, buckets, bits, sums); break;
+                    case 1: row_trees_kind<1>(f, t0, t1, buckets, bits, sums); break;
+                    case 2: row_trees_kind<2>(f, t0, t1, buckets, bits, sums); break;
+                    case 3: row_trees_kind<3>(f, t0, t1, buckets, bits, sums); break;
+                    case 4: row_trees_kind<4>(f, t0, t1, buckets, bits, sums); break;
+                    case 5: row_trees_kind<5>(f, t0, t1, buckets, bits, sums); break;
+                    case 6: row_trees_kind<6>(f, t0, t1, buckets, bits, sums); break;
+                    case 7: row_trees_kind<7>(f, t0, t1, buckets, bits, sums); break;
+                    case 8: row_trees_kind<8>(f, t0, t1, buckets, bits, sums); break;
+                    case 9: row_trees_kind<9>(f, t0, t1, buckets, bits, sums); break;
+                    case 10: row_trees_kind<10>(f, t0, t1, buckets, bits, sums); break;
+                    default: row_trees_any(f, t0, t1, buckets, sums); break;
+                }
+            }
+            for (size_t d = 0; d < f.dim; d++) out[d] = f.scale * sums[d] + f.bias[d];
+        }
+
         // One row without the block layout: a few rows would pay a loop over rows per split.
         void predict_row(const ObliviousForest& f, const double* x, double* out, Scratch& s) {
             const size_t F = f.floats.size(), H = f.one_hots.size();
@@ -1418,35 +1555,34 @@ namespace lignum {
                 buckets[F + H + k] = e ? ctr.entry_buckets[e - 1] : ctr.missing_bucket;
             }
 
-            const size_t dim = f.dim;
-            const uint16_t* source = f.split_source.data();
-            const uint16_t* threshold = f.split_threshold.data();
-            const uint8_t* equal = f.split_equal.data();
-            if (dim == 1) {
-                double sum = 0.0;
-                for (size_t t = 0; t < f.n_trees(); t++) {
-                    uint32_t index = 0;
-                    for (uint32_t k = f.split_begin[t], bit = 0; k < f.split_begin[t + 1]; k++, bit++) {
-                        const uint16_t v = buckets[source[k]];
-                        index |= static_cast<uint32_t>(equal[k] ? v == threshold[k] : v >= threshold[k]) << bit;
-                    }
-                    sum += f.leaves[f.leaf_begin[t] + index];
-                }
-                out[0] = f.scale * sum + f.bias[0];
+            // Condition bytes: per source a run of `bucket >= j + 1` (or `== j + 1` for one-hot),
+            // written 8 bytes at a time (most CTR sources have a few conditions, where a loop per
+            // source costs more than the work). A store may run up to 7 bytes into the next
+            // source's run, which is written afterwards, or into the padding.
+            if (!f.row_conditions) {
+                row_trees_all(f, buckets, nullptr, out, s);
                 return;
             }
-            double* sums = s.sums.data();
-            std::fill(sums, sums + dim, 0.0);
-            for (size_t t = 0; t < f.n_trees(); t++) {
-                uint32_t index = 0;
-                for (uint32_t k = f.split_begin[t], bit = 0; k < f.split_begin[t + 1]; k++, bit++) {
-                    const uint16_t v = buckets[source[k]];
-                    index |= static_cast<uint32_t>(equal[k] ? v == threshold[k] : v >= threshold[k]) << bit;
+            static_assert(std::endian::native == std::endian::little, "condition bytes are written as little-endian words");
+            uint8_t* bits = s.conditions.data();
+            constexpr uint64_t kOnes = 0x0101010101010101ULL;
+            for (size_t k = 0; k + 1 < f.condition_begin.size(); k++) {
+                const uint32_t v = buckets[k];
+                uint8_t* b = bits + f.condition_begin[k];
+                const uint32_t n = f.condition_begin[k + 1] - f.condition_begin[k];
+                const bool one_hot = k >= F && k < F + H;
+                for (uint32_t j = 0; j < n; j += 8, b += 8) {
+                    uint64_t word;
+                    if (one_hot) {  // byte v - 1 - j
+                        word = v > j && v - j <= 8 ? uint64_t{1} << (8 * (v - 1 - j)) : 0;
+                    } else {        // bytes below v - j
+                        const uint32_t below = v > j ? std::min<uint32_t>(v - j, 8) : 0;
+                        word = below == 8 ? kOnes : kOnes & ((uint64_t{1} << (8 * below)) - 1);
+                    }
+                    std::memcpy(b, &word, 8);  // little-endian byte order: byte i is bits 8i..8i+7
                 }
-                const double* leaves = f.leaves.data() + f.leaf_begin[t] + index * dim;
-                for (size_t d = 0; d < dim; d++) sums[d] += leaves[d];
             }
-            for (size_t d = 0; d < dim; d++) out[d] = f.scale * sums[d] + f.bias[d];
+            row_trees_all(f, buckets, bits, out, s);
         }
 
         // Categorical columns must hold category hashes; checked before any thread starts.

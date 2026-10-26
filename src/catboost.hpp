@@ -86,6 +86,17 @@ namespace lignum {
         std::vector<uint32_t> prefix_projections;
         uint32_t prefix_levels = 0;                     // longest category list
 
+        // Derived at load (derive_layout, not saved), for the single-row path: every split as one
+        // byte of a per-row condition array. Source s owns bytes [condition_begin[s],
+        // condition_begin[s + 1]): byte j is `bucket >= j + 1`, or `bucket == j + 1` for one-hot
+        // sources, up to the largest threshold a split uses on s.
+        std::vector<uint32_t> condition_begin;  // sources + 1 entries
+        std::vector<uint32_t> split_condition;  // per split
+        std::vector<uint16_t> split_range;      // per split: `bucket >= t` is (uint16_t)(bucket - t) <= range
+        bool row_conditions = false;            // single rows through condition bytes (few sources per split)
+        std::vector<uint32_t> run_end;          // runs of consecutive trees of one depth: last tree + 1
+        std::vector<uint8_t> run_depth;         // and their depth
+
         size_t n_sources() const { return floats.size() + one_hots.size() + ctrs.size(); }
         size_t n_trees() const { return leaf_begin.size(); }
     };

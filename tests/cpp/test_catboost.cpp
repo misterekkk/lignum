@@ -163,6 +163,32 @@ TEST(CatBoost, ProjectionPrefixTree) {
     }
 }
 
+// Single rows (predict_row) through condition bytes and through bucket comparisons give the block
+// path's results, for every input of the fixture's model (floats, NaN, one-hot, CTRs, unseen).
+TEST(CatBoost, SingleRowKernels) {
+    const auto model = lignum::load(write_temp("catboost_small4.cbm", small_cbm()));
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const std::vector<std::string> cats0 = {"a", "b", "c", "d", "zz"}, cats1 = {"u", "v", "w"};
+    std::vector<double> X;
+    for (double x : {-2.0, -0.3, 0.0, 0.4, 1.7, nan}) {
+        for (const auto& c0 : cats0) {
+            for (const auto& c1 : cats1) X.insert(X.end(), {x, hash_of(c0), hash_of(c1)});
+        }
+    }
+    const size_t n = X.size() / 3;
+    std::vector<double> block(n);
+    lignum::predict_oblivious(*model.oblivious, X.data(), n, 3, block.data(), 1, lignum::Strategy::Serial);
+    lignum::ObliviousForest forest = *model.oblivious;
+    for (bool bytes : {true, false}) {
+        forest.row_conditions = bytes;
+        for (size_t i = 0; i < n; i++) {
+            double one = 0.0;
+            lignum::predict_oblivious(forest, X.data() + i * 3, 1, 3, &one, 1, lignum::Strategy::Serial);
+            EXPECT_EQ(one, block[i]) << "row " << i << ", condition bytes " << bytes;
+        }
+    }
+}
+
 TEST(CatBoost, CorruptedCbmFilesAreRejectedOrSafe) {
     const std::string original = small_cbm();
     const auto path = (std::filesystem::temp_directory_path() / "lignum_fuzz_catboost.cbm").string();
