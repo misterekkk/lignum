@@ -368,8 +368,14 @@ namespace lignum {
         }
 
         // Features with at most this many borders get their buckets by counting the borders below
-        // the value (no branches on any compiler); more borders use bucket_search.
-        constexpr size_t kCountBorders = 256;
+        // the value (no branches on any compiler); more borders use bucket_search. On ARM the
+        // search keeps its conditional move and is faster (CI, Neoverse-N2, 1 thread: california
+        // 0.181 s counting vs 0.163 s searching; x86 EPYC: 0.154 vs 0.230 s), so ARM always searches.
+        #if defined(__aarch64__) || defined(_M_ARM64)
+            constexpr size_t kCountBorders = 0;
+        #else
+            constexpr size_t kCountBorders = 256;
+        #endif
 
         // bucket_of over a feature's padded borders: a fixed number of halvings (log2 of the padded
         // size). Written as a conditional move, which ARM compilers keep (csel) and x86 ones turn

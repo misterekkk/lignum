@@ -67,13 +67,25 @@ jobs:
       - name: CatBoost models (generic build) vs CatBoost's Python package and C API
         run: |
           python -m pip install polars
-          python benchmarks/bench_catboost.py --rows 300000 --repeats 5 --latency-budget 0.5
+          python benchmarks/bench_catboost.py --rows 300000 --repeats 5 --latency-budget 0.5 --label "generic build (SSE2 on x86)"
 
       - name: Rebuild lignum with LIGNUM_NATIVE=ON
         run: CMAKE_ARGS="-DLIGNUM_NATIVE=ON" python -m pip install --force-reinstall --no-deps .
 
       - name: lignum (host-tuned build)
         run: python benchmarks/bench.py --engines lignum $BENCH_ARGS
+
+      - name: CatBoost models (host-tuned build)
+        run: python benchmarks/bench_catboost.py --datasets california,covtype,adult --rows 300000 --repeats 5 --latency-budget 0.5 --cmake-args=-DLIGNUM_NATIVE=ON --label "host-tuned build (LIGNUM_NATIVE)"
+
+      # Which x86 instructions the CatBoost kernel misses: SSE2 (generic) vs SSE4.2 vs the host (AVX2).
+      - name: Rebuild lignum with SSE4.2 (x86)
+        if: runner.arch == 'X64'
+        run: CMAKE_ARGS="-DCMAKE_CXX_FLAGS=-msse4.2" python -m pip install --force-reinstall --no-deps .
+
+      - name: CatBoost models (SSE4.2 build, x86)
+        if: runner.arch == 'X64'
+        run: python benchmarks/bench_catboost.py --datasets california,covtype,adult --rows 300000 --repeats 5 --latency-budget 0.5 --cmake-args=-DCMAKE_CXX_FLAGS=-msse4.2 --label "SSE4.2 build"
 
       - name: Rebuild lignum with the experimental variant
         if: env.EXPERIMENT_CXX_FLAGS != ''

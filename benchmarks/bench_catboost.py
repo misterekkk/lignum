@@ -211,15 +211,17 @@ def catboost_library() -> Path:
     return path
 
 
-def build_capi() -> Path:
-    """liblignum (C API, Release) and benchmarks/catboost_capi.cpp, in benchmarks/.cache/capi."""
+def build_capi(cmake_args: list[str]) -> Path:
+    """liblignum (C API, Release, plus cmake_args) and benchmarks/catboost_capi.cpp, in
+    benchmarks/.cache/capi; one build directory per set of arguments."""
     build = CACHE / "capi"
-    subprocess.run(["cmake", "-S", str(ROOT), "-B", str(build / "lignum"), "-DCMAKE_BUILD_TYPE=Release"], check=True,
+    tag = "".join(ch if ch.isalnum() else "_" for ch in " ".join(cmake_args))[:60]
+    libdir = build / ("lignum" + (f"-{tag}" if tag else ""))
+    subprocess.run(["cmake", "-S", str(ROOT), "-B", str(libdir), "-DCMAKE_BUILD_TYPE=Release", *cmake_args], check=True,
                    stdout=subprocess.DEVNULL)
-    subprocess.run(["cmake", "--build", str(build / "lignum"), "--target", "lignum_c", "--parallel"], check=True,
+    subprocess.run(["cmake", "--build", str(libdir), "--target", "lignum_c", "--parallel"], check=True,
                    stdout=subprocess.DEVNULL)
-    exe = build / "catboost_capi"
-    libdir = build / "lignum"
+    exe = libdir / "catboost_capi"
     subprocess.run([os.environ.get("CXX", "c++"), "-O2", "-std=c++20", "-I", str(ROOT / "include"),
                     str(HERE / "catboost_capi.cpp"), "-o", str(exe), f"-L{libdir}", "-llignum",
                     f"-Wl,-rpath,{libdir}", "-ldl", "-pthread"], check=True)
@@ -280,7 +282,7 @@ def render(results: list[Row], env: dict, args, shapes: dict) -> str:
     except ImportError:
         pass
     lines = [
-        f"# CatBoost benchmark {env['date']}",
+        f"# CatBoost benchmark {env['date']}" + (f" ({args.label})" if args.label else ""),
         "",
         f"- lignum commit `{env['commit']}`, {env['cpu']}, {env['threads']} threads, Python {env['python']}",
         f"- CatBoost models: {args.trees} trees of depth 6 trained on 80% of each data set; rows repeated up to {args.rows:,}",
@@ -323,6 +325,8 @@ def main():
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--latency-budget", type=float, default=1.0)
     parser.add_argument("--no-capi", action="store_true")
+    parser.add_argument("--cmake-args", default="", help="extra CMake arguments for the C API build, e.g. --cmake-args=-DLIGNUM_NATIVE=ON")
+    parser.add_argument("--label", default="", help="build name for the report title")
     parser.add_argument("--quick", action="store_true", help="100k rows, 3 repeats")
     args = parser.parse_args()
     if args.quick:
@@ -333,7 +337,7 @@ def main():
     exe = lib = None
     if not args.no_capi:
         lib = catboost_library()
-        exe = build_capi()
+        exe = build_capi(args.cmake_args.split())
 
     env = bench.environment()
     results, shapes = [], {}
