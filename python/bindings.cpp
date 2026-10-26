@@ -58,6 +58,15 @@ namespace {
                                     " (convert NaN or None to a string, as CatBoost requires).");
     }
 
+    // One cell of a CatBoost input: the hash in a categorical column, otherwise the number (None: NaN).
+    double catboost_cell(PyObject* item, bool categorical) {
+        if (categorical) return static_cast<double>(hash_category(item));
+        if (item == Py_None) return std::numeric_limits<double>::quiet_NaN();
+        const double v = PyFloat_AsDouble(item);
+        if (v == -1.0 && PyErr_Occurred()) throw nb::python_error();
+        return v;
+    }
+
     Strategy parse_strategy(const std::string& name) {
         if (name == "auto") return Strategy::Auto;
         if (name == "serial") return Strategy::Serial;
@@ -227,16 +236,7 @@ NB_MODULE(_core, m) {
                 throw std::invalid_argument("All rows must have the same number of values.");
             }
             for (size_t j = 0; j < n_columns; j++) {
-                PyObject* item = PyList_GetItem(row.ptr(), static_cast<Py_ssize_t>(j));
-                if (is_cat[j]) {
-                    values.push_back(static_cast<double>(hash_category(item)));
-                } else if (item == Py_None) {
-                    values.push_back(std::numeric_limits<double>::quiet_NaN());
-                } else {
-                    const double v = PyFloat_AsDouble(item);
-                    if (v == -1.0 && PyErr_Occurred()) throw nb::python_error();
-                    values.push_back(v);
-                }
+                values.push_back(catboost_cell(PyList_GetItem(row.ptr(), static_cast<Py_ssize_t>(j)), is_cat[j]));
             }
         }
         nb::ndarray<nb::numpy, double, nb::c_contig, nb::device::cpu> out = [&] {

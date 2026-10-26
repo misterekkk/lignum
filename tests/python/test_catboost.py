@@ -150,6 +150,48 @@ def test_input_forms_and_threads(tmp_path):
     assert model.categorical_features == [df.columns.get_loc(c) for c in cat_names(df)] if hasattr(model, "categorical_features") else True
 
 
+def test_pandas_paths(tmp_path, monkeypatch):
+    """Large frames go through Arrow (when it converts them), smaller ones column by column;
+    every path gives CatBoost's predictions."""
+    rng = np.random.default_rng(5)
+    df, signal = make_frame(rng)
+    m, path, j = train(cb.CatBoostRegressor, df, signal, tmp_path, "cbm")
+    model = lignum.load(path)
+    t = probe_rows(df, j)
+    want = m.predict(t)
+    as_category = t.astype({c: "category" for c in cat_names(t)})
+    sizes = [1, 2, 99, 100, len(t)]
+    monkeypatch.setattr(lignum, "_ARROW_MIN_ROWS", 100)  # the frames here are small
+
+    def check(frame):
+        for n in sizes:
+            np.testing.assert_array_equal(model.predict(frame.iloc[:n]), want[:n])
+
+    check(t)
+    check(as_category)
+    with monkeypatch.context() as patch:  # no pyarrow
+        patch.setattr(lignum, "_arrow_table", lambda frame: None)
+        check(t)
+        check(as_category)
+    with monkeypatch.context() as patch:  # pandas without the column arrays
+        patch.setattr(pd.DataFrame, "_iter_column_arrays", None, raising=False)
+        check(t)
+
+    # A column of integers and strings: Arrow cannot type it, the pandas path hashes each value.
+    mixed = t.copy()
+    mixed[cat_names(t)[1]] = [int(v[3:]) if i % 3 == 0 and v[3:].isdigit() else v for i, v in enumerate(t[cat_names(t)[1]])]
+    as_text = mixed.astype({cat_names(t)[1]: str})
+    np.testing.assert_array_equal(model.predict(mixed), m.predict(as_text))
+    np.testing.assert_array_equal(model.predict(mixed.iloc[:10]), m.predict(as_text.iloc[:10]))
+
+    # Missing categories are rejected on every path.
+    broken = t.copy()
+    broken.loc[broken.index[70], cat_names(t)[0]] = None
+    for n in [10, 200]:
+        with pytest.raises(ValueError):
+            model.predict(broken.iloc[66:66 + n] if n == 10 else broken.iloc[:n])
+
+
 def test_integer_categories(tmp_path):
     rng = np.random.default_rng(11)
     n = N_ROWS

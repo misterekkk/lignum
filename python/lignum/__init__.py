@@ -36,16 +36,28 @@ def catboost_hash(category) -> int:
     return _core.catboost_hash(category)
 
 
+# From this many rows, CatBoost models predict pandas frames through Arrow (parallel hashing and
+# binning); below, pyarrow's fixed cost per frame (~0.3-1 ms) is more than it saves.
+_ARROW_MIN_ROWS = 50_000
+
+
+def _arrow_table(frame):
+    """A pandas DataFrame as a pyarrow Table, or None (no pyarrow, or columns Arrow cannot convert).
+    CatBoost models predict large frames through Arrow: columns are hashed and binned per block
+    in parallel, instead of a float64 matrix built column by column in Python first."""
+    try:
+        import pyarrow as pa
+    except ImportError:
+        return None
+    try:
+        return pa.Table.from_pandas(frame, preserve_index=False)
+    except (pa.ArrowException, TypeError, ValueError):
+        return None
+
+
 def _category_hashes(column) -> np.ndarray:
-    """Hashes of one categorical column (pandas Series or 1-D array) as float64."""
-    if _is_pandas(column) and str(column.dtype) == "category":
-        codes = column.cat.codes.to_numpy()
-        if (codes < 0).any():
-            raise ValueError(f"Categorical column {column.name!r} has missing values; CatBoost needs a category "
-                             "(e.g. the string 'nan') in every row.")
-        return _core._catboost_hashes(column.cat.categories.to_numpy(dtype=object))[codes]
-    values = column.to_numpy(dtype=object) if _is_pandas(column) else np.asarray(column, dtype=object)
-    return _core._catboost_hashes(values)
+    """Hashes of one categorical column (a 1-D array) as float64."""
+    return _core._catboost_hashes(np.asarray(column, dtype=object))
 
 
 class Model:
@@ -59,6 +71,39 @@ class Model:
     def __init__(self, _c_model):
         self._c_model = _c_model
         self._categorical = frozenset(_c_model.categorical_features)
+        self._category_cache = {}
+
+    def _catboost_frame(self, X) -> np.ndarray:
+        """float64 matrix of a pandas DataFrame, column by column: categorical columns as the
+        hashes of their categories (cached per categories object) indexed by their codes."""
+        out = np.empty(X.shape, dtype=np.float64)
+        iter_arrays = getattr(X, "_iter_column_arrays", None)  # pandas internals: ~1 µs per column
+        arrays = iter_arrays() if iter_arrays is not None else (X.iloc[:, j].array for j in range(X.shape[1]))
+        for j, a in enumerate(arrays):
+            if j not in self._categorical:
+                out[:, j] = a if isinstance(a, np.ndarray) else a.to_numpy(dtype=np.float64, na_value=np.nan)
+            elif hasattr(a, "codes") and hasattr(a, "categories"):  # pandas Categorical
+                codes = np.asarray(a.codes)
+                if (codes < 0).any():
+                    raise ValueError(f"Categorical column {X.columns[j]!r} has missing values; CatBoost needs a category "
+                                     "(e.g. the string 'nan') in every row.")
+                out[:, j] = self._category_table(a.categories)[codes]
+            else:
+                out[:, j] = _core._catboost_hashes(a if isinstance(a, np.ndarray) and a.dtype == object else np.asarray(a, dtype=object))
+        return out
+
+    def _category_table(self, categories) -> np.ndarray:
+        """Hashes of a pandas categories Index. Kept while the Index lives (frames sliced from one
+        frame share it), so small frames do not hash every category again."""
+        cache = self._category_cache
+        entry = cache.get(id(categories))
+        if entry is not None and entry[0] is categories:
+            return entry[1]
+        if len(cache) >= 256:
+            cache.clear()
+        hashes = _core._catboost_hashes(categories.to_numpy(dtype=object))
+        cache[id(categories)] = (categories, hashes)
+        return hashes
 
     def _catboost_matrix(self, X) -> np.ndarray:
         """float64 matrix with category hashes in the categorical columns (CatBoost models)."""
@@ -68,13 +113,7 @@ class Model:
         if _is_pandas(X):
             if X.ndim == 1:  # a Series is one row
                 return _core._catboost_rows(X.tolist(), categorical)
-            if len(X) <= 64:  # few rows: one object array (categoricals give their values), converted in C++
-                return _core._catboost_rows(X.to_numpy(dtype=object), categorical)
-            out = np.empty(X.shape, dtype=np.float64)
-            for j in range(X.shape[1]):
-                column = X.iloc[:, j]
-                out[:, j] = _category_hashes(column) if j in self._categorical else column.to_numpy(dtype=np.float64, na_value=np.nan)
-            return out
+            return self._catboost_frame(X)
         if isinstance(X, np.ndarray) and X.dtype.kind in "fc" and self._categorical:
             raise ValueError("This CatBoost model has categorical features; pass them as strings or integers "
                              "(an object array, a list or a pandas DataFrame), not floats.")
@@ -105,7 +144,8 @@ class Model:
             table, nulls are NaN and dictionary (categorical) columns give their category codes.
             Predictions equal those for the same float64 matrix. pandas DataFrames are converted
             with numpy; pass `pyarrow.Table.from_pandas(df)` for categorical columns. A 1-D
-            array or a flat list is one row. CatBoost models with categorical features take their categories as strings or
+            array or a flat list is one row. CatBoost models predict pandas frames of 50,000 rows
+            or more through pyarrow when it is installed (faster, same results). CatBoost models with categorical features take their categories as strings or
             integers: a pandas DataFrame, a numpy object array, or a list (one row) or list of
             rows; see `categorical_features` and `catboost_hash`.
         raw_score : bool, default=False
@@ -145,6 +185,13 @@ class Model:
             if hasattr(X, "__arrow_c_stream__"):
                 return self._c_model.predict_arrow_stream(X.__arrow_c_stream__(), raw_score, n_jobs, strategy)
         if self._categorical:
+            if _is_pandas(X) and X.ndim == 2 and len(X) >= _ARROW_MIN_ROWS:
+                table = _arrow_table(X)
+                if table is not None:
+                    try:
+                        return self._c_model.predict_arrow_stream(table.__arrow_c_stream__(), raw_score, n_jobs, strategy)
+                    except ValueError:
+                        pass  # e.g. a column Arrow typed differently: the pandas path decides
             return self._c_model.predict(self._catboost_matrix(X), raw_score, n_jobs, strategy)
         X_arr = np.ascontiguousarray(X, dtype=np.float64)
         if X_arr.ndim == 1:  # one row
