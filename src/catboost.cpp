@@ -276,6 +276,38 @@ namespace lignum {
         // Slot of a combination hash in a table; the hashes are already well mixed.
         inline uint64_t slot_of(uint64_t key, uint64_t mask) { return (key ^ (key >> 29)) & mask; }
 
+        // Fills the forest's prefix tree from its projections (see ObliviousForest::prefix_cat):
+        // projections sorted by category list, one node per category not shared with the previous
+        // list. In this order every node's parent is the latest node one level up.
+        void index_prefixes(ObliviousForest& f) {
+            std::vector<uint32_t> order(f.projections.size());
+            for (uint32_t p = 0; p < order.size(); p++) order[p] = p;
+            std::stable_sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return f.projections[a].cats < f.projections[b].cats; });
+            f.prefix_cat.clear();
+            f.prefix_level.clear();
+            f.prefix_projection_begin.assign(1, 0);
+            f.prefix_projections.clear();
+            f.prefix_levels = 0;
+            const std::vector<uint32_t>* previous = nullptr;
+            for (uint32_t p : order) {
+                const std::vector<uint32_t>& cats = f.projections[p].cats;
+                if (cats.empty() || cats.size() > 255) throw std::runtime_error("CatBoost projection with " + std::to_string(cats.size()) + " categories.");
+                if (!previous || cats != *previous) {  // new nodes from the first category not shared with the previous list
+                    size_t common = 0;
+                    while (previous && common + 1 < cats.size() && common < previous->size() && cats[common] == (*previous)[common]) common++;
+                    for (size_t level = common; level < cats.size(); level++) {
+                        f.prefix_cat.push_back(cats[level]);
+                        f.prefix_level.push_back(static_cast<uint8_t>(level));
+                        f.prefix_projection_begin.push_back(static_cast<uint32_t>(f.prefix_projections.size()));
+                    }
+                }
+                f.prefix_projections.push_back(p);  // to the latest node: its category list is this one
+                f.prefix_projection_begin.back() = static_cast<uint32_t>(f.prefix_projections.size());
+                f.prefix_levels = std::max(f.prefix_levels, static_cast<uint32_t>(cats.size()));
+                previous = &cats;
+            }
+        }
+
         // Number of strictly increasing borders below x: the bucket with x > borders[k] <=> bucket >= k + 1.
         inline uint16_t bucket_of(const std::vector<float>& borders, float x) {
             return static_cast<uint16_t>(std::lower_bound(borders.begin(), borders.end(), x) - borders.begin());
@@ -633,6 +665,7 @@ namespace lignum {
             if (split != spec.splits.size() || leaf != spec.leaves.size()) malformed("tree sizes do not match the splits and leaves");
             f.leaves = std::move(spec.leaves);
             f.n_columns = n_columns;
+            index_prefixes(f);
 
             Model model;
             model.n_outputs = f.dim;
@@ -1104,6 +1137,7 @@ namespace lignum {
             std::vector<uint32_t> hashes;
             std::vector<uint32_t> entries;
             std::vector<uint64_t> combination;
+            std::vector<uint64_t> prefixes;  // [level][row]: hash of the current prefix-tree node per level
             std::vector<uint16_t> index;
             std::vector<double> sums;
 
@@ -1113,6 +1147,7 @@ namespace lignum {
                 grow(hashes, f.cat_columns.size() * rows);
                 grow(entries, f.tables.size() * rows);
                 grow(combination, rows);
+                grow(prefixes, f.prefix_levels * rows);
                 grow(index, rows);
                 grow(sums, rows * f.dim);
             }
@@ -1242,36 +1277,45 @@ namespace lignum {
                     b[r] = v;
                 }
             }
-            // CTRs: one combination hash per projection, one lookup per table, a bucket per CTR.
-            for (size_t p = 0; p < f.projections.size(); p++) {
-                const ObliviousForest::Projection& proj = f.projections[p];
-                uint64_t* hash = s.combination.data();
-                std::fill(hash, hash + rows, uint64_t{0});
-                for (uint32_t c : proj.cats) {
-                    const uint32_t* h = s.hashes.data() + c * stride;
-                    for (size_t r = 0; r < rows; r++) {
-                        hash[r] = combine_hash(hash[r], static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(h[r]))));
-                    }
+            // CTRs: the category hashes of every prefix-tree node (a prefix shared by projections is
+            // hashed once), then per projection its float / one-hot conditions, one lookup per table
+            // and a bucket per CTR.
+            for (size_t n = 0; n < f.prefix_cat.size(); n++) {
+                const uint32_t level = f.prefix_level[n];
+                uint64_t* hash = s.prefixes.data() + level * stride;
+                const uint64_t* parent = level ? hash - stride : nullptr;
+                const uint32_t* h = s.hashes.data() + f.prefix_cat[n] * stride;
+                for (size_t r = 0; r < rows; r++) {
+                    hash[r] = combine_hash(parent ? parent[r] : 0, static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(h[r]))));
                 }
-                for (const auto& [source, threshold] : proj.floats) {
-                    const uint16_t* b = buckets + source * stride;
-                    for (size_t r = 0; r < rows; r++) hash[r] = combine_hash(hash[r], b[r] >= threshold ? 1 : 0);
-                }
-                for (const auto& [source, value] : proj.one_hots) {
-                    const uint16_t* b = buckets + source * stride;
-                    for (size_t r = 0; r < rows; r++) hash[r] = combine_hash(hash[r], b[r] == value ? 1 : 0);
-                }
-                for (uint32_t t : proj.tables) {
-                    const ObliviousForest::Table& table = f.tables[t];
-                    uint32_t* entries = s.entries.data() + t * stride;
-                    for (size_t r = 0; r < rows; r++) {
-                        uint64_t slot = slot_of(hash[r], table.mask);
-                        uint32_t found = 0;
-                        while (table.slots[slot] != 0) {
-                            if (table.keys[slot] == hash[r]) { found = table.slots[slot]; break; }
-                            slot = (slot + 1) & table.mask;
+                for (uint32_t i = f.prefix_projection_begin[n]; i < f.prefix_projection_begin[n + 1]; i++) {
+                    const ObliviousForest::Projection& proj = f.projections[f.prefix_projections[i]];
+                    const uint64_t* combination = hash;
+                    if (!proj.floats.empty() || !proj.one_hots.empty()) {
+                        uint64_t* c = s.combination.data();
+                        std::copy(hash, hash + rows, c);
+                        for (const auto& [source, threshold] : proj.floats) {
+                            const uint16_t* b = buckets + source * stride;
+                            for (size_t r = 0; r < rows; r++) c[r] = combine_hash(c[r], b[r] >= threshold ? 1 : 0);
                         }
-                        entries[r] = found;
+                        for (const auto& [source, value] : proj.one_hots) {
+                            const uint16_t* b = buckets + source * stride;
+                            for (size_t r = 0; r < rows; r++) c[r] = combine_hash(c[r], b[r] == value ? 1 : 0);
+                        }
+                        combination = c;
+                    }
+                    for (uint32_t t : proj.tables) {
+                        const ObliviousForest::Table& table = f.tables[t];
+                        uint32_t* entries = s.entries.data() + t * stride;
+                        for (size_t r = 0; r < rows; r++) {
+                            uint64_t slot = slot_of(combination[r], table.mask);
+                            uint32_t found = 0;
+                            while (table.slots[slot] != 0) {
+                                if (table.keys[slot] == combination[r]) { found = table.slots[slot]; break; }
+                                slot = (slot + 1) & table.mask;
+                            }
+                            entries[r] = found;
+                        }
                     }
                 }
             }
@@ -1317,20 +1361,25 @@ namespace lignum {
                 for (size_t j = 0; j < oh.values.size(); j++) v = oh.values[j] == h ? static_cast<uint16_t>(j + 1) : v;
                 buckets[F + k] = v;
             }
-            for (const ObliviousForest::Projection& proj : f.projections) {
-                uint64_t hash = 0;
-                for (uint32_t c : proj.cats) hash = combine_hash(hash, static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(hashes[c]))));
-                for (const auto& [source, threshold] : proj.floats) hash = combine_hash(hash, buckets[source] >= threshold ? 1 : 0);
-                for (const auto& [source, value] : proj.one_hots) hash = combine_hash(hash, buckets[source] == value ? 1 : 0);
-                for (uint32_t t : proj.tables) {
-                    const ObliviousForest::Table& table = f.tables[t];
-                    uint64_t slot = slot_of(hash, table.mask);
-                    uint32_t found = 0;
-                    while (table.slots[slot] != 0) {
-                        if (table.keys[slot] == hash) { found = table.slots[slot]; break; }
-                        slot = (slot + 1) & table.mask;
+            uint64_t* prefix = s.prefixes.data();
+            for (size_t n = 0; n < f.prefix_cat.size(); n++) {
+                const uint32_t level = f.prefix_level[n];
+                prefix[level] = combine_hash(level ? prefix[level - 1] : 0, static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(hashes[f.prefix_cat[n]]))));
+                for (uint32_t i = f.prefix_projection_begin[n]; i < f.prefix_projection_begin[n + 1]; i++) {
+                    const ObliviousForest::Projection& proj = f.projections[f.prefix_projections[i]];
+                    uint64_t hash = prefix[level];
+                    for (const auto& [source, threshold] : proj.floats) hash = combine_hash(hash, buckets[source] >= threshold ? 1 : 0);
+                    for (const auto& [source, value] : proj.one_hots) hash = combine_hash(hash, buckets[source] == value ? 1 : 0);
+                    for (uint32_t t : proj.tables) {
+                        const ObliviousForest::Table& table = f.tables[t];
+                        uint64_t slot = slot_of(hash, table.mask);
+                        uint32_t found = 0;
+                        while (table.slots[slot] != 0) {
+                            if (table.keys[slot] == hash) { found = table.slots[slot]; break; }
+                            slot = (slot + 1) & table.mask;
+                        }
+                        entries[t] = found;
                     }
-                    entries[t] = found;
                 }
             }
             for (size_t k = 0; k < f.ctrs.size(); k++) {
@@ -1650,6 +1699,7 @@ namespace lignum {
         f->dim = u32[1];
         f->scale = f64[0];
         validate(*f);
+        index_prefixes(*f);
         return f;
     }
 

@@ -75,6 +75,16 @@ namespace lignum {
         double scale = 1.0;
         std::vector<double> bias;  // dim entries
 
+        // Derived at load (index_prefixes, not saved): the projections' category lists as a prefix
+        // tree in depth-first order, so a prefix shared by several projections is hashed once per
+        // row. Node n adds category prefix_cat[n] to the hash of its parent, the latest node one
+        // level up; the projections with exactly that category list follow it.
+        std::vector<uint32_t> prefix_cat;
+        std::vector<uint8_t> prefix_level;              // 0: first category
+        std::vector<uint32_t> prefix_projection_begin;  // nodes + 1 entries, into prefix_projections
+        std::vector<uint32_t> prefix_projections;
+        uint32_t prefix_levels = 0;                     // longest category list
+
         size_t n_sources() const { return floats.size() + one_hots.size() + ctrs.size(); }
         size_t n_trees() const { return leaf_begin.size(); }
     };

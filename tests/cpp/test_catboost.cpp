@@ -129,6 +129,36 @@ TEST(CatBoost, CbmModel) {
               (std::vector<double>{-0x1.60f24937c833cp-1, 0x1.fdeff1ed31a48p-1, 0x1.88198b1cbd9bcp-1, -0x1.5351ebab1a63cp+0}));
 }
 
+// The prefix tree of the projections: every projection once, under the node whose path from the
+// root is its category list, and shared prefixes hashed once. Loaded from .cbm and from .bin.
+TEST(CatBoost, ProjectionPrefixTree) {
+    const auto cbm = lignum::load(write_temp("catboost_small3.cbm", small_cbm()));
+    const auto saved = (std::filesystem::temp_directory_path() / "lignum_catboost_prefix.bin").string();
+    cbm.save(saved);
+    const auto bin = lignum::load(saved);
+    for (const auto* model : {&cbm, &bin}) {
+        const lignum::ObliviousForest& f = *model->oblivious;
+        ASSERT_EQ(f.prefix_projection_begin.size(), f.prefix_cat.size() + 1);
+        std::vector<int> seen(f.projections.size(), 0);
+        std::vector<uint32_t> path;
+        size_t category_hashes = 0;
+        for (size_t n = 0; n < f.prefix_cat.size(); n++) {
+            ASSERT_LE(f.prefix_level[n], path.size());  // a child of the latest node one level up
+            path.resize(f.prefix_level[n]);
+            path.push_back(f.prefix_cat[n]);
+            for (uint32_t i = f.prefix_projection_begin[n]; i < f.prefix_projection_begin[n + 1]; i++) {
+                const uint32_t p = f.prefix_projections[i];
+                EXPECT_EQ(f.projections[p].cats, path);
+                seen[p]++;
+            }
+        }
+        for (int count : seen) EXPECT_EQ(count, 1);
+        for (const auto& p : f.projections) category_hashes += p.cats.size();
+        EXPECT_GT(f.projections.size(), 2u);
+        EXPECT_LT(f.prefix_cat.size(), category_hashes);  // max_ctr_complexity=2: [c0], [c0, c1] share c0
+    }
+}
+
 TEST(CatBoost, CorruptedCbmFilesAreRejectedOrSafe) {
     const std::string original = small_cbm();
     const auto path = (std::filesystem::temp_directory_path() / "lignum_fuzz_catboost.cbm").string();
