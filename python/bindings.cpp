@@ -78,7 +78,8 @@ namespace {
 
 NB_MODULE(_core, m) {
     nb::class_<Model>(m, "Model")
-        .def("predict", [](const Model& self, nb::ndarray<double, nb::c_contig, nb::device::cpu> X, bool raw_score, int n_jobs, const std::string& strategy_name) {
+        // const: read-only arrays too (pandas 3.1 gives read-only views of single-dtype frames).
+        .def("predict", [](const Model& self, nb::ndarray<const double, nb::c_contig, nb::device::cpu> X, bool raw_score, int n_jobs, const std::string& strategy_name) {
             const Strategy strategy = parse_strategy(strategy_name);
             if (X.ndim() != 2) {
                 throw std::invalid_argument("Input array must be 2D.");
