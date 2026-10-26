@@ -64,10 +64,10 @@ jobs:
       - name: lignum (generic build, interpreter and compiled mode) vs lleaves
         run: python benchmarks/bench.py --engines lignum,lignum-compiled,lleaves $BENCH_ARGS
 
-      - name: CatBoost models (generic build) vs CatBoost's Python package and C API
+      - name: CatBoost models (default build) vs CatBoost's Python package and C API
         run: |
           python -m pip install polars
-          python benchmarks/bench_catboost.py --rows 300000 --repeats 5 --latency-budget 0.5 --label "generic build (SSE2 on x86)"
+          python benchmarks/bench_catboost.py --rows 300000 --repeats 5 --latency-budget 0.5 --label "default build (x86: AVX2 kernel chosen at run time)"
 
       - name: Rebuild lignum with LIGNUM_NATIVE=ON
         run: CMAKE_ARGS="-DLIGNUM_NATIVE=ON" python -m pip install --force-reinstall --no-deps .

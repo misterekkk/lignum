@@ -76,10 +76,10 @@ jobs:
       - name: Run tests
         run: python -m pytest tests/python -v
 
-      # x86-64 Linux runners have AVX2, so the run above used the AVX2 build of the CatBoost
-      # kernel; this one forces the generic build (what CPUs without AVX2 get).
-      - name: Run CatBoost tests with the generic kernel (x86-64 Linux)
-        if: runner.os == 'Linux' && runner.arch == 'X64'
+      # x86-64 Linux and Windows runners have AVX2, so the run above used the AVX2 build of the
+      # CatBoost kernel; this one forces the generic build (what CPUs without AVX2 get).
+      - name: Run CatBoost tests with the generic kernel (x86-64 Linux and Windows)
+        if: runner.os != 'macOS' && runner.arch == 'X64'
         env:
           LIGNUM_ISA: generic
         run: python -m pytest tests/python/test_catboost.py tests/python/test_real_data.py -v -k "catboost"

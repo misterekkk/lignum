@@ -1,9 +1,11 @@
-// The CatBoost block kernel compiled for AVX2 (x86-64 GCC and Clang builds), chosen at run time
-// by catboost.cpp when the CPU has AVX2. Every header is included before the target switch, so
+// The CatBoost block kernel compiled for AVX2 (x86-64 builds), chosen at run time by catboost.cpp
+// when the CPU has AVX2. GCC and Clang: every header is included before the target switch, so
 // the standard library's inline functions keep the generic instruction set even where a copy of
 // them is emitted here; only the kernel's own functions, internal to the avx2 namespace, use AVX2.
-// tests/cpp/check_kernel_isa.py checks that no weakly linked function of this object uses VEX
-// (AVX) instructions.
+// MSVC: the whole file is compiled with /arch:AVX2 (CMakeLists.txt), so no function outside the
+// avx2 namespace may be emitted here with external linkage (the linker could pick this copy for
+// every caller). tests/cpp/check_kernel_isa.py checks both: the linked library (objdump) and this
+// object file (dumpbin).
 
 #include "catboost_kernel.hpp"
 

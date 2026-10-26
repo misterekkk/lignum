@@ -66,3 +66,49 @@ jobs:
         with:
           name: catboost-profile-${{ matrix.os }}
           path: profile.md
+
+  # Windows (MSVC): no valgrind or CatBoost C API here, so the Python front is timed with the
+  # default kernel (AVX2 where the CPU has it) and the generic one, CatBoost in the same job.
+  windows:
+    name: windows-latest (timings)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lignum and CatBoost
+        run: python -m pip install ".[test]"
+
+      - name: Cache datasets
+        uses: actions/cache@v4
+        with:
+          path: benchmarks/.cache/datasets
+          key: datasets-v1
+
+      - name: Default kernel and generic kernel
+        shell: bash
+        run: |
+          set -o pipefail
+          args="--no-capi --datasets california,adult,covtype --rows 200000 --repeats 5 --latency-budget 0.3"
+          LIGNUM_ISA=generic python benchmarks/bench_catboost.py $args --label "MSVC, generic kernel" | tee generic.txt
+          python benchmarks/bench_catboost.py $args --label "MSVC, default kernel (AVX2 where the CPU has it)" | tee default.txt
+
+      - name: Tables as an annotation
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import glob
+          text = "\n\n".join(open(f).read() for f in sorted(glob.glob("benchmarks/results/*-catboost.md")))
+          lines = [l for l in text.splitlines() if l.startswith(("# ", "- lignum", "## ", "| catboost | pandas", "| lignum | pandas"))]
+          print("::notice title=CatBoost on Windows::" + "\n".join(lines)[:4000].replace("%", "%25").replace("\n", "%0A"))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: catboost-profile-windows-latest
+          path: benchmarks/results/*-catboost.md
