@@ -356,6 +356,10 @@ namespace lignum {
             // splits) 0.62 vs 0.92 µs, covtype (53) 1.02 vs 1.23, bank (268, 2969) 1.60 vs 1.67;
             // adult (364, 2981) 2.25 vs 2.08, diabetes (1228, 2943) 6.7 vs 5.1.
             f.row_conditions = n_sources * 10 <= f.split_source.size();
+            f.tree_equal.assign(f.n_trees(), 0);
+            for (size_t t = 0; t < f.n_trees(); t++) {
+                for (uint32_t k = f.split_begin[t]; k < f.split_begin[t + 1]; k++) f.tree_equal[t] |= f.split_equal[k];
+            }
             f.small_buckets = true;
             for (const auto& x : f.floats) f.small_buckets &= x.borders.size() <= 255;
             for (const auto& x : f.one_hots) f.small_buckets &= x.values.size() <= 255;
@@ -452,6 +456,36 @@ namespace lignum {
         #else
             #define LIGNUM_HOT_LOOP
         #endif
+
+        // Trees without one-hot splits get their leaf index from plain `bucket >= t` tests, the
+        // bits gathered from the deepest level up (v = 2 v + bit): one constant per level instead
+        // of three (threshold, range, bit mask). With depth 6 that is 6 vector registers instead
+        // of 18, which SSE2's 16 could not hold (GCC reloaded 8 of them from the stack in the hot
+        // loop). LIGNUM_CATBOOST_GE=0 uses the range test for every tree.
+        #ifndef LIGNUM_CATBOOST_GE
+            #define LIGNUM_CATBOOST_GE 1
+        #endif
+        constexpr bool kPlainSplits = LIGNUM_CATBOOST_GE != 0;
+
+        // Prefetch each tree's leaves before its indices are computed (CatBoost's evaluator does);
+        // a compiler builtin, no-op where there is none.
+        #ifndef LIGNUM_CATBOOST_PREFETCH
+            #define LIGNUM_CATBOOST_PREFETCH 0
+        #endif
+        inline void prefetch_leaves(const double* leaves, size_t count) {
+            if constexpr (LIGNUM_CATBOOST_PREFETCH != 0) {
+            #if defined(__GNUC__) || defined(__clang__)
+                const char* p = reinterpret_cast<const char*>(leaves);
+                for (size_t offset = 0; offset < count * sizeof(double); offset += 64) __builtin_prefetch(p + offset);
+            #else
+                (void)leaves;
+                (void)count;
+            #endif
+            } else {
+                (void)leaves;
+                (void)count;
+            }
+        }
 
         // bucket_of over a feature's padded borders: a fixed number of halvings (log2 of the padded
         // size). Written as a conditional move, which ARM compilers keep (csel) and x86 ones turn
@@ -1306,7 +1340,12 @@ namespace lignum {
 
     namespace {
 
-        constexpr size_t kBlock = 128;
+        // Rows per block; LIGNUM_CATBOOST_BLOCK for experiments (bucket and index arrays are this
+        // many rows long per source and tree).
+        #ifndef LIGNUM_CATBOOST_BLOCK
+            #define LIGNUM_CATBOOST_BLOCK 128
+        #endif
+        constexpr size_t kBlock = LIGNUM_CATBOOST_BLOCK;
         // Batches below this many rows take the per-row path (see predict_row).
         #ifndef LIGNUM_CATBOOST_ROW_PATH
             #define LIGNUM_CATBOOST_ROW_PATH 4
@@ -1391,6 +1430,48 @@ namespace lignum {
             }
         }
 
+        // Leaf indices of a tree whose splits are all `bucket >= t` (see kPlainSplits).
+        template <int Depth, typename B, typename I>
+        LIGNUM_HOT_LOOP void tree_index_ge(const B* buckets, size_t stride, const uint16_t* source, const uint16_t* threshold,
+                                           size_t rows, I* index) {
+            static_assert(Depth <= 8 * static_cast<int>(sizeof(I)), "leaf index too narrow for the depth");
+            const B* b[Depth];
+            B lo[Depth];
+            for (int d = 0; d < Depth; d++) {
+                b[d] = buckets + source[d] * stride;
+                lo[d] = static_cast<B>(threshold[d]);
+            }
+            for (size_t r = 0; r < rows; r++) {
+                I v = 0;
+                for (int d = Depth - 1; d >= 0; d--) v = static_cast<I>(v + v + (b[d][r] >= lo[d]));
+                index[r] = v;
+            }
+        }
+
+        template <typename B, typename I>
+        void tree_index_ge_dispatch(const B* buckets, size_t stride, const uint16_t* source, const uint16_t* threshold,
+                                    const uint8_t* equal, uint32_t depth, size_t rows, I* index) {
+            switch (depth) {
+                case 1: tree_index_ge<1>(buckets, stride, source, threshold, rows, index); break;
+                case 2: tree_index_ge<2>(buckets, stride, source, threshold, rows, index); break;
+                case 3: tree_index_ge<3>(buckets, stride, source, threshold, rows, index); break;
+                case 4: tree_index_ge<4>(buckets, stride, source, threshold, rows, index); break;
+                case 5: tree_index_ge<5>(buckets, stride, source, threshold, rows, index); break;
+                case 6: tree_index_ge<6>(buckets, stride, source, threshold, rows, index); break;
+                case 7: tree_index_ge<7>(buckets, stride, source, threshold, rows, index); break;
+                case 8: tree_index_ge<8>(buckets, stride, source, threshold, rows, index); break;
+                default:
+                    if constexpr (sizeof(I) > 1) {
+                        if (depth == 9) tree_index_ge<9>(buckets, stride, source, threshold, rows, index);
+                        else if (depth == 10) tree_index_ge<10>(buckets, stride, source, threshold, rows, index);
+                        else tree_index_any(buckets, stride, source, threshold, equal, depth, rows, index);
+                    } else {
+                        tree_index_any(buckets, stride, source, threshold, equal, depth, rows, index);  // depth 0
+                    }
+                    break;
+            }
+        }
+
         // Byte indices (I = uint8_t) are only used when every tree has depth <= 8.
         template <typename B, typename I>
         void tree_index_dispatch(const B* buckets, size_t stride, const uint16_t* source, const uint16_t* threshold,
@@ -1451,10 +1532,16 @@ namespace lignum {
             I* index = reinterpret_cast<I*>(s.index.data());  // 16-bit storage; bytes may alias it
             const double* leaves[kGroup];
             auto tree = [&](size_t t, int g) {
-                const uint32_t k = f.split_begin[t];
-                tree_index_dispatch(buckets, stride, f.split_source.data() + k, f.split_threshold.data() + k, f.split_equal.data() + k,
-                                    f.split_begin[t + 1] - k, rows, index + g * rows);
+                const uint32_t k = f.split_begin[t], depth = f.split_begin[t + 1] - k;
                 leaves[g] = f.leaves.data() + f.leaf_begin[t];
+                prefetch_leaves(leaves[g], dim << depth);
+                if (kPlainSplits && !f.tree_equal[t]) {
+                    tree_index_ge_dispatch(buckets, stride, f.split_source.data() + k, f.split_threshold.data() + k,
+                                           f.split_equal.data() + k, depth, rows, index + g * rows);
+                } else {
+                    tree_index_dispatch(buckets, stride, f.split_source.data() + k, f.split_threshold.data() + k,
+                                        f.split_equal.data() + k, depth, rows, index + g * rows);
+                }
             };
             size_t t = 0;
             for (; t + kGroup <= f.n_trees(); t += kGroup) {

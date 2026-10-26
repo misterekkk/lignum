@@ -100,6 +100,7 @@ namespace lignum {
         uint32_t max_depth = 0;                 // derived: the deepest tree
         std::vector<uint32_t> run_end;          // runs of consecutive trees of one depth: last tree + 1
         std::vector<uint8_t> run_depth;         // and their depth
+        std::vector<uint8_t> tree_equal;        // derived: 1 when a tree has a one-hot split (bucket == t)
 
         size_t n_sources() const { return floats.size() + one_hots.size() + ctrs.size(); }
         size_t n_trees() const { return leaf_begin.size(); }

@@ -35,11 +35,11 @@ KERNEL = re.compile(r"::(predict_block\w*|phase2|tree_index\w*|float_buckets|row
 CASES = ["none", "catboost-batch", "lignum-batch", "catboost-row", "lignum-row"]
 # Default build (float buckets per feature, u8, groups of 4 trees) and one change at a time.
 # Default build and one change at a time; -m flags only where the CPU has the instructions.
-VARIANTS = ["default:", "index16:-DLIGNUM_CATBOOST_INDEX8=0", "avx2:-mavx2",
-            "avx512:-mavx512f -mavx512bw -mavx512vl -mavx512dq"]
+VARIANTS = ["default:", "range index:-DLIGNUM_CATBOOST_GE=0", "prefetch:-DLIGNUM_CATBOOST_PREFETCH=1",
+            "block 256:-DLIGNUM_CATBOOST_BLOCK=256", "avx2:-mavx2", "avx2 block 256:-mavx2 -DLIGNUM_CATBOOST_BLOCK=256"]
 # The functions whose assembly is printed (built with -DLIGNUM_CATBOOST_ASM, so they are not inlined).
-ASM_FUNCTIONS = [r"tree_index<6, unsigned char, unsigned char>", r"add_leaves<4, 1, unsigned char>",
-                 r"float_buckets<unsigned char>"]
+ASM_FUNCTIONS = [r"tree_index_ge<6, unsigned char, unsigned char>", r"tree_index<6, unsigned char, unsigned char>",
+                 r"add_leaves<4, 1, unsigned char>", r"float_buckets<unsigned char>"]
 
 
 def cpu_supports(flags: str) -> bool:
