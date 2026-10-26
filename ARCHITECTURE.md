@@ -172,7 +172,10 @@ output transforms are shared with the other models.
 - **Outputs**: the sigmoid is the shared one. `exp` (Poisson, Tweedie) is CatBoost's
   `FastExpWithInfInplace`, which differs by platform:
   - x86: herumi's `fmath::expd_v`, a table-based approximation (`catboost_exp`, a scalar copy of the
-    SSE2/AVX2 loops), which differs from `std::exp` in the last bit on about a third of the values;
+    SSE2/AVX2 loops), which differs from `std::exp` in the last bit on about a third of the values.
+    Its table is `pow(2, i/2048)` from the platform's libm, as in CatBoost: macOS x86_64's `pow` is
+    off by 1 ulp at two entries. Windows uses correctly rounded constants, which match CatBoost's
+    Windows build;
   - other platforms: `std::exp`.
 - **Verification**: bit-exact against CatBoost on binary and regression models (`tests/python/test_catboost.py`).
   Covered: CTR complexity 1-4, every CPU CTR type, NaN modes, more than 255 borders, unseen
