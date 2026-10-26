@@ -30,8 +30,8 @@ def _is_pandas(X) -> bool:
 def catboost_hash(category) -> int:
     """
     CatBoost's hash of a category: a string, or an integer (hashed as its decimal text, like
-    CatBoost). `Model.predict` hashes categorical columns itself; use this to build a float64
-    matrix by hand, with the hash in each categorical column.
+    CatBoost). `Model.predict` hashes categorical columns itself; this is the value the kernel
+    sees, and what C and C++ callers put in the categorical columns of a float64 matrix.
     """
     return _core.catboost_hash(category)
 
@@ -104,8 +104,8 @@ class Model:
             float64, float32, integer, boolean and null columns are read without copying the
             table, nulls are NaN and dictionary (categorical) columns give their category codes.
             Predictions equal those for the same float64 matrix. pandas DataFrames are converted
-            with numpy; pass `pyarrow.Table.from_pandas(df)` for categorical columns.
-            CatBoost models with categorical features take their categories as strings or
+            with numpy; pass `pyarrow.Table.from_pandas(df)` for categorical columns. A 1-D
+            array or a flat list is one row. CatBoost models with categorical features take their categories as strings or
             integers: a pandas DataFrame, a numpy object array, or a list (one row) or list of
             rows; see `categorical_features` and `catboost_hash`.
         raw_score : bool, default=False
@@ -147,6 +147,8 @@ class Model:
         if self._categorical:
             return self._c_model.predict(self._catboost_matrix(X), raw_score, n_jobs, strategy)
         X_arr = np.ascontiguousarray(X, dtype=np.float64)
+        if X_arr.ndim == 1:  # one row
+            X_arr = X_arr.reshape(1, -1)
         return self._c_model.predict(X_arr, raw_score, n_jobs, strategy)
 
     @property

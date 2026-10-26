@@ -47,10 +47,25 @@ int main(void) {
 | `LignumModelNumFeatures`, `LignumModelOutputWidth` | input columns, values per output row |
 | `LignumModelPredict(handle, X, n, n_features, raw, n_jobs, strategy, out)` | row-major `float64` input |
 | `LignumModelPredictArrow(handle, schema, batch, raw, n_jobs, strategy, out)` | an Arrow record batch ([Arrow input](../arrow/)) |
+| `LignumCatBoostHash(text, size)` | hash of a category for CatBoost models (see below) |
 | `LignumModelCompile(handle, compiler, flags, work_dir, library)` | [compiled mode](../compiled/); `NULL` for defaults |
 | `LignumModelLoadCompiled(handle, library)` | attach a library written by `LignumModelCompile` |
 | `LignumModelDecompile`, `LignumModelUsesCompiled` | back to the interpreter; which one predicts |
 | `LignumModelFree(handle)` | release the model |
+
+## CatBoost categories
+
+A CatBoost model with categorical features takes each category as its hash, written as a `double`
+into the category's column of `X` (columns as in the training data). Strings are hashed as UTF-8;
+integer categories as their decimal text, as CatBoost does:
+
+```c
+X[row * n_features + 3] = (double)LignumCatBoostHash("Private", 7);
+X[row * n_features + 5] = (double)LignumCatBoostHash("42", 2);   /* the integer category 42 */
+```
+
+`LignumModelPredictArrow` hashes string, integer and dictionary columns itself. Hashing a value
+once (for example, one hash per dictionary entry) and reusing it is the fastest path.
 
 `LignumModelPredict` can be called from several threads with the same handle. Compile, attach or
 decompile before the handle is shared, never concurrently with predictions.

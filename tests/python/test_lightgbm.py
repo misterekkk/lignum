@@ -52,3 +52,14 @@ def test_lightgbm_objectives(tmp_path, base_data, objective, model_type, positiv
         
     actual_out = lg_model.predict(X, raw_score=False)
     np.testing.assert_array_equal(actual_out, expected_out)
+
+
+def test_one_row_as_1d_input(tmp_path, base_data):
+    X, y_reg, _ = base_data
+    booster = lgb.train({"objective": "regression", "num_leaves": 7, "verbose": -1}, lgb.Dataset(X, y_reg), num_boost_round=5)
+    path = tmp_path / "model.txt"
+    booster.save_model(str(path))
+    model = lg.load(str(path), format="lightgbm")
+    expected = booster.predict(X[:1])
+    np.testing.assert_array_equal(model.predict(X[0]), expected)
+    np.testing.assert_array_equal(model.predict(X[0].tolist()), expected)

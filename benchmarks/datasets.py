@@ -136,4 +136,14 @@ def diabetes() -> Dataset:
     return _finish("diabetes", _categorize(frame, cats), y, "binary")
 
 
+def catboost_frame(d: Dataset) -> pd.DataFrame:
+    """The frame as CatBoost takes it: categorical columns as string categories, missing values as
+    the category "NA" (CatBoost rejects NaN in categorical features)."""
+    frame = d.frame.copy()
+    for j in d.categorical:
+        c = frame.columns[j]
+        frame[c] = frame[c].astype(object).where(frame[c].notna(), "NA").astype(str).astype("category")
+    return frame
+
+
 LOADERS = {"california": california, "covtype": covtype, "adult": adult, "bank": bank, "diabetes": diabetes}

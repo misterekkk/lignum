@@ -45,6 +45,13 @@ TEST(CApi, LoadPredictSaveFree) {
     EXPECT_EQ(LignumModelFree(model), 0);
 }
 
+TEST(CApi, CatBoostHash) {
+    // Same values as CatBoost.CityHashMatchesCatBoost; the length counts, not a terminator.
+    EXPECT_EQ(LignumCatBoostHash("u", 1), 1981898051u);
+    EXPECT_EQ(LignumCatBoostHash("vw", 1), static_cast<unsigned int>(-1706589142));
+    EXPECT_EQ(LignumCatBoostHash(nullptr, 0), LignumCatBoostHash("", 0));
+}
+
 TEST(CApi, ReportsErrors) {
     LignumModelHandle model = nullptr;
     EXPECT_EQ(LignumModelLoad("/nonexistent/model.json", "lightgbm", &model), -1);

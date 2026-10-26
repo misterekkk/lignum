@@ -1,7 +1,8 @@
-"""Bit-exact parity on real datasets (UCI / scikit-learn), LightGBM and XGBoost.
+"""Bit-exact parity on real datasets (UCI / scikit-learn), LightGBM, XGBoost and CatBoost.
 
 Datasets are downloaded once into benchmarks/.cache/datasets; tests are skipped when that fails.
-Categorical columns are pandas categories for the libraries and category codes for lignum.
+Categorical columns are pandas categories for the libraries and category codes for lignum
+(CatBoost: string categories for both).
 """
 
 import functools
@@ -96,3 +97,40 @@ def test_xgboost_real_data(tmp_path, name):
     np.testing.assert_array_equal(model.predict(X), booster.predict(full))
     for i in range(0, 200, 7):
         np.testing.assert_array_equal(model.predict(X[i:i + 1]), booster.predict(xgb.DMatrix(frame.iloc[i:i + 1], enable_categorical=True)))
+
+
+@pytest.mark.parametrize("name", ["california", "covtype", "adult", "bank", "diabetes"])
+def test_catboost_real_data(tmp_path, kernel, name):
+    if kernel is not True:
+        pytest.skip("CatBoost models have a single kernel")
+    cb = pytest.importorskip("catboost")
+    d = load(name)
+    n = min(len(d.y), MAX_ROWS)
+    frame, y = datasets.catboost_frame(d).iloc[:n], d.y[:n]
+    cats = [frame.columns[j] for j in d.categorical]
+    split = int(n * 0.8)
+    params = {"iterations": N_ROUNDS, "depth": 6, "random_seed": 7, "verbose": False, "thread_count": 4}
+    if d.task == "multiclass":
+        params["loss_function"] = "MultiClass"
+    else:
+        params["loss_function"] = "Logloss" if d.task == "binary" else "RMSE"
+    booster = cb.CatBoost(params)
+    booster.fit(cb.Pool(frame.iloc[:split], y[:split], cat_features=cats))
+    booster.save_model(str(tmp_path / "model.cbm"))
+    model = lg.load(str(tmp_path / "model.cbm"))
+    assert model.categorical_features == list(d.categorical)
+
+    # Training rows hit the float borders and the CTR tables, held-out rows bring unseen combinations.
+    pool = cb.Pool(frame, cat_features=cats)
+    raw = booster.predict(pool, prediction_type="RawFormulaVal")
+    np.testing.assert_array_equal(model.predict(frame, raw_score=True), raw)
+    expected = booster.predict(pool, prediction_type="Probability" if d.task != "regression" else "RawFormulaVal")
+    if d.task == "binary":
+        expected = expected[:, 1]
+    np.testing.assert_array_equal(model.predict(frame), expected)
+    # Object columns (strings) and Arrow (dictionary columns) give the same hashes as categories.
+    np.testing.assert_array_equal(model.predict(frame.astype({c: object for c in cats}), raw_score=True), raw)
+    pa = pytest.importorskip("pyarrow")
+    np.testing.assert_array_equal(model.predict(pa.Table.from_pandas(frame, preserve_index=False), raw_score=True), raw)
+    for i in range(0, 200, 7):
+        np.testing.assert_array_equal(model.predict(frame.iloc[i:i + 1], raw_score=True), raw[i:i + 1])

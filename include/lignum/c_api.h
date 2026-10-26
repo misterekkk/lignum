@@ -32,7 +32,7 @@ typedef void* LignumModelHandle;
 
 LIGNUM_API const char* LignumGetLastError(void);
 
-/* format: "auto" (lignum binary), "lightgbm", "xgboost". */
+/* format: "auto" (lignum binary or detected from the file), "lightgbm", "xgboost", "catboost". */
 LIGNUM_API int LignumModelLoad(const char* filepath, const char* format, LignumModelHandle* out_handle);
 
 LIGNUM_API int LignumModelSave(LignumModelHandle handle, const char* filepath);
@@ -68,6 +68,11 @@ LIGNUM_API int LignumModelPredictArrow(LignumModelHandle handle,
                                        int n_jobs,
                                        int strategy,
                                        double* out_preds);
+
+/* CatBoost's hash of a category: `size` bytes of UTF-8 text; integer categories are hashed as
+ * their decimal text ("42"). CatBoost models with categorical features take the hash, as a
+ * double, in each categorical column of X. Never fails. */
+LIGNUM_API unsigned int LignumCatBoostHash(const char* category, size_t size);
 
 /* Experimental compiled mode: compiles the trees to native code with the system C compiler
  * (see Model.compile in the Python docs). Predictions stay bit-identical.

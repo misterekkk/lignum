@@ -59,9 +59,10 @@ Categorical columns hold the same values as in training:
 - **Categories the model never saw** are allowed and get CatBoost's prior, as in CatBoost.
 
 `model.categorical_features` lists the categorical columns. Underneath, a categorical column holds
-the category's hash as a float64: `lignum.catboost_hash("red")` gives it. A float64 matrix built
-that way goes straight to the kernel. This is also how C and C++ callers pass categories:
-`lignum::catboost_hash` in C++.
+the category's hash as a float64: `lignum.catboost_hash("red")` gives it. In Python, `predict`
+hashes the categories itself and rejects a float matrix for a model with categorical features, since
+category codes would look like valid hashes. C and C++ callers pass the hashes in a float64 matrix:
+`LignumCatBoostHash` in the [C API](../c-api/), `lignum::catboost_hash` in C++.
 
 ## Comparing with CatBoost
 
