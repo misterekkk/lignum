@@ -30,9 +30,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install lignum, CatBoost and valgrind
+      - name: Install lignum, CatBoost, valgrind and perf
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q valgrind
+          sudo apt-get install -y -q linux-tools-common "linux-tools-$(uname -r)" || echo "no perf for this kernel"
+          sudo sysctl -w kernel.perf_event_paranoid=-1 || true
           python -m pip install --upgrade pip
           python -m pip install ".[test]" polars
 
@@ -43,7 +45,9 @@ jobs:
           key: datasets-v1
 
       - name: Profile every kernel variant (float buckets search / count / two levels, u16 / u8)
-        run: python benchmarks/catboost_profile.py --datasets california,adult,covtype --rows 20000 | tee profile.md
+        run: |
+          set -o pipefail
+          python benchmarks/catboost_profile.py --datasets california,adult,covtype --rows 20000 | tee profile.md
 
       - uses: actions/upload-artifact@v4
         with:

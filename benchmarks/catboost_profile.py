@@ -168,6 +168,40 @@ def stack_accesses(library: Path) -> list[tuple[str, int, int]]:
     return result
 
 
+# valgrind cannot run AVX-512 code: such variants are timed and counted with perf only.
+NO_VALGRIND = re.compile(r"-mavx512")
+PERF_EVENTS = "cycles,instructions,branch-misses,L1-dcache-load-misses"
+
+
+def perf_stat(exe: Path, args: list[str]) -> dict | None:
+    """Hardware counters of one run (Linux perf), or None where perf or the counters are missing."""
+    try:
+        proc = subprocess.run(["perf", "stat", "-x", ",", "-e", PERF_EVENTS, str(exe), *args], capture_output=True, text=True)
+    except OSError:
+        return None
+    counts = {}
+    for line in proc.stderr.splitlines():
+        parts = line.split(",")
+        if len(parts) > 2 and parts[0].strip().isdigit():
+            counts[parts[2].split(":")[0]] = int(parts[0])
+    return counts if proc.returncode == 0 and "cycles" in counts and "instructions" in counts else None
+
+
+def perf_row(run: dict | None, base: dict | None, rows: int) -> str:
+    if not run or not base:
+        return "n/a | n/a | n/a | n/a | n/a"
+    v = lambda key: (run.get(key, 0) - base.get(key, 0)) / rows
+    ipc = v("instructions") / v("cycles") if v("cycles") > 0 else 0.0
+    return f"{v('cycles'):,.0f} | {v('instructions'):,.0f} | {ipc:.2f} | {v('branch-misses'):,.2f} | {v('L1-dcache-load-misses'):,.1f}"
+
+
+def cpu_name() -> str:
+    try:
+        return next(l.split(":", 1)[1].strip() for l in open("/proc/cpuinfo") if l.startswith("model name"))
+    except (OSError, StopIteration):
+        return "unknown CPU"
+
+
 def timings(exe: Path, model: Path, data: Path, library: Path) -> dict:
     """catboost_capi's own timings (best of 5): batch on one thread, one row, 100 rows."""
     proc = subprocess.run([str(exe), str(model), str(data), str(library), "1", "5"], capture_output=True, text=True, check=True)
@@ -192,6 +226,7 @@ def main():
     work = bench_catboost.CACHE / "profile"
     work.mkdir(parents=True, exist_ok=True)
     print(f"# CatBoost kernel variants under cachegrind ({args.rows:,} rows, one thread)\n")
+    print(f"CPU: {cpu_name()}.\n")
     print("Per row; simulated caches and branch predictor; setup (`none`) subtracted. lignum's C API built "
           "-O3 -g with each variant's flags. Time: best of 5 without valgrind, "
           f"{args.time_rows:,} rows, one thread.\n")
@@ -211,13 +246,26 @@ def main():
         print(f"| CatBoost | {per_row(cb_batch, base, args.rows)} | {per_row(cb_row, base, args.rows)} | "
               f"{cb_time['catboost strings, 1 thread']:.3f} | {cb_time['catboost 1 row (CalcModelPredictionSingle)']:.1f} |")
         hot = {}
+        flags = dict(variants)
         for vname, exe in builds.items():
+            t = timings(exe, model, time_data, library)
+            times = f"{t['lignum strings, 1 thread']:.3f} | {t['lignum 1 row']:.1f}"
+            if NO_VALGRIND.search(flags[vname]):
+                print(f"| lignum {vname} | " + " | ".join(["—"] * 12) + f" | {times} |")
+                continue
             batch = cachegrind(exe, a + ["lignum-batch"], work / f"{name}_{vname.replace(' ', '_')}_batch.out")
             row = cachegrind(exe, a + ["lignum-row"], work / f"{name}_{vname.replace(' ', '_')}_row.out")
-            t = timings(exe, model, time_data, library)
-            print(f"| lignum {vname} | {per_row(batch, base, args.rows)} | {per_row(row, base, args.rows)} | "
-                  f"{t['lignum strings, 1 thread']:.3f} | {t['lignum 1 row']:.1f} |")
+            print(f"| lignum {vname} | {per_row(batch, base, args.rows)} | {per_row(row, base, args.rows)} | {times} |")
             hot[vname] = hot_lines(work / f"{name}_{vname.replace(' ', '_')}_batch.out", args.rows)
+        print()
+        # Real CPU counters for a batch (perf stat, time data, setup subtracted), where available.
+        pa = [str(model), str(time_data), str(library), "1", "1"]
+        p_base = perf_stat(first, pa + ["none"])
+        print(f"perf stat, batch of {args.time_rows:,} rows, per row (real CPU; n/a: no hardware counters here):\n")
+        print("| engine | cycles | instructions | IPC | branch misses | L1d load misses |\n|---|---:|---:|---:|---:|---:|")
+        print(f"| CatBoost | {perf_row(perf_stat(first, pa + ['catboost-batch']), p_base, args.time_rows)} |")
+        for vname, exe in builds.items():
+            print(f"| lignum {vname} | {perf_row(perf_stat(exe, pa + ['lignum-batch']), p_base, args.time_rows)} |")
         print()
         for vname, lines in hot.items():
             print(f"<details><summary>{name}, lignum {vname}: hottest lines of a batch, per row</summary>\n")
