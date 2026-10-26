@@ -60,7 +60,7 @@ make venv        # .venv with Python 3.12 via uv (lightgbm, xgboost, pytest, nan
 make py-build    # editable install of the package into .venv
 make test        # cpp-test + py-test
 make cpp-test    # cmake -DLIGNUM_BUILD_TESTS=ON, build, ctest
-cd docs && python scripts/api_reference.py && npm run build   # documentation site
+make docs        # documentation site (Starlight, needs Node.js) into docs/dist
 ```
 
 macOS needs `brew install libomp`; CMake finds Homebrew's keg-only libomp automatically.

@@ -33,10 +33,9 @@ bench:
 bench-quick:
 	$(PYTHON) benchmarks/bench.py --quick
 
-docs:
-	rm -rf site/
-	$(PYTHON) -m pip install mkdocs-material "mkdocstrings[python]"
-	$(PYTHON) -m mkdocs build
+# Starlight site in docs/dist (needs Node.js); the Python reference comes from the installed package.
+docs: py-build
+	cd docs && $(abspath $(PYTHON)) scripts/api_reference.py && npm ci && npm run build
 
 clean:
-	rm -rf build/ .pytest_cache/ benchmarks/.cache site/
+	rm -rf build/ .pytest_cache/ benchmarks/.cache docs/dist/

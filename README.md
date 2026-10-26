@@ -47,12 +47,14 @@ the whole data set on all threads, and one row on one thread.
 | | lignum compiled | lleaves | LightGBM |
 |---|---:|---:|---:|
 | California housing (20k rows) | **0.014 s** | 0.021 s | 0.140 s |
-| Covertype (581k rows, 7 classes) | **0.265 s** | 0.269 s | 2.401 s |
+| Covertype (581k rows, 7 classes) | 0.265 s | 0.269 s | 2.401 s |
 | Diabetes 130-US (102k rows, categorical) | **0.151 s** | 0.803 s | 1.830 s |
 | One row, one thread (Covertype) | **2.9 µs** | 7.8 µs | 32.0 µs |
 | Bit-identical to LightGBM | yes | no | — |
 
 lleaves is the fastest other engine for LightGBM; it differs from LightGBM on 81-100% of the rows.
+Covertype is a tie on all threads (within noise), and on one thread lleaves is faster (0.650 vs
+0.698 s).
 More data sets, ARM, Apple M4, Arrow input and the cases where lignum is not the fastest:
 [benchmarks](https://misterekkk.github.io/lignum/benchmarks/).
 
