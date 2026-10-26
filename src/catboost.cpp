@@ -365,6 +365,7 @@ namespace lignum {
             }
             f.run_end.clear();
             f.run_depth.clear();
+            f.max_depth = 0;
             for (size_t t = 0; t < f.n_trees(); t++) {
                 const uint32_t depth = f.split_begin[t + 1] - f.split_begin[t];
                 if (depth > 255) throw std::runtime_error("CatBoost tree deeper than 255.");
@@ -373,6 +374,7 @@ namespace lignum {
                     f.run_depth.push_back(static_cast<uint8_t>(depth));
                 }
                 f.run_end.back() = static_cast<uint32_t>(t + 1);
+                f.max_depth = std::max(f.max_depth, depth);
             }
         }
 
@@ -431,6 +433,25 @@ namespace lignum {
         #endif
         constexpr int kGroup = LIGNUM_CATBOOST_GROUP;
         static_assert(kGroup >= 1 && kGroup <= 16, "LIGNUM_CATBOOST_GROUP: 1 to 16 trees");
+
+        // Leaf indices as bytes when every tree has depth <= 8 (twice as many per vector, like
+        // CatBoost's evaluator); LIGNUM_CATBOOST_INDEX8=0 keeps 16 bits.
+        #ifndef LIGNUM_CATBOOST_INDEX8
+            #define LIGNUM_CATBOOST_INDEX8 1
+        #endif
+        constexpr bool kByteIndex = LIGNUM_CATBOOST_INDEX8 != 0;
+
+        // LIGNUM_CATBOOST_ASM (diagnostic builds): the hot loops as their own functions, so their
+        // assembly can be read with objdump (benchmarks/catboost_profile.py).
+        #ifdef LIGNUM_CATBOOST_ASM
+            #if defined(_MSC_VER)
+                #define LIGNUM_HOT_LOOP __declspec(noinline)
+            #else
+                #define LIGNUM_HOT_LOOP __attribute__((noinline))
+            #endif
+        #else
+            #define LIGNUM_HOT_LOOP
+        #endif
 
         // bucket_of over a feature's padded borders: a fixed number of halvings (log2 of the padded
         // size). Written as a conditional move, which ARM compilers keep (csel) and x86 ones turn
@@ -1336,9 +1357,10 @@ namespace lignum {
         // are one unsigned range test, (B)(bucket - t) <= range: range max - t for `bucket >= t`,
         // 0 for the one-hot `bucket == t`. (Two comparisons joined with `&` stopped the loop from
         // vectorising: 3x slower.)
-        template <int Depth, typename B>
-        void tree_index(const B* buckets, size_t stride, const uint16_t* source, const uint16_t* threshold,
-                        const uint8_t* equal, size_t rows, uint16_t* index) {
+        template <int Depth, typename B, typename I>
+        LIGNUM_HOT_LOOP void tree_index(const B* buckets, size_t stride, const uint16_t* source, const uint16_t* threshold,
+                                        const uint8_t* equal, size_t rows, I* index) {
+            static_assert(Depth <= 8 * static_cast<int>(sizeof(I)), "leaf index too narrow for the depth");
             const B* b[Depth];
             B lo[Depth], range[Depth];
             for (int d = 0; d < Depth; d++) {
@@ -1347,33 +1369,34 @@ namespace lignum {
                 range[d] = equal[d] ? B{0} : static_cast<B>(static_cast<B>(~B{0}) - threshold[d]);
             }
             for (size_t r = 0; r < rows; r++) {
-                uint16_t v = 0;
-                for (int d = 0; d < Depth; d++) v |= static_cast<uint16_t>((static_cast<B>(b[d][r] - lo[d]) <= range[d]) << d);
+                I v = 0;
+                for (int d = 0; d < Depth; d++) v |= static_cast<I>((static_cast<B>(b[d][r] - lo[d]) <= range[d]) << d);
                 index[r] = v;
             }
         }
 
         // Any depth, one pass over the rows per level.
-        template <typename B>
+        template <typename B, typename I>
         void tree_index_any(const B* buckets, size_t stride, const uint16_t* source, const uint16_t* threshold,
-                            const uint8_t* equal, uint32_t depth, size_t rows, uint16_t* index) {
-            std::fill(index, index + rows, uint16_t{0});
+                            const uint8_t* equal, uint32_t depth, size_t rows, I* index) {
+            std::fill(index, index + rows, I{0});
             for (uint32_t d = 0; d < depth; d++) {
                 const B* b = buckets + source[d] * stride;
                 const uint16_t t = threshold[d];
                 if (equal[d]) {
-                    for (size_t r = 0; r < rows; r++) index[r] |= static_cast<uint16_t>((b[r] == t) << d);
+                    for (size_t r = 0; r < rows; r++) index[r] |= static_cast<I>((b[r] == t) << d);
                 } else {
-                    for (size_t r = 0; r < rows; r++) index[r] |= static_cast<uint16_t>((b[r] >= t) << d);
+                    for (size_t r = 0; r < rows; r++) index[r] |= static_cast<I>((b[r] >= t) << d);
                 }
             }
         }
 
-        template <typename B>
+        // Byte indices (I = uint8_t) are only used when every tree has depth <= 8.
+        template <typename B, typename I>
         void tree_index_dispatch(const B* buckets, size_t stride, const uint16_t* source, const uint16_t* threshold,
-                                 const uint8_t* equal, uint32_t depth, size_t rows, uint16_t* index) {
+                                 const uint8_t* equal, uint32_t depth, size_t rows, I* index) {
             switch (depth) {
-                case 0: std::fill(index, index + rows, uint16_t{0}); break;
+                case 0: std::fill(index, index + rows, I{0}); break;
                 case 1: tree_index<1>(buckets, stride, source, threshold, equal, rows, index); break;
                 case 2: tree_index<2>(buckets, stride, source, threshold, equal, rows, index); break;
                 case 3: tree_index<3>(buckets, stride, source, threshold, equal, rows, index); break;
@@ -1382,15 +1405,19 @@ namespace lignum {
                 case 6: tree_index<6>(buckets, stride, source, threshold, equal, rows, index); break;
                 case 7: tree_index<7>(buckets, stride, source, threshold, equal, rows, index); break;
                 case 8: tree_index<8>(buckets, stride, source, threshold, equal, rows, index); break;
-                case 9: tree_index<9>(buckets, stride, source, threshold, equal, rows, index); break;
-                case 10: tree_index<10>(buckets, stride, source, threshold, equal, rows, index); break;
-                default: tree_index_any(buckets, stride, source, threshold, equal, depth, rows, index); break;
+                default:
+                    if constexpr (sizeof(I) > 1) {
+                        if (depth == 9) tree_index<9>(buckets, stride, source, threshold, equal, rows, index);
+                        else if (depth == 10) tree_index<10>(buckets, stride, source, threshold, equal, rows, index);
+                        else tree_index_any(buckets, stride, source, threshold, equal, depth, rows, index);
+                    }
+                    break;
             }
         }
 
         // Adds the leaves of G trees to each row's sums, tree after tree (index: G arrays of rows).
-        template <int G, int Dim>
-        inline void add_leaves(const double* const* leaves, const uint16_t* index, size_t rows, size_t dim, double* sums) {
+        template <int G, int Dim, typename I>
+        LIGNUM_HOT_LOOP inline void add_leaves(const double* const* leaves, const I* index, size_t rows, size_t dim, double* sums) {
             if constexpr (Dim > 0) {
                 for (size_t r = 0; r < rows; r++) {
                     double acc[Dim];
@@ -1415,13 +1442,13 @@ namespace lignum {
         // per tree and output), kGroup trees at a time. Dim outputs per row, 0: any, from the model.
         // The sums are a local array: on the heap the compiler cannot keep them apart from the
         // leaves (7 classes: 0.149 instead of 0.100 s for 200k rows).
-        template <int Dim, typename B>
+        template <int Dim, typename B, typename I>
         void phase2(const ObliviousForest& f, const B* buckets, size_t stride, size_t rows, Scratch& s, double* out) {
             double local[Dim > 0 ? kBlock * Dim : 1];
             const size_t dim = Dim > 0 ? Dim : f.dim;
             double* sums = Dim > 0 ? local : s.sums.data();
             std::fill(sums, sums + rows * dim, 0.0);
-            uint16_t* index = s.index.data();
+            I* index = reinterpret_cast<I*>(s.index.data());  // 16-bit storage; bytes may alias it
             const double* leaves[kGroup];
             auto tree = [&](size_t t, int g) {
                 const uint32_t k = f.split_begin[t];
@@ -1432,21 +1459,38 @@ namespace lignum {
             size_t t = 0;
             for (; t + kGroup <= f.n_trees(); t += kGroup) {
                 for (int g = 0; g < kGroup; g++) tree(t + g, g);
-                add_leaves<kGroup, Dim>(leaves, index, rows, dim, sums);
+                add_leaves<kGroup, Dim, I>(leaves, index, rows, dim, sums);
             }
             for (; t < f.n_trees(); t++) {
                 tree(t, 0);
-                add_leaves<1, Dim>(leaves, index, rows, dim, sums);
+                add_leaves<1, Dim, I>(leaves, index, rows, dim, sums);
             }
             for (size_t r = 0; r < rows; r++) {
                 for (size_t d = 0; d < dim; d++) out[r * dim + d] = f.scale * sums[r * dim + d] + f.bias[d];
             }
         }
 
+        template <typename B, typename I>
+        void phase2_dim(const ObliviousForest& f, const B* buckets, size_t stride, size_t rows, Scratch& s, double* out) {
+            switch (f.dim) {
+                case 1: phase2<1, B, I>(f, buckets, stride, rows, s, out); break;
+                case 2: phase2<2, B, I>(f, buckets, stride, rows, s, out); break;
+                case 3: phase2<3, B, I>(f, buckets, stride, rows, s, out); break;
+                case 4: phase2<4, B, I>(f, buckets, stride, rows, s, out); break;
+                case 5: phase2<5, B, I>(f, buckets, stride, rows, s, out); break;
+                case 6: phase2<6, B, I>(f, buckets, stride, rows, s, out); break;
+                case 7: phase2<7, B, I>(f, buckets, stride, rows, s, out); break;
+                case 8: phase2<8, B, I>(f, buckets, stride, rows, s, out); break;
+                case 9: phase2<9, B, I>(f, buckets, stride, rows, s, out); break;
+                case 10: phase2<10, B, I>(f, buckets, stride, rows, s, out); break;
+                default: phase2<0, B, I>(f, buckets, stride, rows, s, out); break;
+            }
+        }
+
         // Buckets of one float feature for a block of rows (float_mode). Counting compares without
         // selects, so NaN (below every border) needs no test; AsTrue puts it above afterwards.
         template <typename B>
-        void float_buckets(const ObliviousForest::Float& ff, const double* X, size_t n_features, size_t rows, B* b, Scratch& s) {
+        LIGNUM_HOT_LOOP void float_buckets(const ObliviousForest::Float& ff, const double* X, size_t n_features, size_t rows, B* b, Scratch& s) {
             const B nan_bucket = ff.nan_as_true ? static_cast<B>(ff.borders.size()) : B{0};
             const int mode = float_mode(ff);
             const bool count = mode == 1;
@@ -1553,19 +1597,8 @@ namespace lignum {
                 for (size_t r = 0; r < rows; r++) b[r] = static_cast<B>(entries[r] ? ctr.entry_buckets[entries[r] - 1] : ctr.missing_bucket);
             }
 
-            switch (f.dim) {
-                case 1: phase2<1>(f, buckets, stride, rows, s, out); break;
-                case 2: phase2<2>(f, buckets, stride, rows, s, out); break;
-                case 3: phase2<3>(f, buckets, stride, rows, s, out); break;
-                case 4: phase2<4>(f, buckets, stride, rows, s, out); break;
-                case 5: phase2<5>(f, buckets, stride, rows, s, out); break;
-                case 6: phase2<6>(f, buckets, stride, rows, s, out); break;
-                case 7: phase2<7>(f, buckets, stride, rows, s, out); break;
-                case 8: phase2<8>(f, buckets, stride, rows, s, out); break;
-                case 9: phase2<9>(f, buckets, stride, rows, s, out); break;
-                case 10: phase2<10>(f, buckets, stride, rows, s, out); break;
-                default: phase2<0>(f, buckets, stride, rows, s, out); break;
-            }
+            if (kByteIndex && f.max_depth <= 8) phase2_dim<B, uint8_t>(f, buckets, stride, rows, s, out);
+            else phase2_dim<B, uint16_t>(f, buckets, stride, rows, s, out);
         }
 
         void predict_block(const ObliviousForest& f, const double* X, size_t n_features, size_t rows, double* out, Scratch& s) {

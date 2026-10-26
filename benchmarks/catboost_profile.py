@@ -34,8 +34,60 @@ import datasets  # noqa: E402
 KERNEL = re.compile(r"::(predict_block\w*|phase2|tree_index\w*|float_buckets|row_trees\w*|predict_row)(<[^(]*>)?\(")
 CASES = ["none", "catboost-batch", "lignum-batch", "catboost-row", "lignum-row"]
 # Default build (float buckets per feature, u8, groups of 4 trees) and one change at a time.
-VARIANTS = ["default:", "group 1:-DLIGNUM_CATBOOST_GROUP=1", "group 8:-DLIGNUM_CATBOOST_GROUP=8",
-            "two-level only:-DLIGNUM_CATBOOST_FLOATS=2", "u16:-DLIGNUM_CATBOOST_U8=0"]
+# Default build and one change at a time; -m flags only where the CPU has the instructions.
+VARIANTS = ["default:", "index16:-DLIGNUM_CATBOOST_INDEX8=0", "avx2:-mavx2",
+            "avx512:-mavx512f -mavx512bw -mavx512vl -mavx512dq"]
+# The functions whose assembly is printed (built with -DLIGNUM_CATBOOST_ASM, so they are not inlined).
+ASM_FUNCTIONS = [r"tree_index<6, unsigned char, unsigned char>", r"add_leaves<4, 1, unsigned char>",
+                 r"float_buckets<unsigned char>"]
+
+
+def cpu_supports(flags: str) -> bool:
+    """Whether this machine can run code built with these -m flags (Linux /proc/cpuinfo)."""
+    wanted = [f[2:] for f in flags.split() if f.startswith("-m")]
+    if not wanted:
+        return True
+    try:
+        cpu = open("/proc/cpuinfo").read().split()
+    except OSError:
+        return False
+    return all(w in cpu for w in wanted)
+
+
+def loops(body: list[str]) -> list[list[str]]:
+    """Instruction ranges closed by a backward jump (loops) in objdump lines `addr: insn`."""
+    addrs = []
+    for line in body:
+        m = re.match(r"\s*([0-9a-f]+):\s*(.*)$", line)
+        if m:
+            addrs.append((int(m.group(1), 16), m.group(2).strip()))
+    found = []
+    for i, (addr, insn) in enumerate(addrs):
+        m = re.search(r"\b(?:j[a-z]+|b(?:\.[a-z]+)?|cbn?z|tbn?z)\s+(?:\S+,\s*)*(?:0x)?([0-9a-f]+)\b", insn)
+        if m:
+            target = int(m.group(1), 16)
+            if target <= addr:
+                start = next((k for k, (a, _) in enumerate(addrs) if a == target), None)
+                if start is not None:
+                    found.append([f"{a:x}: {t}" for a, t in addrs[start:i + 1]])
+    return found
+
+
+def assembly(library: Path) -> list[str]:
+    """The loops of ASM_FUNCTIONS: instruction count, vector instructions, stack accesses, body."""
+    text = subprocess.run(["objdump", "-d", "-C", "--no-show-raw-insn", str(library)], capture_output=True, text=True).stdout
+    out = []
+    for wanted in ASM_FUNCTIONS:
+        m = re.search(r"^[0-9a-f]+ <([^>]*" + re.escape(wanted) + r"[^>]*)>:\n((?:.+\n)+?)\n", text, re.M)
+        if not m:
+            out.append(f"### `{wanted}`: not found\n")
+            continue
+        out.append(f"### `{m.group(1)[:140]}`\n")
+        for body in sorted(loops(m.group(2).splitlines()), key=len)[:3]:  # innermost (shortest) loops
+            vec = sum(bool(re.search(r"%[xyz]mm|\bv[0-9]+\b|\bq[0-9]+\b", l)) for l in body)
+            stack = sum(bool(re.search(r"%rsp|\[sp", l)) for l in body)
+            out.append(f"loop of {len(body)} instructions, {vec} vector, {stack} stack:\n\n```\n" + "\n".join(body[:70]) + "\n```\n")
+    return out
 
 
 def ensure_data(name: str, rows: int, trees: int) -> tuple[Path, Path]:
@@ -132,7 +184,10 @@ def main():
     args = parser.parse_args()
 
     variants = [v.split(":", 1) for v in args.variants.split(";")]
-    builds = {name: bench_catboost.build_capi([f"-DCMAKE_CXX_FLAGS=-g {flags}".strip()]) for name, flags in variants}
+    skipped = [name for name, flags in variants if not cpu_supports(flags)]
+    builds = {name: bench_catboost.build_capi([f"-DCMAKE_CXX_FLAGS=-g {flags}".strip()]) for name, flags in variants
+              if name not in skipped}
+    asm_build = bench_catboost.build_capi(["-DCMAKE_CXX_FLAGS=-g -DLIGNUM_CATBOOST_ASM"])
     library = bench_catboost.catboost_library()
     work = bench_catboost.CACHE / "profile"
     work.mkdir(parents=True, exist_ok=True)
@@ -168,6 +223,10 @@ def main():
             print(f"<details><summary>{name}, lignum {vname}: hottest lines of a batch, per row</summary>\n")
             print("| instructions | reads | writes | mispredicts | line |\n|---:|---:|---:|---:|---|")
             print("\n".join(lines) + "\n\n</details>\n")
+    if skipped:
+        print(f"Not run (this CPU lacks the instructions): {', '.join(skipped)}.\n")
+    print("## Assembly of the hot loops (default build, functions kept out of line)\n")
+    print("\n".join(assembly(next(Path(asm_build).parent.glob("liblignum.*")))))
     print("## Stack accesses in the kernel's functions (objdump)\n")
     for vname, exe in builds.items():
         lib = next(Path(exe).parent.glob("liblignum.*"))

@@ -97,6 +97,7 @@ namespace lignum {
         std::vector<uint16_t> split_range;      // per split: `bucket >= t` is (uint16_t)(bucket - t) <= range
         bool row_conditions = false;            // single rows through condition bytes (few sources per split)
         bool small_buckets = false;             // derived: every source's buckets fit in a byte (<= 255)
+        uint32_t max_depth = 0;                 // derived: the deepest tree
         std::vector<uint32_t> run_end;          // runs of consecutive trees of one depth: last tree + 1
         std::vector<uint8_t> run_depth;         // and their depth
 
