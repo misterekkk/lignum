@@ -90,11 +90,18 @@ jobs:
 
       - name: Default kernel and generic kernel
         shell: bash
+        env:
+          PYTHONUTF8: "1"   # the report has non-ASCII characters (µ, —); Windows pipes default to cp1252
         run: |
           set -o pipefail
           args="--no-capi --datasets california,adult,covtype --rows 200000 --repeats 5 --latency-budget 0.3"
-          LIGNUM_ISA=generic python benchmarks/bench_catboost.py $args --label "MSVC, generic kernel" | tee generic.txt
-          python benchmarks/bench_catboost.py $args --label "MSVC, default kernel (AVX2 where the CPU has it)" | tee default.txt
+          LIGNUM_ISA=generic python benchmarks/bench_catboost.py $args --label "MSVC, generic kernel" 2>&1 | tee generic.txt
+          python benchmarks/bench_catboost.py $args --label "MSVC, default kernel (AVX2 where the CPU has it)" 2>&1 | tee default.txt
+
+      - name: Failures as an annotation
+        if: failure()
+        shell: bash
+        run: cat generic.txt default.txt > bench.log 2>/dev/null || true; python .github/scripts/annotate_log.py "CatBoost on Windows" bench.log
 
       - name: Tables as an annotation
         if: always()

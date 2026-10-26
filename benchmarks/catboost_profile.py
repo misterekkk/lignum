@@ -10,8 +10,8 @@ flags for the C API build), benchmarks/catboost_capi.cpp runs one engine and cas
 thread under `valgrind --tool=cachegrind --cache-sim=yes --branch-sim=yes`; the program's own
 setup (the `none` case) is subtracted. Per row: instructions, memory reads and writes, simulated
 L1 / last-level data misses and branch mispredictions. Then the time of the same builds without
-valgrind (best of 5, larger data), the hottest lines of src/catboost.cpp (cg_annotate) and the
-stack accesses in the kernel's functions (objdump).
+valgrind (best of 5, larger data), the hottest lines of src/catboost.cpp and catboost_kernel.inc
+(cg_annotate) and the stack accesses in the kernel's functions (objdump).
 """
 
 from __future__ import annotations
@@ -38,7 +38,9 @@ CASES = ["none", "catboost-batch", "lignum-batch", "catboost-row", "lignum-row"]
 # Default build and one change at a time; -m flags only where the CPU has the instructions.
 # "LIGNUM_ISA=generic" is not a flag but the environment of the run (the kernel chosen at run time).
 VARIANTS = ["default (AVX2 kernel where the CPU has it):", "generic kernel:LIGNUM_ISA=generic",
-            "whole build -mavx2:-mavx2"]
+            "index lanes:-DLIGNUM_CATBOOST_INDEX_SIMD=1", "index lanes, generic:-DLIGNUM_CATBOOST_INDEX_SIMD=1 LIGNUM_ISA=generic",
+            "index intrinsics:-DLIGNUM_CATBOOST_INDEX_SIMD=2",
+            "index intrinsics, generic:-DLIGNUM_CATBOOST_INDEX_SIMD=2 LIGNUM_ISA=generic"]
 # The functions whose assembly is printed (built with -DLIGNUM_CATBOOST_ASM, so they are not inlined).
 ASM_FUNCTIONS = [r"tree_index_ge<6, unsigned char, unsigned char>", r"tree_index<6, unsigned char, unsigned char>",
                  r"add_leaves<4, 1, unsigned char>", r"float_buckets<unsigned char>"]
@@ -140,13 +142,14 @@ def per_row(run: dict, base: dict, rows: int) -> str:
 
 
 def hot_lines(out: Path, rows: int, top: int = 12) -> list[str]:
-    """The lines of src/catboost.cpp with the most instructions: per row Ir, Dr, Dw, Bcm."""
+    """The lines of src/catboost.cpp and the kernel (catboost_kernel.inc) with the most
+    instructions: per row Ir, Dr, Dw, Bcm."""
     text = subprocess.run(["cg_annotate", "--threshold=0", "--auto=yes", str(out)], capture_output=True, text=True).stdout
-    m = re.search(r"-- Annotated source file: \S*src/catboost\.cpp\n", text)
-    part = text[m.end():].split("-- Annotated source file:", 1)[0] if m else ""
+    parts = [text[m.end():].split("-- Annotated source file:", 1)[0]
+             for m in re.finditer(r"-- Annotated source file: \S*src/catboost(\.cpp|_kernel\.inc)\n", text)]
     token = r"(\.|[\d,]+(?:\s+\(\s*[\d.]+%\))?)"
     found = []
-    for line in part.splitlines():
+    for line in "\n".join(parts).splitlines():
         m = re.match(r"^\s*" + r"\s+".join([token] * 13) + r"\s(.*)$", line)
         if not m:
             continue
@@ -210,10 +213,15 @@ def cpu_name() -> str:
 
 
 def timings(exe: Path, model: Path, data: Path, library: Path, env: dict | None = None) -> dict:
-    """catboost_capi's own timings (best of 5): batch on one thread, one row, 100 rows."""
+    """catboost_capi's own timings (best of 5): batch on one thread, one row, 100 rows. Every
+    variant must still match CatBoost bit for bit."""
     proc = subprocess.run([str(exe), str(model), str(data), str(library), "1", "5"], capture_output=True, text=True, check=True,
                           env=run_env(env or {}))
-    return {c["case"]: c.get("best_s", c.get("median_us")) for c in map(json.loads, proc.stdout.splitlines())}
+    cases = [json.loads(line) for line in proc.stdout.splitlines()]
+    wrong = [c["case"] for c in cases if c.get("mismatch")]
+    if wrong:
+        raise RuntimeError(f"{exe} {env or ''}: predictions differ from CatBoost in {', '.join(wrong)}")
+    return {c["case"]: c.get("best_s", c.get("median_us")) for c in cases}
 
 
 def main():

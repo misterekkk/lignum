@@ -23,7 +23,9 @@
 #endif
 
 #define LIGNUM_CATBOOST_ISA avx2
+#define LIGNUM_CATBOOST_ISA_AVX2 1
 #include "catboost_kernel.inc"
+#undef LIGNUM_CATBOOST_ISA_AVX2
 #undef LIGNUM_CATBOOST_ISA
 
 #if defined(__clang__)

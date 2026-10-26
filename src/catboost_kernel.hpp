@@ -11,6 +11,13 @@
 #include <cstdint>
 #include <vector>
 
+#if defined(__x86_64__) || defined(_M_X64)
+    #define LIGNUM_CATBOOST_X86 1
+    #include <immintrin.h>  // intrinsics are always inlined: no shared out-of-line copies
+#else
+    #define LIGNUM_CATBOOST_X86 0
+#endif
+
 namespace lignum::catboost_kernel {
 
     // How a float feature's bucket (the number of its borders below the value) is computed;
@@ -86,6 +93,19 @@ namespace lignum::catboost_kernel {
         #define LIGNUM_CATBOOST_GE 1
     #endif
     constexpr bool kPlainSplits = LIGNUM_CATBOOST_GE != 0;
+
+    // Byte leaf indices from byte buckets (the common case), experiment: GCC does not vectorise
+    // the row loop of tree_index_ge / tree_index on x86 (0 vector instructions in 41, SSE2 and
+    // AVX2 alike, 3e2a138), ARM compilers and Clang do. LIGNUM_CATBOOST_INDEX_SIMD:
+    //   0 (default): one loop over the rows, the levels unrolled inside;
+    //   1: blocks of kIndexLanes rows with the levels outside a fixed-length inner loop (plain
+    //      C++ the compiler can turn into one vector per level);
+    //   2: x86 intrinsics, SSE2 (generic) or AVX2 (avx2 build); elsewhere as 1.
+    #ifndef LIGNUM_CATBOOST_INDEX_SIMD
+        #define LIGNUM_CATBOOST_INDEX_SIMD 0
+    #endif
+    constexpr int kIndexSimd = LIGNUM_CATBOOST_INDEX_SIMD;
+    constexpr size_t kIndexLanes = 32;
 
 
     // Rows per block (bucket and index arrays are this many rows long per source and tree);

@@ -71,6 +71,104 @@ namespace lignum::catboost_kernel::LIGNUM_CATBOOST_ISA {
             return static_cast<uint16_t>(std::lower_bound(borders.begin(), borders.end(), x) - borders.begin());
         }
 
+        // Byte leaf indices from byte buckets (kIndexSimd), levels from the deepest up (v = 2 v + bit).
+        // Plain: bit = bucket >= lo; otherwise the range test (uint8_t)(bucket - lo) <= range.
+        template <int Depth, bool Plain>
+        inline void index_rows(const uint8_t* const* b, const uint8_t* lo, const uint8_t* range, size_t r, size_t rows, uint8_t* index) {
+            for (; r < rows; r++) {
+                uint8_t v = 0;
+                for (int d = Depth - 1; d >= 0; d--) {
+                    const bool bit = Plain ? b[d][r] >= lo[d] : static_cast<uint8_t>(b[d][r] - lo[d]) <= range[d];
+                    v = static_cast<uint8_t>(v + v + bit);
+                }
+                index[r] = v;
+            }
+        }
+
+        // kIndexSimd = 1: kIndexLanes rows at a time; returns the rows done.
+        template <int Depth, bool Plain>
+        inline size_t index_lanes(const uint8_t* const* b, const uint8_t* lo, const uint8_t* range, size_t rows, uint8_t* index) {
+            size_t r = 0;
+            for (; r + kIndexLanes <= rows; r += kIndexLanes) {
+                uint8_t v[kIndexLanes] = {};
+                for (int d = Depth - 1; d >= 0; d--) {
+                    const uint8_t* x = b[d] + r;
+                    for (size_t j = 0; j < kIndexLanes; j++) {
+                        const bool bit = Plain ? x[j] >= lo[d] : static_cast<uint8_t>(x[j] - lo[d]) <= range[d];
+                        v[j] = static_cast<uint8_t>(v[j] + v[j] + bit);
+                    }
+                }
+                for (size_t j = 0; j < kIndexLanes; j++) index[r + j] = v[j];
+            }
+            return r;
+        }
+
+    #if LIGNUM_CATBOOST_X86
+        // kIndexSimd = 2: SSE2 / AVX2 have no unsigned byte >=, so x >= t is max(x, t) == x (and
+        // x <= range is min(x, range) == x); the 0xff of a true compare is -1: v = 2 v - mask.
+        // Returns the rows done.
+        template <int Depth, bool Plain>
+        inline size_t index_x86(const uint8_t* const* b, const uint8_t* lo, const uint8_t* range, size_t rows, uint8_t* index) {
+            size_t r = 0;
+        #if defined(LIGNUM_CATBOOST_ISA_AVX2)
+            {
+                __m256i t[Depth], m[Depth];
+                for (int d = 0; d < Depth; d++) {
+                    t[d] = _mm256_set1_epi8(static_cast<char>(lo[d]));
+                    m[d] = _mm256_set1_epi8(static_cast<char>(Plain ? 0 : range[d]));
+                }
+                for (; r + 32 <= rows; r += 32) {
+                    __m256i v = _mm256_setzero_si256();
+                    for (int d = Depth - 1; d >= 0; d--) {
+                        __m256i x = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b[d] + r));
+                        __m256i bit;
+                        if constexpr (Plain) {
+                            bit = _mm256_cmpeq_epi8(_mm256_max_epu8(x, t[d]), x);
+                        } else {
+                            x = _mm256_sub_epi8(x, t[d]);
+                            bit = _mm256_cmpeq_epi8(_mm256_min_epu8(x, m[d]), x);
+                        }
+                        v = _mm256_sub_epi8(_mm256_add_epi8(v, v), bit);
+                    }
+                    _mm256_storeu_si256(reinterpret_cast<__m256i*>(index + r), v);
+                }
+            }
+        #endif
+            __m128i t[Depth], m[Depth];
+            for (int d = 0; d < Depth; d++) {
+                t[d] = _mm_set1_epi8(static_cast<char>(lo[d]));
+                m[d] = _mm_set1_epi8(static_cast<char>(Plain ? 0 : range[d]));
+            }
+            for (; r + 16 <= rows; r += 16) {
+                __m128i v = _mm_setzero_si128();
+                for (int d = Depth - 1; d >= 0; d--) {
+                    __m128i x = _mm_loadu_si128(reinterpret_cast<const __m128i*>(b[d] + r));
+                    __m128i bit;
+                    if constexpr (Plain) {
+                        bit = _mm_cmpeq_epi8(_mm_max_epu8(x, t[d]), x);
+                    } else {
+                        x = _mm_sub_epi8(x, t[d]);
+                        bit = _mm_cmpeq_epi8(_mm_min_epu8(x, m[d]), x);
+                    }
+                    v = _mm_sub_epi8(_mm_add_epi8(v, v), bit);
+                }
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(index + r), v);
+            }
+            return r;
+        }
+    #endif
+
+        template <int Depth, bool Plain>
+        inline void index_bytes(const uint8_t* const* b, const uint8_t* lo, const uint8_t* range, size_t rows, uint8_t* index) {
+        #if LIGNUM_CATBOOST_X86
+            const size_t done = kIndexSimd == 2 ? index_x86<Depth, Plain>(b, lo, range, rows, index)
+                                                : index_lanes<Depth, Plain>(b, lo, range, rows, index);
+        #else
+            const size_t done = index_lanes<Depth, Plain>(b, lo, range, rows, index);
+        #endif
+            index_rows<Depth, Plain>(b, lo, range, done, rows, index);
+        }
+
         // Leaf indices (16 bits: depth <= 16) of one tree for a block of rows, from buckets of type B
         // (uint16_t, or uint8_t when every source fits). With the depth known at compile time, all
         // levels are done in one pass over the rows with the index in a register. Both split kinds
@@ -87,6 +185,10 @@ namespace lignum::catboost_kernel::LIGNUM_CATBOOST_ISA {
                 b[d] = buckets + source[d] * stride;
                 lo[d] = static_cast<B>(threshold[d]);
                 range[d] = equal[d] ? B{0} : static_cast<B>(static_cast<B>(~B{0}) - threshold[d]);
+            }
+            if constexpr (kIndexSimd > 0 && sizeof(B) == 1 && sizeof(I) == 1) {
+                index_bytes<Depth, false>(b, lo, range, rows, index);
+                return;
             }
             for (size_t r = 0; r < rows; r++) {
                 I v = 0;
@@ -121,6 +223,10 @@ namespace lignum::catboost_kernel::LIGNUM_CATBOOST_ISA {
             for (int d = 0; d < Depth; d++) {
                 b[d] = buckets + source[d] * stride;
                 lo[d] = static_cast<B>(threshold[d]);
+            }
+            if constexpr (kIndexSimd > 0 && sizeof(B) == 1 && sizeof(I) == 1) {
+                index_bytes<Depth, true>(b, lo, nullptr, rows, index);
+                return;
             }
             for (size_t r = 0; r < rows; r++) {
                 I v = 0;
