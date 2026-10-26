@@ -6,8 +6,11 @@
 //   f64 values[rows x floats] (row-major), u64 offsets[rows x cats + 1], UTF-8 bytes,
 //   f64 expected raw scores[rows x dim] (CatBoost's Python package).
 //
-// Usage: catboost_capi <model.cbm> <data> <libcatboostmodel> <threads> <repeats>
+// Usage: catboost_capi <model.cbm> <data> <libcatboostmodel> <threads> <repeats> [case]
 // Prints one JSON object per line: {"case": ..., "best_s"/"median_us": ..., "mismatch": ...}.
+// With a case, runs only that work once on one thread, for profilers (cachegrind): none (loading
+// and setup only), catboost-batch, lignum-batch (all rows from strings), catboost-row, lignum-row
+// (every row as its own call).
 // POSIX only (dlopen); it is a benchmark tool, not part of the library.
 
 #include <lignum/c_api.h>
@@ -183,7 +186,7 @@ namespace {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 6) die("usage: catboost_capi <model.cbm> <data> <libcatboostmodel> <threads> <repeats>");
+    if (argc != 6 && argc != 7) die("usage: catboost_capi <model.cbm> <data> <libcatboostmodel> <threads> <repeats> [case]");
     const Data d = read_data(argv[2]);
     const CatBoostApi cb = open_catboost(argv[3]);
     const int threads = std::max(1, std::atoi(argv[4]));
@@ -252,6 +255,32 @@ int main(int argc, char** argv) {
         if (LignumModelPredict(model, X_hashed.data() + begin * d.columns, end - begin, d.columns, 1, n_jobs, LIGNUM_STRATEGY_AUTO,
                                out.data() + begin * dim) != 0) die(LignumGetLastError());
     };
+
+    if (argc == 7) {  // one case, once, one thread
+        const std::string only = argv[6];
+        std::vector<double> row(d.columns);
+        if (only == "catboost-batch") {
+            cb_strings(0, rows);
+        } else if (only == "lignum-batch") {
+            lg_strings(0, rows, 1);
+        } else if (only == "catboost-row") {
+            for (size_t r = 0; r < rows; r++) {
+                if (!cb.predict_single(calcer, float_rows[r], d.n_float, cat_rows[r], d.n_cat, out.data() + r * dim, dim)) die(cb.error());
+            }
+        } else if (only == "lignum-row") {
+            for (size_t r = 0; r < rows; r++) {
+                for (size_t k = 0; k < d.n_float; k++) row[d.float_columns[k]] = d.floats[r * d.n_float + k];
+                for (size_t k = 0; k < d.n_cat; k++) row[d.cat_columns[k]] = LignumCatBoostHash(d.cat(r, k), d.cat_size(r, k));
+                if (LignumModelPredict(model, row.data(), 1, d.columns, 1, 1, LIGNUM_STRATEGY_AUTO, out.data() + r * dim) != 0) die(LignumGetLastError());
+            }
+        } else if (only != "none") {
+            die("unknown case " + only);
+        }
+        std::printf("{\"case\": \"%s\", \"rows\": %zu, \"mismatch\": %zu}\n", only.c_str(), rows, only == "none" ? 0 : mismatches(out, d, rows));
+        LignumModelFree(model);
+        cb.destroy(calcer);
+        return 0;
+    }
 
     // Batches. CatBoost's C API has no thread setting: one call is one thread, so the multi-thread
     // cases split the rows over std::threads for both libraries (lignum hashed: its own threads).

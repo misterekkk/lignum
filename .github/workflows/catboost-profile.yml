@@ -1,0 +1,51 @@
+name: CatBoost profile
+
+# Work per row of lignum and CatBoost (C API) on CatBoost models, counted by cachegrind on x86-64
+# and aarch64: instructions, memory reads and writes, simulated cache misses and branch
+# mispredictions, lignum's hot source lines, and stack accesses in its kernel (objdump).
+# Runs when this file or the profiling scripts change, or by hand.
+on:
+  push:
+    branches: [main, 'dev/**']
+    paths:
+      - 'benchmarks/catboost_profile.py'
+      - '.github/workflows/catboost-profile.yml'
+  workflow_dispatch:
+
+jobs:
+  profile:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lignum, CatBoost and valgrind
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q valgrind
+          python -m pip install --upgrade pip
+          python -m pip install ".[test]" polars
+
+      - name: Cache datasets
+        uses: actions/cache@v4
+        with:
+          path: benchmarks/.cache/datasets
+          key: datasets-v1
+
+      - name: Train the models and write the C API data (20k rows)
+        run: python benchmarks/bench_catboost.py --datasets california,adult,covtype --rows 20000 --repeats 1 --latency-budget 0.1 --cmake-args=-DCMAKE_CXX_FLAGS=-g
+
+      - name: Profile
+        run: python benchmarks/catboost_profile.py --datasets california,adult,covtype --rows 20000 | tee profile.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: catboost-profile-${{ matrix.os }}
+          path: profile.md
