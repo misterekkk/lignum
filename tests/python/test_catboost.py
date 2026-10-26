@@ -285,6 +285,26 @@ def test_multiclass(tmp_path, loss, complexity, fmt):
         np.testing.assert_array_equal(model.predict(t.iloc[i:i + 1]), m.predict_proba(t.iloc[i:i + 1]))
 
 
+@pytest.mark.parametrize("depth, n_classes", [(12, 1), (16, 1), (3, 12)])
+def test_deep_trees_and_many_classes(tmp_path, depth, n_classes):
+    """The kernel specialises depths 1-10 and 1-10 outputs; deeper trees and more classes take the
+    general loops."""
+    rng = np.random.default_rng(depth + n_classes)
+    df, signal = make_frame(rng)
+    if n_classes == 1:
+        m, path, _ = train(cb.CatBoostRegressor, df, signal + rng.normal(size=len(df)), tmp_path, "cbm", depth=depth, iterations=15)
+        want = m.predict(df)
+    else:
+        y = np.digitize(signal + rng.normal(size=len(df)) * 0.3, np.quantile(signal, np.linspace(0, 1, n_classes + 1)[1:-1]))
+        m, path, _ = train(cb.CatBoostClassifier, df, y, tmp_path, "cbm", depth=depth, loss_function="MultiClass")
+        want = m.predict(df, prediction_type="RawFormulaVal")
+    model = lignum.load(path)
+    assert model.n_outputs == n_classes
+    np.testing.assert_array_equal(model.predict(df, raw_score=True), want)
+    for i in range(5):
+        np.testing.assert_array_equal(model.predict(df.iloc[i:i + 1], raw_score=True), want[i:i + 1])
+
+
 def test_cbm_matches_json_and_loads_fast(tmp_path):
     rng = np.random.default_rng(23)
     df, signal = make_frame(rng)

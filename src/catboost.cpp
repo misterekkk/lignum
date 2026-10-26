@@ -1104,7 +1104,7 @@ namespace lignum {
             std::vector<uint32_t> hashes;
             std::vector<uint32_t> entries;
             std::vector<uint64_t> combination;
-            std::vector<uint32_t> index;
+            std::vector<uint16_t> index;
             std::vector<double> sums;
 
             void prepare(const ObliviousForest& f, size_t rows) {
@@ -1121,6 +1121,94 @@ namespace lignum {
         Scratch& thread_scratch() {
             thread_local Scratch scratch;
             return scratch;
+        }
+
+        // Leaf indices (16 bits: depth <= 16) of one tree for a block of rows. With the depth known
+        // at compile time, all levels are done in one pass over the rows with the index in a
+        // register. Both split kinds are one unsigned range test, `(uint16_t)(bucket - t) <= range`:
+        // range 0xffff - t for `bucket >= t`, 0 for the one-hot `bucket == t`. (Two comparisons
+        // joined with `&` stopped the loop from vectorising: 3x slower.)
+        template <int Depth>
+        void tree_index(const uint16_t* buckets, size_t stride, const uint16_t* source, const uint16_t* threshold,
+                        const uint8_t* equal, size_t rows, uint16_t* index) {
+            const uint16_t* b[Depth];
+            uint16_t lo[Depth], range[Depth];
+            for (int d = 0; d < Depth; d++) {
+                b[d] = buckets + source[d] * stride;
+                lo[d] = threshold[d];
+                range[d] = equal[d] ? uint16_t{0} : static_cast<uint16_t>(0xffff - threshold[d]);
+            }
+            for (size_t r = 0; r < rows; r++) {
+                uint16_t v = 0;
+                for (int d = 0; d < Depth; d++) v |= static_cast<uint16_t>((static_cast<uint16_t>(b[d][r] - lo[d]) <= range[d]) << d);
+                index[r] = v;
+            }
+        }
+
+        // Any depth, one pass over the rows per level.
+        void tree_index_any(const uint16_t* buckets, size_t stride, const uint16_t* source, const uint16_t* threshold,
+                            const uint8_t* equal, uint32_t depth, size_t rows, uint16_t* index) {
+            std::fill(index, index + rows, uint16_t{0});
+            for (uint32_t d = 0; d < depth; d++) {
+                const uint16_t* b = buckets + source[d] * stride;
+                const uint16_t t = threshold[d];
+                if (equal[d]) {
+                    for (size_t r = 0; r < rows; r++) index[r] |= static_cast<uint16_t>((b[r] == t) << d);
+                } else {
+                    for (size_t r = 0; r < rows; r++) index[r] |= static_cast<uint16_t>((b[r] >= t) << d);
+                }
+            }
+        }
+
+        void tree_index_dispatch(const uint16_t* buckets, size_t stride, const uint16_t* source, const uint16_t* threshold,
+                                 const uint8_t* equal, uint32_t depth, size_t rows, uint16_t* index) {
+            switch (depth) {
+                case 0: std::fill(index, index + rows, uint16_t{0}); break;
+                case 1: tree_index<1>(buckets, stride, source, threshold, equal, rows, index); break;
+                case 2: tree_index<2>(buckets, stride, source, threshold, equal, rows, index); break;
+                case 3: tree_index<3>(buckets, stride, source, threshold, equal, rows, index); break;
+                case 4: tree_index<4>(buckets, stride, source, threshold, equal, rows, index); break;
+                case 5: tree_index<5>(buckets, stride, source, threshold, equal, rows, index); break;
+                case 6: tree_index<6>(buckets, stride, source, threshold, equal, rows, index); break;
+                case 7: tree_index<7>(buckets, stride, source, threshold, equal, rows, index); break;
+                case 8: tree_index<8>(buckets, stride, source, threshold, equal, rows, index); break;
+                case 9: tree_index<9>(buckets, stride, source, threshold, equal, rows, index); break;
+                case 10: tree_index<10>(buckets, stride, source, threshold, equal, rows, index); break;
+                default: tree_index_any(buckets, stride, source, threshold, equal, depth, rows, index); break;
+            }
+        }
+
+        // Phase 2 for a block: leaf index per tree, leaves added in model order (one double addition
+        // per tree and output). Dim outputs per row, 0: any, from the model. The sums are a local
+        // array: on the heap the compiler cannot keep them apart from the leaves (7 classes: 0.149
+        // instead of 0.100 s for 200k rows).
+        template <int Dim>
+        void phase2(const ObliviousForest& f, const uint16_t* buckets, size_t stride, size_t rows, Scratch& s, double* out) {
+            double local[Dim > 0 ? kBlock * Dim : 1];
+            const size_t dim = Dim > 0 ? Dim : f.dim;
+            double* sums = Dim > 0 ? local : s.sums.data();
+            std::fill(sums, sums + rows * dim, 0.0);
+            uint16_t* index = s.index.data();
+            for (size_t t = 0; t < f.n_trees(); t++) {
+                const uint32_t k = f.split_begin[t];
+                tree_index_dispatch(buckets, stride, f.split_source.data() + k, f.split_threshold.data() + k, f.split_equal.data() + k,
+                                    f.split_begin[t + 1] - k, rows, index);
+                const double* leaves = f.leaves.data() + f.leaf_begin[t];
+                if constexpr (Dim > 0) {
+                    for (size_t r = 0; r < rows; r++) {
+                        const double* l = leaves + index[r] * Dim;
+                        for (int d = 0; d < Dim; d++) sums[r * Dim + d] += l[d];
+                    }
+                } else {
+                    for (size_t r = 0; r < rows; r++) {
+                        const double* l = leaves + index[r] * dim;
+                        for (size_t d = 0; d < dim; d++) sums[r * dim + d] += l[d];
+                    }
+                }
+            }
+            for (size_t r = 0; r < rows; r++) {
+                for (size_t d = 0; d < dim; d++) out[r * dim + d] = f.scale * sums[r * dim + d] + f.bias[d];
+            }
         }
 
         void predict_block(const ObliviousForest& f, const double* X, size_t n_features, size_t rows, double* out, Scratch& s) {
@@ -1194,34 +1282,18 @@ namespace lignum {
                 for (size_t r = 0; r < rows; r++) b[r] = entries[r] ? ctr.entry_buckets[entries[r] - 1] : ctr.missing_bucket;
             }
 
-            // Phase 2: leaf index per tree from one bit per level, leaves added in model order.
-            const size_t dim = f.dim;
-            double* sums = s.sums.data();
-            std::fill(sums, sums + rows * dim, 0.0);
-            uint32_t* index = s.index.data();
-            for (size_t t = 0; t < f.n_trees(); t++) {
-                std::fill(index, index + rows, 0u);
-                for (uint32_t k = f.split_begin[t]; k < f.split_begin[t + 1]; k++) {
-                    const uint16_t* b = buckets + f.split_source[k] * stride;
-                    const uint16_t threshold = f.split_threshold[k];
-                    const uint32_t bit = k - f.split_begin[t];
-                    if (f.split_equal[k]) {
-                        for (size_t r = 0; r < rows; r++) index[r] |= static_cast<uint32_t>(b[r] == threshold) << bit;
-                    } else {
-                        for (size_t r = 0; r < rows; r++) index[r] |= static_cast<uint32_t>(b[r] >= threshold) << bit;
-                    }
-                }
-                const double* leaves = f.leaves.data() + f.leaf_begin[t];
-                if (dim == 1) {
-                    for (size_t r = 0; r < rows; r++) sums[r] += leaves[index[r]];
-                } else {
-                    for (size_t r = 0; r < rows; r++) {
-                        for (size_t d = 0; d < dim; d++) sums[r * dim + d] += leaves[index[r] * dim + d];
-                    }
-                }
-            }
-            for (size_t r = 0; r < rows; r++) {
-                for (size_t d = 0; d < dim; d++) out[r * dim + d] = f.scale * sums[r * dim + d] + f.bias[d];
+            switch (f.dim) {
+                case 1: phase2<1>(f, buckets, stride, rows, s, out); break;
+                case 2: phase2<2>(f, buckets, stride, rows, s, out); break;
+                case 3: phase2<3>(f, buckets, stride, rows, s, out); break;
+                case 4: phase2<4>(f, buckets, stride, rows, s, out); break;
+                case 5: phase2<5>(f, buckets, stride, rows, s, out); break;
+                case 6: phase2<6>(f, buckets, stride, rows, s, out); break;
+                case 7: phase2<7>(f, buckets, stride, rows, s, out); break;
+                case 8: phase2<8>(f, buckets, stride, rows, s, out); break;
+                case 9: phase2<9>(f, buckets, stride, rows, s, out); break;
+                case 10: phase2<10>(f, buckets, stride, rows, s, out); break;
+                default: phase2<0>(f, buckets, stride, rows, s, out); break;
             }
         }
 
