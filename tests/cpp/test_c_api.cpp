@@ -27,6 +27,10 @@ TEST(CApi, LoadPredictSaveFree) {
     size_t n_features = 0;
     ASSERT_EQ(LignumModelNumFeatures(model, &n_features), 0);
     EXPECT_EQ(n_features, 2u);
+    size_t n_trees = 0;
+    ASSERT_EQ(LignumModelNumTrees(model, &n_trees), 0);
+    EXPECT_EQ(n_trees, 1u);
+    EXPECT_NE(LignumModelNumTrees(model, nullptr), 0);
 
     const std::vector<double> X = {0.0, 0.1, 0.0, 0.9, 0.0, 0.5};
     std::vector<double> out(3);
@@ -64,6 +68,9 @@ TEST(CApi, CatBoostModel) {
     ASSERT_EQ(LignumModelNumFeatures(model, &n_features), 0);
     ASSERT_EQ(LignumModelOutputWidth(model, 1, &width), 0);
     EXPECT_EQ(n_features, 2u);
+    size_t n_trees = 0;
+    ASSERT_EQ(LignumModelNumTrees(model, &n_trees), 0);
+    EXPECT_GT(n_trees, 0u);
     EXPECT_EQ(width, 1u);
 
     const auto cat = [](const char* text) { return static_cast<double>(LignumCatBoostHash(text, std::strlen(text))); };

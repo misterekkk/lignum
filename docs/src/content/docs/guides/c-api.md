@@ -44,7 +44,7 @@ int main(void) {
 |---|---|
 | `LignumModelLoad(path, format, &handle)` | load any [model file](../models/) (`format` as in Python) |
 | `LignumModelSave(handle, path)` | write the `.bin` format |
-| `LignumModelNumFeatures`, `LignumModelOutputWidth` | input columns, values per output row |
+| `LignumModelNumFeatures`, `LignumModelOutputWidth`, `LignumModelNumTrees` | input columns, values per output row, trees |
 | `LignumModelPredict(handle, X, n, n_features, raw, n_jobs, strategy, out)` | row-major `float64` input |
 | `LignumModelPredictArrow(handle, schema, batch, raw, n_jobs, strategy, out)` | an Arrow record batch ([Arrow input](../arrow/)); columns by position, names are not checked |
 | `LignumCatBoostHash(text, size)` | a category's hash for [CatBoost models](#catboost-models) |

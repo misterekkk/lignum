@@ -58,6 +58,7 @@ namespace lignum {
         model.data = data;
         model.source = (source == ModelSource::LightGBMJson || source == ModelSource::LightGBMText) ? model_source::LightGBM : model_source::XGBoost;
         model.feature_names = model_feature_names(std::move(info.feature_names), model.n_features, model.source);
+        model.objective = std::move(info.objective);
 
         return model;
     }

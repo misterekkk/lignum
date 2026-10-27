@@ -16,7 +16,7 @@ All notable changes to lignum (`pip install pylignum`). The format follows
   `predict(..., validate_features=False)`, `load(..., validate_features=False)` or
   `model.validate_features = False` turn the check off; it costs 0-5 µs per call (Apple M4).
 - **Breaking: `.bin` format 0.8.** It adds the feature names, the library the model was trained
-  with and the lignum version that wrote the file. Files written by lignum 0.3 are rejected: save
+  with, its objective and the lignum version that wrote the file. Files written by lignum 0.3 are rejected: save
   them again from the original model.
 
 - **Compiled-library files** (`Model.compile()`): without `library=`, libraries go to a per-user
@@ -31,6 +31,11 @@ All notable changes to lignum (`pip install pylignum`). The format follows
 
 ### Added
 
+- Model inspection: `Model.n_trees`, `Model.source` (`"lightgbm"`, `"xgboost"` or `"catboost"`),
+  `Model.objective` (the library's name, e.g. `"binary"`, `"multi:softprob"`, `"Logloss"`) and
+  `Model.info()`, a dict that adds the output transform, the number of leaves, the kernel in use,
+  the compiled library and, for `.bin` files, the lignum version that wrote them. `repr(model)`
+  shows the source, objective, trees and features. C API: `LignumModelNumTrees`.
 - `Model.feature_names`: the names of the training columns (LightGBM, XGBoost and CatBoost files,
   kept in `.bin`), or `None` for models trained on a matrix.
 - `lignum.cache_dir()`, `lignum.clear_cache()` and `Model.compiled_library` (the path of the

@@ -125,6 +125,8 @@ namespace lignum {
             // reads columns by position.
             std::vector<std::string> feature_names;
             uint8_t source = model_source::Unknown;
+            std::string objective;   // as the source library names it; empty when unknown
+            std::string written_by;  // lignum version that wrote the .bin file; empty for other formats
 
             std::shared_ptr<const Data> data;
             std::shared_ptr<const BinnedForest> binned;  // binned kernel for batches; null when disabled or unsupported
@@ -146,6 +148,9 @@ namespace lignum {
             void predict_raw(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds,
                              int n_jobs = -1, Strategy strategy = Strategy::Auto) const;
             void save(const std::string& filepath) const;
+
+            size_t n_trees() const;      // trees in model order, every class counted (CatBoost: symmetric trees)
+            size_t total_leaves() const; // leaves of all trees
     };
 
 } // namespace lignum

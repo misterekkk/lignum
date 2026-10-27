@@ -204,6 +204,7 @@ namespace lignum {
             if (objective == "multi:softprob") info.transform = transform::Softmax;
             if (objective == "multi:softmax") info.transform = transform::Argmax;
             info.base_scores.assign(base_scores.begin(), base_scores.end());
+            info.objective = std::string(objective);
 
             simdjson::dom::array names;  // empty for models trained on a matrix
             if (doc["learner"]["feature_names"].get_array().get(names) == simdjson::SUCCESS) {

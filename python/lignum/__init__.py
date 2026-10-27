@@ -254,6 +254,11 @@ class Model:
             X_arr = X_arr.reshape(1, -1)
         return self._c_model.predict(X_arr, raw_score, n_jobs, strategy)
 
+    def __repr__(self) -> str:
+        source = f"{self.source} " if self.source else ""
+        objective = f"{self.objective}, " if self.objective else ""
+        return f"<lignum.Model {source}{objective}{self.n_trees} trees, {self.n_features} features>"
+
     @property
     def n_outputs(self) -> int:
         """Number of model outputs: the number of classes for multiclass models, otherwise 1."""
@@ -443,6 +448,63 @@ class Model:
     def n_features(self) -> int:
         """Minimum number of columns the input must have."""
         return self._c_model.n_features
+
+    @property
+    def n_trees(self) -> int:
+        """Number of trees. Multiclass models have one tree per class and iteration, all counted
+        (like LightGBM's `num_trees()`)."""
+        return self._c_model.n_trees
+
+    @property
+    def source(self) -> str | None:
+        """Library the model was trained with: "lightgbm", "xgboost" or "catboost"."""
+        return self._c_model.source or None
+
+    @property
+    def objective(self) -> str | None:
+        """Objective as the source library names it ("binary", "multi:softprob", "Logloss"), or None
+        when the file does not say."""
+        return self._c_model.objective or None
+
+    def info(self) -> dict:
+        """
+        Summary of the model, for logs and checks before serving it.
+
+        Returns
+        -------
+        dict
+            `source`, `objective`, `transform` (from raw scores to predictions: "identity",
+            "sigmoid", "exp", "log1p_exp", "softmax" or "argmax"), `n_trees`, `n_leaves`,
+            `n_features`, `n_outputs`, `feature_names`, `categorical_features`,
+            `kernel` ("catboost", "compiled", "binned" or "direct"), `compiled_library` and
+            `written_by` (lignum version that wrote a `.bin` file, otherwise None).
+
+        Examples
+        --------
+        >>> lignum.load("model.txt").info()["n_trees"]
+        500
+        """
+        c = self._c_model
+        if c.is_catboost:
+            kernel = "catboost"
+        elif c.uses_compiled:
+            kernel = "compiled"
+        else:
+            kernel = "binned" if c.uses_binned else "direct"
+        return {
+            "source": self.source,
+            "objective": self.objective,
+            "transform": c.transform,
+            "n_trees": c.n_trees,
+            "n_leaves": c.n_leaves,
+            "n_features": c.n_features,
+            "n_outputs": c.n_outputs,
+            "feature_names": self.feature_names,
+            "categorical_features": self.categorical_features,
+            "kernel": kernel,
+            "compiled_library": c.compiled_library,
+            "written_by": c.written_by or None,
+        }
 
     def save(self, filepath: str) -> None:
         """

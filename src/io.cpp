@@ -4,6 +4,7 @@
 #include "catboost.hpp"
 #include "validate.hpp"
 
+#include <algorithm>
 #include <fstream>
 #include <stdexcept>
 #include <vector>
@@ -72,14 +73,17 @@ namespace lignum {
         };
         static_assert(sizeof(FileHeader) == 64, "FileHeader must stay 64 bytes");
 
-        // Follows the FileHeader (format 0.8): who wrote the file and the model's feature names,
-        // which follow it as n_names x (uint32 length, UTF-8 bytes), padded to 64 bytes.
+        // Follows the FileHeader (format 0.8): who wrote the file, the model's feature names, which
+        // follow it as n_names x (uint32 length, UTF-8 bytes), then the objective's name (UTF-8),
+        // both together padded to 64 bytes.
         struct alignas(64) InfoHeader {
             char writer[24] = {};      // lignum version that wrote the file, NUL-padded
             uint64_t names_bytes = 0;
             uint32_t n_names = 0;
             uint8_t source = model_source::Unknown;
-            uint8_t padding[27] = {0};
+            uint8_t padding0[3] = {0};
+            uint32_t objective_bytes = 0;
+            uint8_t padding[20] = {0};
         };
         static_assert(sizeof(InfoHeader) == 64, "InfoHeader must stay 64 bytes");
 
@@ -145,6 +149,8 @@ namespace lignum {
                 names += name;
             }
             info.names_bytes = names.size();
+            info.objective_bytes = static_cast<uint32_t>(model.objective.size());
+            names += model.objective;
             out.write(reinterpret_cast<const char*>(&info), sizeof(info));
             padded_write(out, names.data(), names.size());
         }
@@ -156,12 +162,13 @@ namespace lignum {
             InfoHeader info;
             std::memcpy(&info, data + 64, sizeof(info));
             if (info.source > model_source::CatBoost || info.names_bytes > size - start ||
-                info.n_names > info.names_bytes / sizeof(uint32_t)) {
+                info.objective_bytes > size - start - info.names_bytes || info.n_names > info.names_bytes / sizeof(uint32_t)) {
                 throw std::runtime_error("Binary file is truncated or corrupted.");
             }
             const char* p = data + start;
             const char* end = p + info.names_bytes;
             model.source = info.source;
+            model.written_by.assign(info.writer, std::find(info.writer, info.writer + sizeof(info.writer), '\0'));
             model.feature_names.reserve(info.n_names);
             for (uint32_t i = 0; i < info.n_names; i++) {
                 uint32_t length = 0;
@@ -173,7 +180,8 @@ namespace lignum {
                 p += length;
             }
             if (p != end) throw std::runtime_error("Binary file is truncated or corrupted.");
-            return start + align(info.names_bytes);
+            model.objective.assign(end, info.objective_bytes);
+            return start + align(info.names_bytes + info.objective_bytes);
         }
 
     } // namespace
@@ -323,11 +331,13 @@ namespace lignum {
                                      "its LightGBM, XGBoost or CatBoost file.");
         }
 
-        Model info;  // source and feature names
+        Model info;  // source, feature names, objective and writer
         const size_t base = read_info(binary_data->data, binary_data->size, info);
         auto adopt_info = [&](Model& model) {
             model.source = info.source;
             model.feature_names = std::move(info.feature_names);
+            model.objective = std::move(info.objective);
+            model.written_by = std::move(info.written_by);
             if (!model.feature_names.empty() && model.feature_names.size() < model.n_features) {
                 throw std::runtime_error("Binary file is truncated or corrupted.");
             }
