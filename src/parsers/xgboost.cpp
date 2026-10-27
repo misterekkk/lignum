@@ -195,6 +195,11 @@ namespace lignum {
             if (objective == "multi:softmax") info.transform = transform::Argmax;
             info.base_scores.assign(base_scores.begin(), base_scores.end());
 
+            simdjson::dom::array names;  // empty for models trained on a matrix
+            if (doc["learner"]["feature_names"].get_array().get(names) == simdjson::SUCCESS) {
+                for (simdjson::dom::element name : names) info.feature_names.emplace_back(name.get_string().value());
+            }
+
             auto trees_element = doc["learner"]["gradient_booster"]["model"]["trees"];
             if (trees_element.error() == simdjson::SUCCESS) {
                 for (simdjson::dom::element tree_elem : trees_element.get_array()) {

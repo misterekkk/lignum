@@ -86,10 +86,37 @@ class Model:
     `compile()` / `load(..., compiled=...)`; both give the same, bit-identical results.
     """
 
-    def __init__(self, _c_model):
+    def __init__(self, _c_model, validate_features: bool = True):
         self._c_model = _c_model
         self._categorical = frozenset(_c_model.categorical_features)
         self._category_cache = {}
+        self._feature_names = list(_c_model.feature_names)
+        self._names_index = None     # pandas Index of the feature names, made on first use
+        self._checked_columns = None  # the last columns object that passed the check
+        self.validate_features = validate_features
+
+    @property
+    def feature_names(self) -> list[str] | None:
+        """Names of the columns the model was trained on, in order, or None when the model has no
+        names (trained on a matrix). `X[model.feature_names]` puts a DataFrame's columns in the
+        model's order."""
+        return list(self._feature_names) if self._feature_names else None
+
+    def _check_columns(self, columns) -> None:
+        """Raise ValueError when a DataFrame's columns do not start with the model's feature names.
+        Frames without names (e.g. built from a numpy array: integer column labels) are used by
+        position, like numpy arrays."""
+        if columns is self._checked_columns or columns.dtype.kind not in "OU":
+            return
+        if self._names_index is None:
+            import pandas as pd
+
+            self._names_index = pd.Index(self._feature_names)
+        n = len(self._names_index)
+        if not (columns if len(columns) == n else columns[:n]).equals(self._names_index):
+            # Mismatch, or a LightGBM name with spaces (stored with '_'): C++ decides and explains.
+            self._c_model.check_feature_names([str(c) for c in columns])
+        self._checked_columns = columns
 
     def _catboost_frame(self, X) -> np.ndarray:
         """float64 matrix of a pandas DataFrame, column by column: categorical columns as the
@@ -145,7 +172,8 @@ class Model:
             out[:, j] = _category_hashes(A[:, j]) if j in self._categorical else A[:, j].astype(np.float64)
         return out
 
-    def predict(self, X: np.ndarray, raw_score: bool = False, n_jobs: int = -1, strategy: str = "auto") -> np.ndarray:
+    def predict(self, X: np.ndarray, raw_score: bool = False, n_jobs: int = -1, strategy: str = "auto",
+                validate_features: bool | None = None) -> np.ndarray:
         """
         Predict values for the given input data.
 
@@ -175,6 +203,13 @@ class Model:
             only speed differs. `'serial'` runs on the calling thread (lowest latency for a
             few rows), `'rows'` splits rows between threads. `'auto'` uses `'serial'` below
             8 rows or with one thread, `'rows'` otherwise.
+        validate_features : bool, optional
+            Check that the column names of a pandas DataFrame or Arrow data start with
+            `feature_names`, in the same order, and raise `ValueError` otherwise (a reordered or
+            missing column would silently give other predictions). Default: the model's
+            `validate_features` (True unless set with `load(..., validate_features=False)`).
+            numpy arrays have no names and are always used by position, as are frames without
+            column names and models without feature names. The check costs about 1-5 µs per call.
 
         Returns
         -------
@@ -195,13 +230,16 @@ class Model:
         # array([0.45, 0.89])
         ```
         """
+        validate = (self.validate_features if validate_features is None else validate_features) and bool(self._feature_names)
         if not isinstance(X, np.ndarray) and not _is_pandas(X):
             # Arrow PyCapsule interface: pyarrow, polars, duckdb, nanoarrow... (no pyarrow needed here).
             if hasattr(X, "__arrow_c_array__"):
                 schema, array = X.__arrow_c_array__()
-                return self._c_model.predict_arrow(schema, array, raw_score, n_jobs, strategy)
+                return self._c_model.predict_arrow(schema, array, raw_score, n_jobs, strategy, validate)
             if hasattr(X, "__arrow_c_stream__"):
-                return self._c_model.predict_arrow_stream(X.__arrow_c_stream__(), raw_score, n_jobs, strategy)
+                return self._c_model.predict_arrow_stream(X.__arrow_c_stream__(), raw_score, n_jobs, strategy, validate)
+        if validate and _is_pandas(X) and X.ndim == 2:
+            self._check_columns(X.columns)
         if self._categorical:
             if _is_pandas(X) and X.ndim == 2 and len(X) >= _ARROW_MIN_ROWS:
                 table = _arrow_table(X)
@@ -428,7 +466,7 @@ class Model:
 
 
 def load(filepath: str, format: str = "auto", binned: bool = True,
-         compiled: str | os.PathLike | None = None) -> Model:
+         compiled: str | os.PathLike | None = None, validate_features: bool = True) -> Model:
     """
     Load a trained model: LightGBM or XGBoost files, or a lignum `.bin`.
 
@@ -450,6 +488,10 @@ def load(filepath: str, format: str = "auto", binned: bool = True,
         written to (the file for this model and platform is picked); predictions then use the
         compiled trees without compiling again. Needs `binned=True`. A library for another
         model or lignum version raises `RuntimeError`. Only load libraries you trust.
+    validate_features : bool, default=True
+        Default of `Model.predict(..., validate_features=...)`: check the column names of pandas
+        and Arrow inputs against the model's feature names. Also settable later as
+        `model.validate_features`.
 
     Returns
     -------
@@ -472,7 +514,7 @@ def load(filepath: str, format: str = "auto", binned: bool = True,
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
 
-    model = Model(_core.load(str(filepath), format, binned))
+    model = Model(_core.load(str(filepath), format, binned), validate_features)
     if compiled is not None:
         model.load_compiled(compiled)
     return model

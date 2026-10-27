@@ -9,7 +9,9 @@ import { lightgbmSpeedup, lightgbmRow, catboostSpeedup, catboostSpeedupMax, catb
 The [LightGBM](#apple-m4-10-cores) sections are for models with 500 trees (`num_leaves=63`) trained
 on five public data sets, predicting the whole data set; [CatBoost](#catboost) has its own section. lignum is bit-exact on every one of them; lleaves, the fastest
 other engine for LightGBM, is not (it differs from LightGBM on 81-100% of the rows). Lower is
-better; the fastest engine of each row is in bold.
+better; the fastest engine of each row is in bold. lignum is measured with
+`validate_features=False`, without the [column-name check](../guides/predicting/#column-names)
+(0-5 µs per call, nothing for numpy input).
 
 ## Apple M4 (10 cores)
 

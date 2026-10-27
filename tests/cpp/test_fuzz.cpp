@@ -18,7 +18,7 @@ using lignum::test::write_temp;
 namespace {
 
     // Two trees with numeric, zero-as-missing and categorical (mask and bitset) splits.
-    const char* kModel = R"({"objective": "binary sigmoid:1", "tree_info": [
+    const char* kModel = R"({"objective": "binary sigmoid:1", "feature_names": ["a", "b", "c", "d"], "tree_info": [
       {"tree_structure": {"split_feature": 0, "threshold": "1||5||100||900", "decision_type": "==", "default_left": false, "missing_type": "None",
         "left_child": {"split_feature": 1, "threshold": 0.5, "decision_type": "<=", "default_left": true, "missing_type": "NaN",
                        "left_child": {"split_feature": 2, "threshold": 1.0, "decision_type": "<=", "default_left": false, "missing_type": "Zero",
@@ -95,7 +95,7 @@ namespace {
 
     // LightGBM model.txt: a categorical split (categories 1 and 5) above a numeric one.
     const char* kTextModel =
-        "tree\nversion=v4\nnum_class=1\nnum_tree_per_iteration=1\nobjective=binary sigmoid:1\n\n"
+        "tree\nversion=v4\nnum_class=1\nnum_tree_per_iteration=1\nobjective=binary sigmoid:1\nfeature_names=a b\n\n"
         "Tree=0\nnum_leaves=3\nnum_cat=1\nsplit_feature=0 1\nthreshold=0 0.5\ndecision_type=1 10\n"
         "left_child=1 -1\nright_child=-3 -2\nleaf_value=0.1 0.2 0.3\ncat_boundaries=0 1\ncat_threshold=34\nis_linear=0\n\n"
         "end of trees\n";

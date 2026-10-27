@@ -8,7 +8,7 @@ Generated from the docstrings of lignum 0.3.1 by `docs/scripts/api_reference.py`
 ## `lignum.load`
 
 ```python
-lignum.load(filepath: str, format: str = 'auto', binned: bool = True, compiled: str | os.PathLike | None = None) -> Model
+lignum.load(filepath: str, format: str = 'auto', binned: bool = True, compiled: str | os.PathLike | None = None, validate_features: bool = True) -> Model
 ```
 
 Load a trained model: LightGBM or XGBoost files, or a lignum `.bin`.
@@ -19,6 +19,7 @@ Load a trained model: LightGBM or XGBoost files, or a lignum `.bin`.
 - `format` *({'auto', 'lignum', 'lightgbm', 'xgboost', 'catboost'}, default='auto')* Library of the model. The file's own bytes tell which of its formats it is, so 'auto' loads a lignum `.bin`, a LightGBM `model.txt` (`save_model`) or `dump_model()` JSON, an XGBoost `.json` or `.ubj` (`save_model`) and a CatBoost JSON (`save_model(..., format="json")`). Naming the library only adds a check.
 - `binned` *(bool, default=True)* Prepare the binned kernel: inputs are mapped once per row to integer bin codes and categorical decisions are precomputed, so the tree walk compares small integers. Results are identical either way; False keeps only the direct traversal (lower memory use).
 - `compiled` *(path, optional)* Library written by `Model.compile(library=...)` for this model, or the folder it was written to (the file for this model and platform is picked); predictions then use the compiled trees without compiling again. Needs `binned=True`. A library for another model or lignum version raises `RuntimeError`. Only load libraries you trust.
+- `validate_features` *(bool, default=True)* Default of `Model.predict(..., validate_features=...)`: check the column names of pandas and Arrow inputs against the model's feature names. Also settable later as `model.validate_features`.
 
 **Returns**
 
@@ -162,6 +163,12 @@ Model.decompile() -> None
 
 Go back to the interpreter.
 
+### `Model.feature_names`
+
+*Property.* Names of the columns the model was trained on, in order, or None when the model has no
+names (trained on a matrix). `X[model.feature_names]` puts a DataFrame's columns in the
+model's order.
+
 ### `Model.load_compiled`
 
 ```python
@@ -186,7 +193,7 @@ native code, so only load libraries you trust (like a pickle).
 ### `Model.predict`
 
 ```python
-Model.predict(X: np.ndarray, raw_score: bool = False, n_jobs: int = -1, strategy: str = 'auto') -> np.ndarray
+Model.predict(X: np.ndarray, raw_score: bool = False, n_jobs: int = -1, strategy: str = 'auto', validate_features: bool | None = None) -> np.ndarray
 ```
 
 Predict values for the given input data.
@@ -200,6 +207,7 @@ Otherwise, an internal copy will be triggered, which may degrade performance.
 - `raw_score` *(bool, default=False)* Whether to output raw scores (leaf values) instead of transformed predictions.
 - `n_jobs` *(int, default=-1)* Number of OpenMP threads to use. `-1` means using all available logical cores.
 - `strategy` *({'auto', 'serial', 'rows'}, default='auto')* How the work is spread across threads. All strategies return identical results; only speed differs. `'serial'` runs on the calling thread (lowest latency for a few rows), `'rows'` splits rows between threads. `'auto'` uses `'serial'` below 8 rows or with one thread, `'rows'` otherwise.
+- `validate_features` *(bool, optional)* Check that the column names of a pandas DataFrame or Arrow data start with `feature_names`, in the same order, and raise `ValueError` otherwise (a reordered or missing column would silently give other predictions). Default: the model's `validate_features` (True unless set with `load(..., validate_features=False)`). numpy arrays have no names and are always used by position, as are frames without column names and models without feature names. The check costs about 1-5 µs per call.
 
 **Returns**
 

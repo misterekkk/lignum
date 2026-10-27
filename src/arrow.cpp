@@ -1,6 +1,7 @@
 #include <lignum/lignum.hpp>
 #include "catboost.hpp"
 #include "columns.hpp"
+#include "validate.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -316,10 +317,24 @@ namespace lignum {
     } // namespace
 
     void predict_arrow(const Model& model, const ArrowSchema& schema, const ArrowArray& batch, double* out, bool raw_score,
-                       int n_jobs, Strategy strategy) {
+                       int n_jobs, Strategy strategy, bool validate_features) {
         if (!schema.format || std::strcmp(schema.format, "+s") != 0) {
             throw std::invalid_argument("Arrow input must be a record batch (struct array), got format '" +
                                         std::string(schema.format ? schema.format : "") + "'.");
+        }
+        if (validate_features && !model.feature_names.empty()) {
+            auto name_of = [&](size_t j) {
+                const char* name = schema.children && schema.children[j] ? schema.children[j]->name : nullptr;
+                return name ? name : "";
+            };
+            const auto& expected = model.feature_names;
+            bool same = expected.size() <= static_cast<size_t>(std::max<int64_t>(schema.n_children, 0));
+            for (size_t j = 0; same && j < expected.size(); j++) same = expected[j] == name_of(j);
+            if (!same) {  // a mismatch, or LightGBM names with spaces: build the list to decide and explain
+                std::vector<std::string> names;
+                for (int64_t j = 0; j < schema.n_children; j++) names.emplace_back(name_of(static_cast<size_t>(j)));
+                check_feature_names(model, names);
+            }
         }
         if (schema.n_children != batch.n_children) throw std::invalid_argument("Arrow schema and array disagree on the number of columns.");
         const size_t nf = model.n_features;
@@ -418,7 +433,7 @@ namespace lignum {
     }
 
     std::vector<double> predict_arrow_stream(const Model& model, ArrowArrayStream& stream, bool raw_score, int n_jobs,
-                                             Strategy strategy, size_t* n_rows) {
+                                             Strategy strategy, size_t* n_rows, bool validate_features) {
         auto error = [&](const char* what) {
             const char* detail = stream.get_last_error ? stream.get_last_error(&stream) : nullptr;
             return std::runtime_error(std::string(what) + (detail ? std::string(": ") + detail : std::string()));
@@ -442,7 +457,8 @@ namespace lignum {
                 ~ArrayGuard() { if (a.release) a.release(&a); }
             } array_guard{batch};
             out.resize((total + static_cast<size_t>(batch.length)) * width);
-            predict_arrow(model, schema, batch, out.data() + total * width, raw_score, n_jobs, strategy);
+            predict_arrow(model, schema, batch, out.data() + total * width, raw_score, n_jobs, strategy, validate_features);
+            validate_features = false;  // one schema for the whole stream
             total += static_cast<size_t>(batch.length);
         }
         if (n_rows) *n_rows = total;

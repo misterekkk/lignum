@@ -22,6 +22,14 @@ namespace lignum {
         constexpr uint8_t Argmax = 5;   // index of the largest margin (XGBoost multi:softmax); one output column
     } // namespace transform
 
+    // Library a model was trained with; the values are part of the binary format.
+    namespace model_source {
+        constexpr uint8_t Unknown = 0;
+        constexpr uint8_t LightGBM = 1;
+        constexpr uint8_t XGBoost = 2;
+        constexpr uint8_t CatBoost = 3;
+    } // namespace model_source
+
     // How predict() spreads work across threads. All strategies return identical results.
     enum class Strategy : uint8_t {
         Auto,    // pick from the batch size and thread count
@@ -111,6 +119,12 @@ namespace lignum {
             bool float32 = false;           // accumulate and transform in float32 (XGBoost semantics)
             bool has_special_trees = false;  // some tree is not tree_kind::Numeric
             uint32_t n_features = 0;        // minimum number of input columns
+            // Names of the training columns, in order (at least n_features of them); empty when the
+            // model has none (trained on a matrix: XGBoost and CatBoost store none, LightGBM's
+            // Column_0, Column_1, ... are dropped). Used to check named inputs; predict() itself
+            // reads columns by position.
+            std::vector<std::string> feature_names;
+            uint8_t source = model_source::Unknown;
 
             std::shared_ptr<const Data> data;
             std::shared_ptr<const BinnedForest> binned;  // binned kernel for batches; null when disabled or unsupported

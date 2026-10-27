@@ -46,7 +46,7 @@ int main(void) {
 | `LignumModelSave(handle, path)` | write the `.bin` format |
 | `LignumModelNumFeatures`, `LignumModelOutputWidth` | input columns, values per output row |
 | `LignumModelPredict(handle, X, n, n_features, raw, n_jobs, strategy, out)` | row-major `float64` input |
-| `LignumModelPredictArrow(handle, schema, batch, raw, n_jobs, strategy, out)` | an Arrow record batch ([Arrow input](../arrow/)) |
+| `LignumModelPredictArrow(handle, schema, batch, raw, n_jobs, strategy, out)` | an Arrow record batch ([Arrow input](../arrow/)); columns by position, names are not checked |
 | `LignumCatBoostHash(text, size)` | a category's hash for [CatBoost models](#catboost-models) |
 | `LignumModelCompile(handle, compiler, flags, cache_dir, library)` | [compiled mode](../compiled/); `NULL` for defaults (per-user cache); `library` writes it there instead, a file or a folder |
 | `LignumModelLoadCompiled(handle, library)` | attach a library written by `LignumModelCompile` |

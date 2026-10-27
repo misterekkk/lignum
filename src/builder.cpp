@@ -1,5 +1,6 @@
 #include "builder.hpp"
 #include "parsers/parsers.hpp"
+#include "validate.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -55,6 +56,8 @@ namespace lignum {
         model.n_cat_words = data->cat_bitsets.size();
         model.cat_bitsets = data->cat_bitsets.data();
         model.data = data;
+        model.source = (source == ModelSource::LightGBMJson || source == ModelSource::LightGBMText) ? model_source::LightGBM : model_source::XGBoost;
+        model.feature_names = model_feature_names(std::move(info.feature_names), model.n_features, model.source);
 
         return model;
     }

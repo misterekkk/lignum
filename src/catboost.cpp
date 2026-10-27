@@ -2,6 +2,7 @@
 #include "catboost_kernel.hpp"
 #include "parsers/parsers.hpp"
 #include "simdjson.h"
+#include "validate.hpp"
 
 #include <lignum/lignum.hpp>
 
@@ -534,10 +535,12 @@ namespace lignum {
             uint32_t column = 0;
             bool nan_as_true = false;
             std::vector<float> borders;
+            std::string name;  // feature_id; empty for models trained on a matrix
         };
         struct SpecCat {
             int64_t index = 0;
             uint32_t column = 0;
+            std::string name;  // feature_id; empty for models trained on a matrix
         };
         struct SpecOneHot {
             int64_t cat = 0;
@@ -756,6 +759,11 @@ namespace lignum {
             model.base_scores = f.bias.data();
             model.oblivious = forest;
             model.data = forest;
+            model.source = model_source::CatBoost;
+            std::vector<std::string> names(n_columns);
+            for (const SpecFloat& sf : spec.floats) names[sf.column] = sf.name;
+            for (const SpecCat& sc : spec.cats) names[sc.column] = sc.name;
+            model.feature_names = model_feature_names(std::move(names), n_columns, model_source::CatBoost);
             return model;
         }
 
@@ -787,6 +795,8 @@ namespace lignum {
                     std::string_view nan_treatment;  // optional field
                     if (ff["nan_value_treatment"].get_string().get(nan_treatment) != simdjson::SUCCESS) nan_treatment = "AsIs";
                     sf.nan_as_true = nan_treatment == "AsTrue";
+                    std::string_view id;
+                    if (ff["feature_id"].get_string().get(id) == simdjson::SUCCESS) sf.name = std::string(id);
                     spec.floats.push_back(std::move(sf));
                 }
             }
@@ -796,6 +806,8 @@ namespace lignum {
                     SpecCat sc;
                     sc.index = cf["feature_index"].get_int64();
                     sc.column = get_index<uint32_t>(cf["flat_feature_index"], kMaxColumns, "flat_feature_index");
+                    std::string_view id;
+                    if (cf["feature_id"].get_string().get(id) == simdjson::SUCCESS) sc.name = std::string(id);
                     spec.cats.push_back(sc);
                     simdjson::dom::array values;
                     if (cf["values"].get_array().get(values) == simdjson::SUCCESS && values.size() > 0) {
@@ -1084,6 +1096,7 @@ namespace lignum {
                 const int32_t column = c.scalar<int32_t>(1, -1);
                 if (column < 0) malformed("feature column out of range");
                 sc.column = static_cast<uint32_t>(column);
+                sc.name = std::string(c.string(2));  // FeatureId
                 spec.cats.push_back(sc);
             }
             const FlatVector floats = trees.vector(5, 4);
@@ -1096,6 +1109,7 @@ namespace lignum {
                 sf.column = static_cast<uint32_t>(column);
                 sf.borders = scalars<float>(fl, 3);
                 sf.nan_as_true = fl.scalar<int8_t>(5, 0) == 2;  // ENanValueTreatment::AsTrue
+                sf.name = std::string(fl.string(4));  // FeatureId
                 spec.floats.push_back(std::move(sf));
             }
             const FlatVector one_hots = trees.vector(6, 4);

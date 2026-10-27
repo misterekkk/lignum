@@ -45,6 +45,7 @@ def main():
     X = np.load(cache / "data.npz")["X"]
     fmt = "lightgbm" if args.model.startswith("lgb") else "xgboost"
     model = lignum.load(str(cache / args.model), format=fmt)
+    model.validate_features = False  # benchmarks measure prediction alone: no column-name check
 
     has_strategy = "strategy" in inspect.signature(model.predict).parameters
     strategies = args.strategies.split(",") if args.strategies else (["auto", "rows", "trees", "serial"] if has_strategy else [None])

@@ -172,6 +172,11 @@ namespace lignum {
                 parse_objective(obj_elem.get_string().value(), info);
             }
 
+            simdjson::dom::array names;
+            if (doc["feature_names"].get_array().get(names) == simdjson::SUCCESS) {
+                for (simdjson::dom::element name : names) info.feature_names.emplace_back(name.get_string().value());
+            }
+
             for (simdjson::dom::element tree_obj : doc["tree_info"]) {
                 simdjson::dom::object tree_structure = tree_obj["tree_structure"].get_object();
                 forest.push_back(parse_lgbm_node(tree_structure));
