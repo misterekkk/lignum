@@ -3,7 +3,7 @@ title: lignum
 description: Bit-exact, fast inference for LightGBM, XGBoost and CatBoost models.
 template: splash
 hero:
-  tagline: Fast inference for LightGBM, XGBoost and CatBoost, with predictions that equal the library that trained the model, bit for bit.
+  tagline: Fast inference for LightGBM, XGBoost and CatBoost models, with predictions that equal the library that trained them, bit for bit.
   image:
     file: ../../../assets/logo.svg
   actions:
@@ -15,27 +15,75 @@ hero:
       variant: minimal
 ---
 
-import { Card, CardGrid } from '@astrojs/starlight/components';
+import BarChart from '../../components/BarChart.astro';
+import { lightgbmSpeedup, catboostSpeedup } from '../../data/benchmarks';
 
 ```bash
 pip install pylignum
 ```
 
-<CardGrid>
-  <Card title="Exact" icon="approve-check">
-    Raw scores and probabilities equal `booster.predict(...)` bit for bit: NaN handling, LightGBM's
-    zero-as-missing, categorical splits and XGBoost's float32 arithmetic included.
-  </Card>
-  <Card title="Fast to predict" icon="rocket">
-    A cache-friendly interpreter for any batch size, and a compiled mode that turns the trees into
-    native code in a few seconds, faster than lleaves on most real data sets.
-  </Card>
-  <Card title="Fast to start" icon="seti:pipeline">
-    `model.save("model.bin")` writes a file that maps into memory in well under a millisecond;
-    compiled trees ship next to it, so production needs no compiler.
-  </Card>
-  <Card title="Arrow in, no copies" icon="list-format">
-    `predict` reads pyarrow, polars and any Arrow PyCapsule data directly, and C or C++ services pass
-    Arrow record batches through the C API.
-  </Card>
-</CardGrid>
+<div class="lg-stats not-content">
+  <div class="lg-stat">
+    <span class="lg-stat-value">0</span>
+    <span class="lg-stat-label">rows that differ from the library's own predictions, in every test and benchmark</span>
+  </div>
+  <div class="lg-stat">
+    <span class="lg-stat-value">9-12×</span>
+    <span class="lg-stat-label">faster than LightGBM on real data sets (x86, all threads)</span>
+  </div>
+  <div class="lg-stat">
+    <span class="lg-stat-value">2-3×</span>
+    <span class="lg-stat-label">faster than CatBoost on batches, 7-14× on single rows</span>
+  </div>
+  <div class="lg-stat">
+    <span class="lg-stat-value">2.9 µs</span>
+    <span class="lg-stat-label">for one row of a 500-tree LightGBM model, on one thread</span>
+  </div>
+</div>
+
+<BarChart
+  title="LightGBM models: times faster than LightGBM"
+  subtitle="500 trees, whole data set on all threads, AMD EPYC-Milan (4 vCPU). Higher is better."
+  series={[{ name: 'lignum (compiled)', tone: 'lignum' }, { name: 'lleaves', tone: 'other' }]}
+  groups={lightgbmSpeedup('x86')}
+  unit="×"
+  reference={{ value: 1, label: 'LightGBM' }}
+  note="lignum's predictions equal LightGBM's on every row; lleaves differs on 81-100% of the rows."
+/>
+
+<BarChart
+  title="CatBoost models: times faster than CatBoost"
+  subtitle="500 trees of depth 6, C API on one thread, AMD EPYC 9V45. Higher is better."
+  series={[{ name: 'lignum', tone: 'lignum' }]}
+  groups={catboostSpeedup('x86')}
+  unit="×"
+  reference={{ value: 1, label: 'CatBoost' }}
+  note="The first four data sets have categorical features (CTRs); the last three are numeric. On ARM lignum is 2.2-3.6× faster."
+/>
+
+<div class="lg-features not-content">
+  <div class="lg-feature">
+    <h3>Exact</h3>
+    <p>Raw scores and probabilities equal the library's <code>predict</code> bit for bit: NaN and zero-as-missing, categorical splits, XGBoost's float32 arithmetic and CatBoost's CTRs included. What the notebook showed is what production returns.</p>
+  </div>
+  <div class="lg-feature">
+    <h3>Fast to predict</h3>
+    <p>A binned interpreter for any batch size, and a compiled mode that turns LightGBM and XGBoost trees into native code in a few seconds. <code>autotune</code> picks the faster one for your data.</p>
+  </div>
+  <div class="lg-feature">
+    <h3>CatBoost with categories</h3>
+    <p>Categorical features, one-hot and CTRs with their combinations, straight from strings in pandas, Arrow or plain lists. No preprocessing, no compilation.</p>
+  </div>
+  <div class="lg-feature">
+    <h3>Fast to start</h3>
+    <p><code>model.save("model.bin")</code> writes a file that maps into memory in well under a millisecond; compiled trees ship next to it, so production needs no compiler.</p>
+  </div>
+  <div class="lg-feature">
+    <h3>Arrow in, no copies</h3>
+    <p><code>predict</code> reads pyarrow, polars and any Arrow PyCapsule data directly. C and C++ services pass Arrow record batches through the C API.</p>
+  </div>
+  <div class="lg-feature">
+    <h3>Small and portable</h3>
+    <p>One C++20 library with no dependencies beyond simdjson and OpenMP. Wheels for Linux, macOS and Windows on x86-64 and ARM.</p>
+  </div>
+</div>

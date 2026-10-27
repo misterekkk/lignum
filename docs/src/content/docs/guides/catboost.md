@@ -72,16 +72,26 @@ the model that wrote the file. lignum reads the JSON exactly, so it matches the 
 
 ## Speed
 
-A model with 500 trees of depth 6, 2 float and 3 categorical features, on an Apple M4 (10 cores):
+500 trees of depth 6 on public data sets, CatBoost 1.2.10 / lignum, one thread through the C API
+(categories passed as strings):
 
-| | CatBoost 1.2.10 | lignum |
-|---|---:|---:|
-| 500k rows from a DataFrame, all threads | 0.188 s | **0.102 s** |
-| 500k rows, one thread | 0.669 s | **0.445 s** |
-| One row from a list | 49.7 µs | **3.7 µs** |
-| One row from a DataFrame | 95.9 µs | **22 µs** |
-| Loading the model | 0.8 ms (`.cbm`) | **0.2 ms** (`.bin`), 0.9 ms (`.cbm`) |
-| 500k rows from Arrow (pyarrow or polars) | 0.114 s (polars) | **0.077 s** |
+| | x86-64 (EPYC 9V45) | ARM (Neoverse-N2) | Apple M4 |
+|---|---:|---:|---:|
+| Adult, 300k rows | 0.424 / **0.213 s** | 0.941 / **0.339 s** | 0.805 / **0.307 s** |
+| Diabetes 130-US, 300k rows | 1.624 / **0.735 s** | 2.926 / **1.209 s** | 2.030 / **0.891 s** |
+| Covertype (numeric), 300k rows | 0.287 / **0.119 s** | 0.818 / **0.265 s** | 0.545 / **0.195 s** |
+| One row, Adult | 20.1 / **2.3 µs** | 50.7 / **4.9 µs** | 23.0 / **2.1 µs** |
 
-On large batches most of the gain is the conversion: lignum hashes categories in C++ about three
-times faster than building a CatBoost `Pool`. From an already built `Pool`, CatBoost takes 0.109 s.
+From Python the gap grows for small inputs, where CatBoost converts the data first: one Adult row
+from a list takes 70 µs in CatBoost and 4 µs in lignum (x86). More data sets, all threads, Windows
+and the cases where the gap is small: [Benchmarks](../../benchmarks/#catboost).
+
+Loading, on the M4: Adult takes 0.15 ms from lignum's `.bin`, 0.76 ms from `.cbm` (CatBoost: 0.33
+ms). Models with large CTR tables load more slowly, because lignum copies the tables into its own
+hash layout: Diabetes 130-US (395,000 table entries) takes 2.3 ms from `.bin` and 13 ms from `.cbm`
+(CatBoost: 1.7 ms). Convert once with `save("model.bin")` and load the `.bin` in production.
+
+Where the time goes: lignum turns each row's features into small integer buckets once per block of
+256 rows (floats by counting borders, categories by hashing them and looking up their CTR tables),
+then evaluates the trees on bytes, 16 or 32 rows at a time with SIMD instructions. On x86-64 the
+kernel is built twice and the AVX2 build is chosen at run time on CPUs that have it.

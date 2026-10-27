@@ -1,3 +1,9 @@
+/* Fonts: Inter and JetBrains Mono, self-hosted through Fontsource (loaded in astro.config.mjs). */
+:root {
+  --sl-font: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --sl-font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
 /* lignum's teal (the logo colour) as Starlight's accent, tuned per theme. */
 :root {
   --sl-color-accent-low: #0b3a3e;
@@ -9,5 +15,115 @@
   --sl-color-accent: #147e84;
   --sl-color-accent-high: #0b4f57;
 }
+
 /* Benchmark tables: aligned digits. */
 .sl-markdown-content table td { font-variant-numeric: tabular-nums; }
+
+/* ---- Charts (src/components/BarChart.astro) ----------------------------------------------
+   Series colours validated for both themes against the page background (dataviz palette check:
+   chroma, lightness band, colour-blind separation, contrast): lignum teal, the other engine orange. */
+.lg-chart {
+  --lg-lignum: #00a3ad;
+  --lg-other: #d95926;
+  --lg-grid: var(--sl-color-gray-5);
+  margin: 1.75rem 0;
+  padding: 1rem 1.25rem 1.1rem;
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 0.75rem;
+  background: var(--sl-color-bg-nav);
+}
+:root[data-theme='light'] .lg-chart {
+  --lg-lignum: #0094a0;
+  --lg-other: #eb6834;
+  --lg-grid: var(--sl-color-gray-5);
+}
+.sl-markdown-content .lg-chart * + * { margin-top: 0; }
+.lg-head { display: flex; flex-direction: column; gap: 0.15rem; }
+.lg-title { color: var(--sl-color-white); font-weight: 600; font-size: var(--sl-text-base); }
+.lg-subtitle { color: var(--sl-color-gray-3); font-size: var(--sl-text-sm); }
+.lg-legend {
+  display: flex; flex-wrap: wrap; gap: 0.35rem 1.25rem;
+  list-style: none; padding: 0; margin: 0.75rem 0 0 !important;
+  color: var(--sl-color-gray-2); font-size: var(--sl-text-sm);
+}
+.lg-legend li { display: flex; align-items: center; gap: 0.45rem; margin: 0 !important; }
+.lg-swatch { width: 0.85rem; height: 0.6rem; border-radius: 2px; }
+.lg-swatch.lignum, .lg-bar.lignum { background: var(--lg-lignum); }
+.lg-swatch.other, .lg-bar.other { background: var(--lg-other); }
+.lg-plot { margin-top: 0.85rem !important; display: flex; flex-direction: column; gap: 0.7rem; }
+.lg-group {
+  display: grid; grid-template-columns: minmax(6.5rem, 10rem) 1fr;
+  gap: 0.25rem 1rem; align-items: center;
+}
+.lg-label { color: var(--sl-color-gray-2); font-size: var(--sl-text-sm); line-height: 1.25; }
+.lg-bars { position: relative; display: flex; flex-direction: column; gap: 2px; }
+.lg-row {
+  position: relative; display: flex; align-items: center; gap: 0.4rem;
+  min-height: 1.15rem; margin: 0 !important;
+}
+.lg-bar {
+  height: 0.8rem; min-width: 2px;
+  border-radius: 0 4px 4px 0; /* rounded at the data end, square at the baseline */
+  transition: filter 120ms ease;
+}
+.lg-value {
+  color: var(--sl-color-gray-2); font-size: var(--sl-text-xs);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.lg-row:hover .lg-bar { filter: brightness(1.15); }
+.lg-row:hover .lg-value { color: var(--sl-color-white); }
+.lg-row[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute; left: 0; bottom: calc(100% + 4px); z-index: 2;
+  padding: 0.2rem 0.5rem; border-radius: 0.35rem; white-space: nowrap;
+  background: var(--sl-color-gray-6); color: var(--sl-color-white);
+  border: 1px solid var(--sl-color-hairline-light);
+  font-size: var(--sl-text-xs); pointer-events: none;
+}
+/* The library itself (1×) as a reference line. */
+.lg-ref {
+  position: absolute; top: -0.2rem; bottom: -0.2rem; width: 1px;
+  background: var(--sl-color-gray-4); margin: 0 !important;
+}
+.lg-ref-row { margin-bottom: -0.35rem; }
+.lg-track { position: relative; height: 1rem; }
+.lg-ref-label {
+  position: absolute; transform: translateX(-50%); white-space: nowrap;
+  color: var(--sl-color-gray-3); font-size: var(--sl-text-xs);
+}
+.lg-note { margin-top: 0.9rem !important; color: var(--sl-color-gray-3); font-size: var(--sl-text-sm); }
+.lg-chart .sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+@media (max-width: 30rem) {
+  .lg-group { grid-template-columns: 1fr; }
+  .lg-ref-row { display: none; }
+}
+.lg-multiples { display: flex; flex-direction: column; gap: 0; }
+.lg-multiples .lg-chart { margin: 0.75rem 0; }
+
+/* ---- Home page ---------------------------------------------------------------------------- */
+.lg-stats {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 1px; margin: 2rem 0 !important;
+  border: 1px solid var(--sl-color-hairline); border-radius: 0.75rem; overflow: hidden;
+  background: var(--sl-color-hairline);
+}
+.lg-stat { background: var(--sl-color-bg); padding: 1.1rem 1.25rem; margin: 0 !important; }
+.lg-stat-value {
+  display: block; color: var(--sl-color-white);
+  font-size: 2rem; font-weight: 650; line-height: 1.1; letter-spacing: -0.02em;
+}
+.lg-stat-label { display: block; margin-top: 0.35rem; color: var(--sl-color-gray-3); font-size: var(--sl-text-sm); line-height: 1.4; }
+.lg-features {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 1.5rem 2.5rem; margin: 2.5rem 0 !important;
+}
+.lg-feature { margin: 0 !important; padding-left: 1rem; border-left: 2px solid var(--sl-color-accent); }
+.lg-feature h3 { margin: 0 0 0.35rem !important; font-size: var(--sl-text-lg); }
+.lg-feature p { margin: 0 !important; color: var(--sl-color-gray-2); font-size: var(--sl-text-sm); line-height: 1.6; }
+.lg-feature code, .lg-stat code {
+  font-family: var(--sl-font-mono); font-size: 0.85em;
+  padding: 0.1em 0.3em; border-radius: 0.25rem; background: var(--sl-color-gray-6);
+}

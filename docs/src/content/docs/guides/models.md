@@ -11,7 +11,8 @@ description: Which LightGBM, XGBoost and CatBoost files lignum reads, and the bi
 | LightGBM | JSON | `json.dump(booster.dump_model(), f)` |
 | XGBoost | JSON | `booster.save_model("model.json")` |
 | XGBoost | UBJSON | `booster.save_model("model.ubj")` |
-| CatBoost | JSON | `model.save_model("model.json", format="json")` |
+| CatBoost | `.cbm` | `model.save_model("model.cbm")` |
+| CatBoost | JSON | `model.save_model("model.json", format="json")` (not for multiclass) |
 | lignum | `.bin` | `model.save("model.bin")` |
 
 Every source gives the same model and the same, bit-identical predictions. `format="lightgbm"`,
@@ -34,10 +35,13 @@ read-only and checks every stored index, so a damaged file is rejected instead o
 | LightGBM, Covertype | 7.2 ms (`model.txt`) | 0.2 ms |
 | LightGBM, 5000 trees | 67 ms (`model.txt`) | 0.7 ms |
 | XGBoost, 3000 trees | 36 ms (JSON), 63 ms (UBJSON) | — |
+| CatBoost, Adult | 0.76 ms (`.cbm`) | 0.15 ms |
+| CatBoost, Diabetes 130-US (large CTR tables) | 12.8 ms (`.cbm`) | 2.3 ms |
 
 Measured on an Apple M4; parsing only, without building the binned kernel. Convert once and load the
 `.bin` file in production. A `.bin` file from an older lignum version is rejected: re-export it from
-the original model.
+the original model (0.3.0 writes format 0.7, which added CatBoost models; files from 0.2.0 must be
+written again).
 
 ## What a model must look like
 
@@ -45,7 +49,8 @@ the original model.
   needs at least `model.n_features` columns; extra columns are ignored.
 - **Categorical features** take the integer category codes the library was trained on. For pandas
   `category` columns these are `series.cat.codes` (NaN for missing), which is also what a dictionary
-  column in [Arrow input](../arrow/) gives.
+  column in [Arrow input](../arrow/) gives. CatBoost models take the category values themselves
+  (strings or integers), see [CatBoost](../catboost/#categorical-input).
 - **Multiclass** models predict one column per class (`model.n_outputs`).
 
 ## Not supported
@@ -54,3 +59,4 @@ These are rejected with an error rather than predicted wrongly:
 
 - LightGBM linear trees (`linear_tree=True`) and random forests (`boosting="rf"`).
 - XGBoost multi-target models (`num_target > 1`).
+- CatBoost `Depthwise` and `Lossguide` trees, and text or embedding features.

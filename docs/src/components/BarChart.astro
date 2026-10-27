@@ -1,0 +1,90 @@
+---
+// Horizontal bar chart in plain HTML and CSS, rendered at build time (no JavaScript): readable at
+// any width, light and dark themes from CSS variables (src/styles/custom.css, .lg-chart), a
+// hidden table for screen readers. lignum is always the teal series, the other engine orange.
+import type { Group } from '../data/benchmarks';
+
+interface Series {
+  name: string;
+  tone: 'lignum' | 'other';
+}
+interface Props {
+  title: string;
+  subtitle?: string;
+  series: Series[];
+  groups: Group[];
+  unit: string; // appended to values: "×", " µs"
+  digits?: number;
+  max?: number; // shared scale across small multiples
+  reference?: { value: number; label: string }; // e.g. the library itself at 1×
+  note?: string;
+}
+
+const { title, subtitle, series, groups, unit, digits = 1, reference, note } = Astro.props;
+const max = Astro.props.max ?? Math.max(...groups.flatMap((g) => g.values), reference?.value ?? 0);
+const span = 84; // % of the track the longest bar takes; the rest holds its value label
+const pct = (v: number) => (v / max) * span;
+const fmt = (v: number) => `${v.toFixed(digits)}${unit}`;
+const id = `chart-${title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+---
+
+<figure class="lg-chart" aria-labelledby={id}>
+  <figcaption class="lg-head">
+    <span class="lg-title" id={id}>{title}</span>
+    {subtitle && <span class="lg-subtitle">{subtitle}</span>}
+  </figcaption>
+  {
+    series.length > 1 && (
+      <ul class="lg-legend" aria-hidden="true">
+        {series.map((s) => (
+          <li>
+            <span class:list={['lg-swatch', s.tone]} />
+            {s.name}
+          </li>
+        ))}
+      </ul>
+    )
+  }
+  <div class="lg-plot" aria-hidden="true">
+    {
+      reference && (
+        <div class="lg-group lg-ref-row">
+          <span />
+          <div class="lg-track">
+            <span class="lg-ref-label" style={`left: ${pct(reference.value)}%`}>
+              {reference.label}
+            </span>
+          </div>
+        </div>
+      )
+    }
+    {
+      groups.map((g) => (
+        <div class="lg-group">
+          <span class="lg-label">{g.label}</span>
+          <div class="lg-bars">
+            {reference && <span class="lg-ref" style={`left: ${pct(reference.value)}%`} />}
+            {g.values.map((v, i) => (
+              <div class="lg-row" data-tip={`${series[i].name}: ${fmt(v)}`}>
+                <span class:list={['lg-bar', series[i].tone]} style={`width: ${pct(v)}%`} />
+                <span class="lg-value">{fmt(v)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))
+    }
+  </div>
+  {note && <p class="lg-note">{note}</p>}
+  <table class="sr-only">
+    <caption>{title}{subtitle ? `: ${subtitle}` : ''}</caption>
+    <thead>
+      <tr><th scope="col">Data set</th>{series.map((s) => <th scope="col">{s.name}</th>)}</tr>
+    </thead>
+    <tbody>
+      {groups.map((g) => (
+        <tr><th scope="row">{g.label}</th>{g.values.map((v) => <td>{fmt(v)}</td>)}</tr>
+      ))}
+    </tbody>
+  </table>
+</figure>

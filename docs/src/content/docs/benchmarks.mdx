@@ -1,10 +1,13 @@
 ---
 title: Benchmarks
-description: lignum against lleaves and the libraries themselves, on real data sets, x86-64 and ARM.
+description: lignum against lleaves, LightGBM and CatBoost, on real and synthetic data, x86-64, ARM, Apple M4 and Windows.
 ---
 
-All numbers are for LightGBM models with 500 trees (`num_leaves=63`) trained on five public data
-sets, predicting the whole data set. lignum is bit-exact on every one of them; lleaves, the fastest
+import BarChart from '../../components/BarChart.astro';
+import { lightgbmSpeedup, lightgbmRow, catboostSpeedup, catboostSpeedupMax, catboostRow } from '../../data/benchmarks';
+
+The [LightGBM](#apple-m4-10-cores) sections are for models with 500 trees (`num_leaves=63`) trained
+on five public data sets, predicting the whole data set; [CatBoost](#catboost) has its own section. lignum is bit-exact on every one of them; lleaves, the fastest
 other engine for LightGBM, is not (it differs from LightGBM on 81-100% of the rows). Lower is
 better; the fastest engine of each row is in bold.
 
@@ -31,6 +34,24 @@ Compiling the trees took 6-12 s; lleaves took 13-134 s.
 
 ## Hetzner cloud servers (4 vCPU)
 
+<BarChart
+  title="x86-64: times faster than LightGBM"
+  subtitle="AMD EPYC-Milan, 4 dedicated vCPU, all threads. Higher is better."
+  series={[{ name: 'lignum (compiled)', tone: 'lignum' }, { name: 'lleaves', tone: 'other' }]}
+  groups={lightgbmSpeedup('x86')}
+  unit="×"
+  reference={{ value: 1, label: 'LightGBM' }}
+/>
+
+<BarChart
+  title="ARM: times faster than LightGBM"
+  subtitle="Ampere Altra (Neoverse-N1), 4 shared vCPU, all threads. Higher is better."
+  series={[{ name: 'lignum (compiled)', tone: 'lignum' }, { name: 'lleaves', tone: 'other' }]}
+  groups={lightgbmSpeedup('arm')}
+  unit="×"
+  reference={{ value: 1, label: 'LightGBM' }}
+/>
+
 Seconds, all threads / one thread, best of 5 runs. x86: dedicated vCPUs (CCX, AMD EPYC-Milan,
 2 cores with SMT); ARM: shared vCPUs (CAX, Ampere Altra, Neoverse-N1), so treat its numbers as
 less stable. Generic builds, as in the wheels.
@@ -53,6 +74,14 @@ less stable. Generic builds, as in the wheels.
 Compiling the trees took 6-9 s on x86 and 9-12 s on ARM; lleaves took 34-269 s and 37-479 s.
 
 ### Single row
+
+<BarChart
+  title="One row, one thread"
+  subtitle="Median microseconds per call on the dedicated x86 server. Lower is better."
+  series={[{ name: 'lignum (compiled)', tone: 'lignum' }, { name: 'lleaves', tone: 'other' }]}
+  groups={lightgbmRow}
+  unit=" µs"
+/>
 
 One row, one thread, on the dedicated x86 server: median / p99 in microseconds.
 
@@ -98,6 +127,107 @@ it has categorical columns). Seconds, all threads / one thread, and microseconds
 | Bank | **0.010 / 0.050 / 67** | 0.018 / 0.067 / 1,470 | 0.138 / 0.740 / 2,821 |
 | Diabetes | **0.058 / 0.308 / 190** | 0.294 / 1.559 / 7,859 | 0.422 / 2.944 / 9,407 |
 
+## CatBoost
+
+CatBoost models with 500 trees of depth 6 (CatBoost's default symmetric trees), trained on 80% of
+each data set, against CatBoost 1.2.10. Besides the public data sets, `synthetic` and
+`synthetic-cat` are the data the LightGBM numbers use for synthetic models: 20 numeric features with
+5% NaN, and 5 categorical columns of cardinality 10 to 5000 (Zipf-skewed) plus 15 numeric ones.
+Rows repeated up to 300,000 (500,000 on the M4). lignum's predictions equal CatBoost's on every row
+of every data set, on every platform.
+
+### C API, one thread
+
+<div class="lg-multiples">
+<BarChart
+  title="x86-64: times faster than CatBoost"
+  subtitle="AMD EPYC 9V45, one thread. Higher is better; the same scale in all three charts."
+  series={[{ name: 'lignum', tone: 'lignum' }]}
+  groups={catboostSpeedup('x86')}
+  unit="×"
+  max={catboostSpeedupMax}
+  reference={{ value: 1, label: 'CatBoost' }}
+/>
+<BarChart
+  title="ARM: times faster than CatBoost"
+  subtitle="Neoverse-N2, one thread."
+  series={[{ name: 'lignum', tone: 'lignum' }]}
+  groups={catboostSpeedup('arm')}
+  unit="×"
+  max={catboostSpeedupMax}
+  reference={{ value: 1, label: 'CatBoost' }}
+/>
+<BarChart
+  title="Apple M4: times faster than CatBoost"
+  subtitle="One thread."
+  series={[{ name: 'lignum', tone: 'lignum' }]}
+  groups={catboostSpeedup('m4')}
+  unit="×"
+  max={catboostSpeedupMax}
+  reference={{ value: 1, label: 'CatBoost' }}
+/>
+</div>
+
+Seconds for all rows, CatBoost / lignum, categories passed as strings to both (CatBoost's
+`CalcModelPrediction`, lignum's C API). x86: AMD EPYC 9V45 and ARM: Neoverse-N2 (GitHub runners,
+4 vCPU); M4: 10 cores.
+
+| Data set | x86-64 | ARM | Apple M4 |
+|---|---:|---:|---:|
+| Adult (6 numeric + 8 categorical) | 0.424 / **0.213** | 0.941 / **0.339** | 0.805 / **0.307** |
+| Bank marketing (categorical) | 0.378 / **0.198** | 0.739 / **0.263** | 0.605 / **0.252** |
+| Diabetes 130-US (categorical) | 1.624 / **0.735** | 2.926 / **1.209** | 2.030 / **0.891** |
+| synthetic-cat | 0.596 / **0.311** | 1.356 / **0.604** | 0.832 / **0.354** |
+| California housing (numeric) | 0.071 / **0.061** | 0.318 / **0.088** | 0.203 / **0.078** |
+| Covertype (numeric, 7 classes) | 0.287 / **0.119** | 0.818 / **0.265** | 0.545 / **0.195** |
+| synthetic (numeric) | 0.082 / **0.074** | 0.357 / **0.104** | 0.230 / **0.092** |
+
+### One row
+
+<BarChart
+  title="CatBoost models: one row through the C API"
+  subtitle="Median microseconds per call, AMD EPYC 9V45. Lower is better."
+  series={[{ name: 'lignum', tone: 'lignum' }, { name: 'CatBoost', tone: 'other' }]}
+  groups={catboostRow}
+  unit=" µs"
+/>
+
+Microseconds per call, one thread, CatBoost / lignum: through the C API
+(`CalcModelPredictionSingle`), and from Python with the row as a list.
+
+| Data set | x86-64, C API | ARM, C API | M4, C API | x86-64, Python list |
+|---|---:|---:|---:|---:|
+| Adult | 20.1 / **2.3** | 50.7 / **4.9** | 23.0 / **2.1** | 70.4 / **4.2** |
+| Diabetes 130-US | 88.3 / **7.1** | 237 / **33.1** | 73.4 / **5.2** | 155 / **9.7** |
+| synthetic-cat | 33.9 / **3.7** | 80.1 / **10.6** | 25.2 / **2.3** | 90.5 / **5.3** |
+| California housing | 2.0 / **0.9** | 3.1 / **1.2** | 1.5 / **0.6** | 112 / **2.6** |
+| Covertype | 3.1 / **1.4** | 5.8 / **2.5** | 2.8 / **1.0** | 64.1 / **3.8** |
+
+From a one-row pandas DataFrame, CatBoost converts its input first: on x86 it took 418 µs on Adult
+and 10.1 ms on synthetic-cat (high-cardinality categories), lignum 37 µs and 33 µs.
+
+### Python, all threads
+
+Seconds for all rows from a pandas DataFrame, CatBoost / lignum (4 vCPU on x86 and ARM, 10 cores on
+the M4):
+
+| Data set | x86-64 | ARM | Apple M4 |
+|---|---:|---:|---:|
+| Adult | 0.169 / **0.090** | 0.261 / **0.101** | 0.151 / **0.058** |
+| Diabetes 130-US | 0.650 / **0.323** | 0.865 / **0.394** | 0.398 / **0.200** |
+| synthetic-cat | 0.251 / **0.145** | 0.416 / **0.207** | 0.176 / **0.081** |
+| California housing | 0.034 / **0.028** | 0.088 / **0.025** | 0.041 / **0.015** |
+| Covertype | 0.211 / **0.055** | 0.346 / **0.072** | 0.121 / **0.049** |
+
+lignum also reads pyarrow tables and polars data frames directly; CatBoost cannot read Arrow, and
+does not accept polars 2.x `Categorical` columns.
+
+### Windows
+
+Python, one thread, 200,000 rows, the Windows x64 wheel (MSVC) on a GitHub runner (AMD Zen 5),
+CatBoost / lignum: California housing 0.055 / **0.043** s, Adult 0.336 / **0.162** s, Covertype
+0.326 / **0.135** s. On CPUs without AVX2 lignum uses its generic kernel (California 0.052 s).
+
 ## Where lignum is not the fastest
 
 - **Covertype on one thread**: lleaves is about 5% faster on the M4, 7% on the EPYC-Milan server and
@@ -110,6 +240,10 @@ it has categorical columns). Seconds, all threads / one thread, and microseconds
   [`autotune`](../guides/compiled/#interpreter-or-compiled-autotune) measures this on your data.
 - **Single rows from Python with Arrow**: pyarrow's export costs about 0.2 µs per column per call;
   pass a numpy row for the lowest latency.
+- **CatBoost, numeric models on x86**: CatBoost evaluates float features with hand-written SSE code,
+  and lignum's lead shrinks to 10-15% on California and the synthetic numeric set (Covertype, with
+  7 classes, stays 2.4x). On ARM, where CatBoost falls back to scalar code, lignum is 3-3.6x
+  faster on the same models.
 
 ## Reproduce
 
@@ -117,9 +251,10 @@ it has categorical columns). Seconds, all threads / one thread, and microseconds
 python benchmarks/bench.py --engines lignum,lignum-compiled,lleaves \
     --only lightgbm-real-covtype,lightgbm-real-diabetes --trees 500
 python benchmarks/bench_arrow.py
+python benchmarks/bench_catboost.py            # CatBoost: Python fronts and the C API
 ```
 
 The scripts train and cache the models, check every engine against the library and write Markdown
-reports to `benchmarks/results/`. `.github/workflows/bench-lleaves.yml` runs them on x86-64 and ARM.
+reports to `benchmarks/results/`; the results above are in `benchmarks/results/<machine>/`. `.github/workflows/bench-lleaves.yml` runs them on x86-64 and ARM.
 `benchmarks/cloud.sh` does the whole run above on a fresh Ubuntu 24.04 server (x86-64 or ARM) and
 packs the reports.
