@@ -3,7 +3,7 @@ title: Python API
 description: Every public function and method of the lignum package.
 ---
 
-Generated from the docstrings of lignum 0.2.0 by `docs/scripts/api_reference.py`.
+Generated from the docstrings of lignum 0.3.0 by `docs/scripts/api_reference.py`.
 
 ## `lignum.load`
 

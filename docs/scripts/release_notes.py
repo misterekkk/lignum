@@ -17,6 +17,7 @@ def main() -> None:
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     body = text.split("\n## ", 1)[1]  # drop the "# Changelog" title and its introduction
     body = "## " + body
+    body = re.sub(r"^## \[Unreleased\]\n+(?=## )", "", body)  # nothing unreleased yet: no empty heading
     # Links to files of the repository (SECURITY.md, ...) point to GitHub from the site.
     body = re.sub(r"\]\((?!https?://|#)([^)]+)\)", lambda m: f"]({REPO}{m.group(1)})", body)
     OUT.write_text(
