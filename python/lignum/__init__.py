@@ -20,7 +20,7 @@ import numpy as np
 from . import _core
 
 __all__ = ["Model", "load", "catboost_hash"]
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 
 def _is_pandas(X) -> bool:
