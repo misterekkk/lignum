@@ -705,7 +705,8 @@ namespace lignum {
             const char last = options.library.back();
             if (fs::is_directory(target) || last == '/' || last == '\\') {
                 fs::create_directories(target);
-                target /= compiled_library_name(model);
+                // One spelling whether or not the folder ended in a separator ("libs/" or "libs").
+                target = (target.parent_path() / target.filename() / compiled_library_name(model)).make_preferred();
             } else if (target.has_parent_path()) {
                 fs::create_directories(target.parent_path());
             }
