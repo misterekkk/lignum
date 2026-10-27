@@ -156,7 +156,15 @@ def python_fronts(name, model_path, frame, cats, ref, args) -> list[Row]:
 
     fronts.append(("catboost", "pandas", None, cb_predict, frame))
     fronts.append(("catboost", "Pool (prebuilt)", pool_s, cb_predict, pool))
-    fronts.append(("catboost", "polars", None, cb_predict, polars_frame))
+    if cats and int(pl.__version__.split(".")[0]) >= 2:
+        # CatBoost 1.2 reads polars Categorical columns through get_categories, removed in polars
+        # 2.0: an error on Linux and macOS, an access violation inside CatBoost on Windows
+        # (catboost/core.py Pool._init; it killed the Windows CI job at random). Not called.
+        def cb_polars_categorical(data, n):
+            raise RuntimeError("not supported: CatBoost cannot read polars 2.x Categorical columns (see String columns)")
+        fronts.append(("catboost", "polars", None, cb_polars_categorical, polars_frame))
+    else:
+        fronts.append(("catboost", "polars", None, cb_predict, polars_frame))
     fronts.append(("catboost", "polars (String columns)", None, cb_predict, polars_strings))
     fronts.append(("catboost", "pyarrow -> to_pandas()", None, lambda t, n: cb_predict(t.to_pandas(), n), table))
     fronts.append(("lignum", "pandas", None, lambda X, n: model.predict(X, raw_score=True, n_jobs=n), frame))
