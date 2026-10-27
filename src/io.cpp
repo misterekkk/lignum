@@ -52,7 +52,7 @@ namespace lignum {
         struct alignas(64) FileHeader {
             char magic[6] = {'L', 'I', 'G', 'N', 'U', 'M'}; 
             uint8_t version_major = 0;
-            uint8_t version_minor = 6;
+            uint8_t version_minor = 8;
 
             uint8_t os_id = LIGNUM_OS_ID;
             uint8_t arch_id = LIGNUM_ARCH_ID;
@@ -71,6 +71,22 @@ namespace lignum {
             uint8_t padding[2] = {0};
         };
         static_assert(sizeof(FileHeader) == 64, "FileHeader must stay 64 bytes");
+
+        // Follows the FileHeader (format 0.8): who wrote the file and the model's feature names,
+        // which follow it as n_names x (uint32 length, UTF-8 bytes), padded to 64 bytes.
+        struct alignas(64) InfoHeader {
+            char writer[24] = {};      // lignum version that wrote the file, NUL-padded
+            uint64_t names_bytes = 0;
+            uint32_t n_names = 0;
+            uint8_t source = model_source::Unknown;
+            uint8_t padding[27] = {0};
+        };
+        static_assert(sizeof(InfoHeader) == 64, "InfoHeader must stay 64 bytes");
+
+    #ifndef LIGNUM_VERSION
+        #define LIGNUM_VERSION "unknown"
+    #endif
+
 
         namespace header_flags {
             constexpr uint8_t Float32 = 1 << 0;
@@ -115,6 +131,49 @@ namespace lignum {
                 std::vector<char> padding(padded_size - size_bytes, 0);
                 out.write(padding.data(), padding.size());
             }
+        }
+
+        void write_info(std::ofstream& out, const Model& model) {
+            InfoHeader info;
+            std::strncpy(info.writer, LIGNUM_VERSION, sizeof(info.writer) - 1);
+            info.source = model.source;
+            info.n_names = static_cast<uint32_t>(model.feature_names.size());
+            std::string names;
+            for (const std::string& name : model.feature_names) {
+                const uint32_t length = static_cast<uint32_t>(name.size());
+                names.append(reinterpret_cast<const char*>(&length), sizeof(length));
+                names += name;
+            }
+            info.names_bytes = names.size();
+            out.write(reinterpret_cast<const char*>(&info), sizeof(info));
+            padded_write(out, names.data(), names.size());
+        }
+
+        // Reads the InfoHeader and the names into `model`; returns the offset of the first section.
+        size_t read_info(const char* data, size_t size, Model& model) {
+            const size_t start = 64 + sizeof(InfoHeader);
+            if (size < start) throw std::runtime_error("Binary file is truncated or corrupted.");
+            InfoHeader info;
+            std::memcpy(&info, data + 64, sizeof(info));
+            if (info.source > model_source::CatBoost || info.names_bytes > size - start ||
+                info.n_names > info.names_bytes / sizeof(uint32_t)) {
+                throw std::runtime_error("Binary file is truncated or corrupted.");
+            }
+            const char* p = data + start;
+            const char* end = p + info.names_bytes;
+            model.source = info.source;
+            model.feature_names.reserve(info.n_names);
+            for (uint32_t i = 0; i < info.n_names; i++) {
+                uint32_t length = 0;
+                if (end - p < static_cast<ptrdiff_t>(sizeof(length))) throw std::runtime_error("Binary file is truncated or corrupted.");
+                std::memcpy(&length, p, sizeof(length));
+                p += sizeof(length);
+                if (static_cast<size_t>(end - p) < length) throw std::runtime_error("Binary file is truncated or corrupted.");
+                model.feature_names.emplace_back(p, length);
+                p += length;
+            }
+            if (p != end) throw std::runtime_error("Binary file is truncated or corrupted.");
+            return start + align(info.names_bytes);
         }
 
     } // namespace
@@ -185,15 +244,13 @@ namespace lignum {
 
         FileHeader header;
         if (oblivious) {
-            // Version 0.7 only for CatBoost models, so older lignum versions reject them instead
-            // of reading an empty forest; other models stay 0.6.
-            header.version_minor = 7;
             header.flags = header_flags::Oblivious;
             header.n_outputs = static_cast<uint16_t>(n_outputs);
             header.transform = transform;
             header.sigmoid = sigmoid;
             header.n_features = n_features;
             out.write(reinterpret_cast<const char*>(&header), sizeof(FileHeader));
+            write_info(out, *this);
             padded_write(out, reinterpret_cast<const char*>(base_scores), n_outputs * sizeof(double));
             save_oblivious(out, *oblivious);
             if (!out) throw std::runtime_error("Failed to write the model file.");
@@ -211,6 +268,7 @@ namespace lignum {
         header.n_leaves = n_leaves;
 
         out.write(reinterpret_cast<const char*>(&header), sizeof(FileHeader));
+        write_info(out, *this);
 
         padded_write(out, reinterpret_cast<const char*>(k_nodes), n_nodes * sizeof(KNode));
         padded_write(out, reinterpret_cast<const char*>(tree_offsets), n_offsets * sizeof(int32_t));
@@ -259,12 +317,23 @@ namespace lignum {
         }
 
         const bool is_oblivious = (header.flags & header_flags::Oblivious) != 0;
-        if (header.version_major != 0 || header.version_minor != (is_oblivious ? 7 : 6)) {
+        if (header.version_major != 0 || header.version_minor != 8) {
             throw std::runtime_error("Unsupported lignum binary format version " + std::to_string(header.version_major) + "." +
-                                     std::to_string(header.version_minor) + "; re-export the model from JSON.");
+                                     std::to_string(header.version_minor) + " (this lignum reads 0.8); save the model again from " +
+                                     "its LightGBM, XGBoost or CatBoost file.");
         }
 
-        const size_t expected_size = sizeof(FileHeader) + align(header.n_nodes * sizeof(KNode)) +
+        Model info;  // source and feature names
+        const size_t base = read_info(binary_data->data, binary_data->size, info);
+        auto adopt_info = [&](Model& model) {
+            model.source = info.source;
+            model.feature_names = std::move(info.feature_names);
+            if (!model.feature_names.empty() && model.feature_names.size() < model.n_features) {
+                throw std::runtime_error("Binary file is truncated or corrupted.");
+            }
+        };
+
+        const size_t expected_size = base + align(header.n_nodes * sizeof(KNode)) +
                                      align(header.n_offsets * sizeof(int32_t)) + align(header.n_leaves * sizeof(double)) +
                                      align(header.n_offsets * sizeof(uint8_t)) + align(header.n_outputs * sizeof(double)) +
                                      (header.n_outputs > 1 ? align(header.n_offsets * sizeof(uint16_t)) : 0) +
@@ -274,7 +343,7 @@ namespace lignum {
         }
         if (is_oblivious) {
             // CatBoost: the header, the bias (as base scores) and the forest arrays.
-            const size_t start = sizeof(FileHeader) + align(header.n_outputs * sizeof(double));
+            const size_t start = base + align(header.n_outputs * sizeof(double));
             if (header.n_nodes || header.n_offsets || header.n_leaves || header.n_cat_words || binary_data->size < start) {
                 throw std::runtime_error("Binary file is truncated or corrupted.");
             }
@@ -290,6 +359,7 @@ namespace lignum {
             model.base_scores = forest->bias.data();
             model.oblivious = forest;
             model.data = forest;
+            adopt_info(model);
             return model;
         }
         if (binary_data->size < expected_size) {
@@ -308,8 +378,9 @@ namespace lignum {
         model.n_offsets = header.n_offsets;
         model.n_leaves = header.n_leaves;
         model.data = binary_data;
+        adopt_info(model);
 
-        size_t offset = sizeof(FileHeader);
+        size_t offset = base;
 
         if (model.n_nodes > 0) {
             model.k_nodes = reinterpret_cast<const KNode*>(binary_data->data + offset);

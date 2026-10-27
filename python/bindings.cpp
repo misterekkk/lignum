@@ -1,6 +1,7 @@
 #include <lignum/lignum.hpp>
 #include "compiled.hpp"
 #include "catboost.hpp"
+#include "validate.hpp"
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
@@ -117,7 +118,7 @@ NB_MODULE(_core, m) {
         "Returns model prediction for input data.")
         
         .def("predict_arrow", [](const Model& self, nb::object schema_capsule, nb::object array_capsule, bool raw_score, int n_jobs,
-                                 const std::string& strategy_name) {
+                                 const std::string& strategy_name, bool validate_features) {
             const Strategy strategy = parse_strategy(strategy_name);
             const auto* schema = capsule_pointer<ArrowSchema>(schema_capsule, "arrow_schema");
             const auto* batch = capsule_pointer<ArrowArray>(array_capsule, "arrow_array");
@@ -125,22 +126,25 @@ NB_MODULE(_core, m) {
             std::vector<double> out(static_cast<size_t>(std::max<int64_t>(batch->length, 0)) * width);
             {
                 nb::gil_scoped_release release;
-                predict_arrow(self, *schema, *batch, out.data(), raw_score, n_jobs, strategy);
+                predict_arrow(self, *schema, *batch, out.data(), raw_score, n_jobs, strategy, validate_features);
             }
             return to_numpy(std::move(out), out.size() / width, width);
         }, nb::arg("schema"), nb::arg("array"), nb::arg("raw_score") = false, nb::arg("n_jobs") = -1, nb::arg("strategy") = "auto",
+           nb::arg("validate_features") = false,
            "Predicts an Arrow record batch given as PyCapsules (arrow_schema, arrow_array).")
-        .def("predict_arrow_stream", [](const Model& self, nb::object stream_capsule, bool raw_score, int n_jobs, const std::string& strategy_name) {
+        .def("predict_arrow_stream", [](const Model& self, nb::object stream_capsule, bool raw_score, int n_jobs, const std::string& strategy_name,
+                                        bool validate_features) {
             const Strategy strategy = parse_strategy(strategy_name);
             auto* stream = capsule_pointer<ArrowArrayStream>(stream_capsule, "arrow_array_stream");
             std::vector<double> out;
             size_t n_rows = 0;
             {
                 nb::gil_scoped_release release;
-                out = predict_arrow_stream(self, *stream, raw_score, n_jobs, strategy, &n_rows);
+                out = predict_arrow_stream(self, *stream, raw_score, n_jobs, strategy, &n_rows, validate_features);
             }
             return to_numpy(std::move(out), n_rows, self.output_width(raw_score));
         }, nb::arg("stream"), nb::arg("raw_score") = false, nb::arg("n_jobs") = -1, nb::arg("strategy") = "auto",
+           nb::arg("validate_features") = false,
            "Predicts every batch of an Arrow stream given as a PyCapsule (arrow_array_stream).")
         .def_prop_ro("categorical_features", [](const Model& self) {
             std::vector<uint32_t> columns;
@@ -149,6 +153,18 @@ NB_MODULE(_core, m) {
             return columns;
         }, "Input columns that hold categories (CatBoost models), in increasing order.")
         .def_prop_ro("is_catboost", [](const Model& self) { return self.oblivious != nullptr; })
+        .def_prop_ro("feature_names", [](const Model& self) { return self.feature_names; },
+                     "Names of the training columns, in order; empty when the model has none.")
+        .def_prop_ro("source", [](const Model& self) -> std::string {
+            switch (self.source) {
+                case model_source::LightGBM: return "lightgbm";
+                case model_source::XGBoost: return "xgboost";
+                case model_source::CatBoost: return "catboost";
+                default: return "";
+            }
+        }, "Library the model was trained with.")
+        .def("check_feature_names", [](const Model& self, const std::vector<std::string>& columns) { check_feature_names(self, columns); },
+             nb::arg("columns"), "Raises ValueError when the columns do not start with the model's feature names.")
         .def("compile", [](Model& self, const std::string& compiler, const std::string& flags, int jobs, int block_trees, const std::string& library) {
             CompileOptions options;
             options.compiler = compiler;

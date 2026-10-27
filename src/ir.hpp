@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace lignum {
@@ -42,6 +43,7 @@ namespace lignum {
         double sigmoid = 1.0;
         uint8_t transform = 2;
         Precision precision = Precision::Float64;
+        std::vector<std::string> feature_names;  // as stored in the file; may be empty or defaults
     };
 
 } // namespace lignum

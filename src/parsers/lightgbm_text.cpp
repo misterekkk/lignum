@@ -280,6 +280,16 @@ namespace lignum {
             else if (auto it2 = header.find("num_class"); it2 != header.end()) n_outputs = parse_integer<int64_t>(it2->second);
             if (n_outputs < 1 || n_outputs > 65535) fail("unsupported number of trees per iteration");
             if (auto it = header.find("objective"); it != header.end()) lightgbm_objective(it->second, info);
+            if (auto it = header.find("feature_names"); it != header.end()) {
+                // Space separated: LightGBM replaces spaces in names with '_' when training.
+                std::string_view names = it->second;
+                while (!names.empty()) {
+                    const size_t space = names.find(' ');
+                    if (space != 0) info.feature_names.emplace_back(names.substr(0, space));
+                    if (space == std::string_view::npos) break;
+                    names.remove_prefix(space + 1);
+                }
+            }
 
             info.base_scores.assign(static_cast<size_t>(n_outputs), 0.0);
             if (n_outputs > 1) {

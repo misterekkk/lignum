@@ -39,14 +39,17 @@ read-only and checks every stored index, so a damaged file is rejected instead o
 | CatBoost, Diabetes 130-US (large CTR tables) | 12.8 ms (`.cbm`) | 2.3 ms |
 
 Measured on an Apple M4; parsing only, without building the binned kernel. Convert once and load the
-`.bin` file in production. A `.bin` file from an older lignum version is rejected: re-export it from
-the original model (0.3.0 writes format 0.7, which added CatBoost models; files from 0.2.0 must be
-written again).
+`.bin` file in production, and keep the original model file: a `.bin` file from an older lignum
+version is rejected, and is written again from the original. Format 0.8 (lignum 0.4) adds the
+feature names, the library the model came from and the lignum version that wrote the file; files
+written by lignum 0.3 (format 0.6 and 0.7) must be saved again.
 
 ## What a model must look like
 
 - **Features** are columns by position: feature `j` of the model is column `j` of the input. A model
-  needs at least `model.n_features` columns; extra columns are ignored.
+  needs at least `model.n_features` columns; extra columns after them are ignored. Named inputs
+  (pandas, Arrow) are checked against the model's `feature_names` first, see
+  [column names](../predicting/#column-names).
 - **Categorical features** take the integer category codes the library was trained on. For pandas
   `category` columns these are `series.cat.codes` (NaN for missing), which is also what a dictionary
   column in [Arrow input](../arrow/) gives. CatBoost models take the category values themselves

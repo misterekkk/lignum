@@ -21,7 +21,10 @@ for batch in reader:                # e.g. a stream of record batches
 ## Columns
 
 The first `model.n_features` columns are the features, by position, exactly like the columns of a
-matrix; further columns are ignored, whatever their type.
+matrix; further columns are ignored, whatever their type. When the model has feature names, the
+schema's column names must start with them, in the same order (`ValueError` otherwise; see
+[column names](../predicting/#column-names)); `table.select(model.feature_names)` puts a table's
+columns in the model's order.
 
 | Arrow type | Value |
 |---|---|

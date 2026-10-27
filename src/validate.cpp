@@ -1,9 +1,11 @@
 #include "validate.hpp"
 #include "binned.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace lignum {
 
@@ -84,6 +86,41 @@ namespace lignum {
     void validate_model(const Model& model) {
         validate_knodes(model);
         if (model.binned) validate_binned(model, *model.binned);
+    }
+
+    std::vector<std::string> model_feature_names(std::vector<std::string> names, uint32_t n_features, uint8_t source) {
+        if (names.empty() || std::any_of(names.begin(), names.end(), [](const std::string& n) { return n.empty(); })) return {};
+        if (source == model_source::LightGBM) {
+            bool defaults = true;
+            for (size_t i = 0; i < names.size() && defaults; i++) defaults = names[i] == "Column_" + std::to_string(i);
+            if (defaults) return {};
+        }
+        if (names.size() < n_features) {
+            fail("the model names " + std::to_string(names.size()) + " features but its trees use " + std::to_string(n_features));
+        }
+        return names;
+    }
+
+    void check_feature_names(const Model& model, const std::vector<std::string>& columns) {
+        const auto& names = model.feature_names;
+        if (names.empty()) return;
+        auto same = [&](const std::string& column, const std::string& name) {
+            if (column == name) return true;
+            if (model.source != model_source::LightGBM || column.size() != name.size()) return false;
+            std::string spaced = column;
+            std::replace(spaced.begin(), spaced.end(), ' ', '_');
+            return spaced == name;
+        };
+        size_t k = 0;
+        while (k < names.size() && k < columns.size() && same(columns[k], names[k])) k++;
+        if (k == names.size()) return;
+        std::string message = k < columns.size()
+            ? "Column " + std::to_string(k) + " is '" + columns[k] + "' but the model expects '" + names[k] + "' there"
+            : "The input has " + std::to_string(columns.size()) + " columns but the model has " + std::to_string(names.size()) +
+                  " features (the next one is '" + names[k] + "')";
+        throw std::invalid_argument(message + "; the model's columns are model.feature_names, in that order. Select them with "
+                                    "X[model.feature_names] (pandas) or table.select(model.feature_names) (pyarrow), or pass "
+                                    "validate_features=False to use the columns by position.");
     }
 
 } // namespace lignum

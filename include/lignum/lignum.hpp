@@ -27,13 +27,16 @@ namespace lignum {
     // LightGBM and XGBoost). Nulls are NaN. Values become doubles exactly as numpy's
     // astype(float64) makes them, so predictions equal those for the same float64 matrix.
     // out holds batch.length x model.output_width(raw_score) values. Rows are converted in chunks,
-    // never the whole batch at once.
+    // never the whole batch at once. With validate_features, the schema's column names must start
+    // with model.feature_names (std::invalid_argument otherwise; no check for a model without names).
     void predict_arrow(const Model& model, const ArrowSchema& schema, const ArrowArray& batch, double* out,
-                       bool raw_score = false, int n_jobs = -1, Strategy strategy = Strategy::Auto);
+                       bool raw_score = false, int n_jobs = -1, Strategy strategy = Strategy::Auto,
+                       bool validate_features = false);
 
     // Every batch of an Arrow stream, in order; outputs are concatenated (n_rows rows). The
     // stream itself is not released.
     std::vector<double> predict_arrow_stream(const Model& model, ArrowArrayStream& stream, bool raw_score = false,
-                                             int n_jobs = -1, Strategy strategy = Strategy::Auto, size_t* n_rows = nullptr);
+                                             int n_jobs = -1, Strategy strategy = Strategy::Auto, size_t* n_rows = nullptr,
+                                             bool validate_features = false);
 
 } // namespace lignum

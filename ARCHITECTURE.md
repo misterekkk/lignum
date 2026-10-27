@@ -116,13 +116,17 @@ sums in double and divides by `float(sum)`; LightGBM's softmax is all double.
 Verified bit-exact by `tests/python/test_parity.py` on inputs with NaNs, zeros, values in the zero
 band and values placed exactly on every split threshold.
 
-## Binary format (version 0.6)
+## Binary format (version 0.8)
 
 64-byte header (`magic "LIGNUM"`, version, transform, flags {float32, special trees}, sigmoid,
-n_features, n_outputs, n_cat_words, section sizes), followed by 64-byte aligned sections: nodes, tree offsets,
+n_features, n_outputs, n_cat_words, section sizes), then a 64-byte `InfoHeader` (the lignum version
+that wrote the file, taken by CMake from `python/lignum/__init__.py`; the source library; the size of
+the feature names, which follow as length-prefixed UTF-8 strings), then 64-byte aligned sections: nodes, tree offsets,
 leaves, tree kinds, base scores, tree outputs (multiclass only), categorical bitsets and, when the
 `Binned` flag is set, a `BinnedFileHeader` followed by the binned kernel's sections (nodes, roots,
 tree kinds, dense features, cuts, zero bins, categorical decision tables).
+Feature names are only checked against named inputs (`check_feature_names`: pandas in Python,
+Arrow schemas in `predict_arrow`); the kernels read columns by position.
 Loading validates the version and the file size, maps the file read-only and then checks every
 stored index (`src/validate.cpp`): children must point strictly forward (so a walk always ends),
 leaves, features, categorical bitsets and decision tables must be in range. This takes 0.15-0.64 ms
@@ -160,9 +164,9 @@ sends such models to their own kernel.
   packed 12-byte `TBucket {ui64 hash; ui32 index}` plus a blob of int counts, or `{float sum; int
   count}` for mean CTRs. A small bounds-checked reader (`Flat`, `FlatTable`) replaces the
   flatbuffers library.
-- **`.bin`**: version 0.7 with the `Oblivious` flag, used only for CatBoost models. The header, the
-  bias, then the forest as 64-byte aligned arrays, each with an 8-byte count. Loading copies them
-  and checks every index (`validate`). Other models are still written as 0.6.
+- **`.bin`**: the `Oblivious` flag marks CatBoost models. The header and `InfoHeader`, the bias,
+  then the forest as 64-byte aligned arrays, each with an 8-byte count. Loading copies them and
+  checks every index (`validate`).
 - **Rows**: fewer than 4 rows take `predict_row` (scalar, no per-split loop over rows; one row is
   2.8 µs instead of 6.4 for 500 trees). Larger batches use the block kernel below.
 

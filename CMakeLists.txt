@@ -47,6 +47,12 @@ add_library(lignum STATIC
     extern/simdjson/simdjson.cpp
 )
 
+# .bin files record the lignum version that wrote them; it lives only in python/lignum/__init__.py.
+file(STRINGS python/lignum/__init__.py LIGNUM_VERSION_LINE REGEX "^__version__ = ")
+string(REGEX REPLACE "^__version__ = \"([^\"]+)\".*$" "\\1" LIGNUM_VERSION "${LIGNUM_VERSION_LINE}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS python/lignum/__init__.py)
+set_source_files_properties(src/io.cpp PROPERTIES COMPILE_DEFINITIONS "LIGNUM_VERSION=\"${LIGNUM_VERSION}\"")
+
 # x86-64: the CatBoost block kernel also compiled for AVX2, chosen at run time by cpuid. GCC and
 # Clang switch the target inside catboost_kernel_avx2.cpp (the build stays generic); MSVC has no
 # per-function target, so that one file is compiled with /arch:AVX2, and without /GL: link-time

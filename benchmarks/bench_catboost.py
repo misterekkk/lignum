@@ -134,6 +134,7 @@ def python_fronts(name, model_path, frame, cats, ref, args) -> list[Row]:
     booster = cb.CatBoost()
     booster.load_model(str(model_path))
     model = lignum.load(str(model_path))
+    model.validate_features = False  # benchmarks measure prediction alone: no column-name check
     raw = "RawFormulaVal"
 
     def cb_predict(data, n):

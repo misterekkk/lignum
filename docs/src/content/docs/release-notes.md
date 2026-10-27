@@ -12,6 +12,17 @@ change the API. Install a specific version with `pip install pylignum==<version>
 
 ### Changed
 
+- **Breaking: column names are checked.** When a model was trained on named columns and the input
+  has column names (pandas DataFrame, pyarrow, polars or other Arrow data), `predict` checks that
+  the columns start with the model's `feature_names`, in the same order, and raises `ValueError`
+  otherwise. Before, a reordered or missing column silently gave other predictions. numpy arrays,
+  frames without column names, models without names and the C API are unchanged (by position).
+  `predict(..., validate_features=False)`, `load(..., validate_features=False)` or
+  `model.validate_features = False` turn the check off; it costs 0-5 µs per call (Apple M4).
+- **Breaking: `.bin` format 0.8.** It adds the feature names, the library the model was trained
+  with and the lignum version that wrote the file. Files written by lignum 0.3 are rejected: save
+  them again from the original model.
+
 - **Compiled-library files** (`Model.compile()`): without `library=`, libraries go to a per-user
   cache (`~/.cache/lignum`, `~/Library/Caches/lignum`, `%LOCALAPPDATA%\lignum\Cache`, or
   `LIGNUM_CACHE_DIR`) instead of `lignum_compiled` in the temp directory, and the code is built in a
@@ -24,6 +35,8 @@ change the API. Install a specific version with `pip install pylignum==<version>
 
 ### Added
 
+- `Model.feature_names`: the names of the training columns (LightGBM, XGBoost and CatBoost files,
+  kept in `.bin`), or `None` for models trained on a matrix.
 - `lignum.cache_dir()`, `lignum.clear_cache()` and `Model.compiled_library` (the path of the
   library in use).
 - `compile(library=folder)` writes `lignum_<model fingerprint>_<platform>.so` (`.dll` on Windows)

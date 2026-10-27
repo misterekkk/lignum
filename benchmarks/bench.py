@@ -261,6 +261,7 @@ def engine_lignum(w: Workload, tmp: Path) -> Predict:
     import lignum
 
     model = lignum.load(str(w.model_json), format=w.family)
+    model.validate_features = False  # benchmarks measure prediction alone: no column-name check
     return lambda X, n: model.predict(X, n_jobs=n)
 
 
@@ -271,6 +272,7 @@ def engine_lignum_bin(w: Workload, tmp: Path) -> Predict:
     if not path.exists():
         lignum.load(str(w.model_json), format=w.family).save(str(path))
     model = lignum.load(str(path))
+    model.validate_features = False  # benchmarks measure prediction alone: no column-name check
     return lambda X, n: model.predict(X, n_jobs=n)
 
 
@@ -279,6 +281,7 @@ def engine_lignum_compiled(w: Workload, tmp: Path) -> Predict:
 
     model = lignum.load(str(w.model_json), format=w.family)
     model.compile(library=tmp / "compiled" / f"{w.name}_lignum.lib")
+    model.validate_features = False  # benchmarks measure prediction alone: no column-name check
     return lambda X, n: model.predict(X, n_jobs=n)
 
 
