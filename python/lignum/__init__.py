@@ -20,7 +20,7 @@ import numpy as np
 from . import _core
 
 __all__ = ["Model", "load", "catboost_hash", "cache_dir", "clear_cache"]
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 
 def cache_dir() -> str:
