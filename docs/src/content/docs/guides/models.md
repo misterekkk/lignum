@@ -61,5 +61,7 @@ written by lignum 0.3 (format 0.6 and 0.7) must be saved again.
 These are rejected with an error rather than predicted wrongly:
 
 - LightGBM linear trees (`linear_tree=True`) and random forests (`boosting="rf"`).
-- XGBoost multi-target models (`num_target > 1`).
+- XGBoost multi-target models (`num_target > 1`), linear boosters (`booster="gblinear"`) and DART
+  models that dropped trees (`rate_drop > 0`). DART models that kept every tree are supported, and
+  so are all LightGBM DART models.
 - CatBoost `Depthwise` and `Lossguide` trees, and text or embedding features.

@@ -132,6 +132,16 @@ namespace lignum {
                 return values;
             }
 
+            // DART tree weights (absent for gbtree, all 1 when DART dropped nothing).
+            void reject_weighted_trees(simdjson::simdjson_result<simdjson::dom::element> weights) {
+                if (weights.error() != simdjson::SUCCESS) return;
+                for (simdjson::dom::element weight : weights.get_array()) {
+                    if (static_cast<float>(weight.get_double().value()) != 1.0f) {
+                        throw std::runtime_error("DART models with dropped trees (tree weights other than 1) are not supported yet.");
+                    }
+                }
+            }
+
             std::vector<std::unique_ptr<TempBinNode>> load_document(simdjson::dom::element doc, ModelInfo& info);
 
         } // namespace
@@ -200,17 +210,39 @@ namespace lignum {
                 for (simdjson::dom::element name : names) info.feature_names.emplace_back(name.get_string().value());
             }
 
-            auto trees_element = doc["learner"]["gradient_booster"]["model"]["trees"];
-            if (trees_element.error() == simdjson::SUCCESS) {
-                for (simdjson::dom::element tree_elem : trees_element.get_array()) {
-                    simdjson::dom::object tree_obj = tree_elem.get_object();
-
-                    forest.push_back(build_tree(read_tree_arrays(tree_obj), 0));
+            // gbtree keeps the trees in "model". DART from XGBoost < 3.4 nests a gbtree and keeps one
+            // weight per tree beside it; 3.4 saves DART as gbtree with "weight_drop" in "model".
+            // Weighted trees are not supported yet: reject them rather than predict wrongly.
+            simdjson::dom::element booster = doc["learner"]["gradient_booster"];
+            auto name_elem = booster["name"];
+            const std::string_view booster_name = name_elem.error() == simdjson::SUCCESS ? name_elem.get_string().value() : "";
+            simdjson::dom::element model;
+            if (booster_name == "gbtree") {
+                if (booster["model"].get(model) != simdjson::SUCCESS) throw std::runtime_error("Malformed XGBoost model: no gbtree model.");
+            } else if (booster_name == "dart") {
+                if (booster["gbtree"]["model"].get(model) != simdjson::SUCCESS) {
+                    throw std::runtime_error("Malformed XGBoost model: DART without its gbtree model.");
                 }
+                reject_weighted_trees(booster["weight_drop"]);
+            } else if (booster_name == "gblinear") {
+                throw std::runtime_error("Linear boosters (booster=gblinear) are not supported.");
+            } else {
+                throw std::runtime_error("Unknown XGBoost booster '" + std::string(booster_name) + "'.");
+            }
+            reject_weighted_trees(model["weight_drop"]);
+
+            simdjson::dom::array trees;
+            if (model["trees"].get_array().get(trees) != simdjson::SUCCESS) {
+                throw std::runtime_error("Malformed XGBoost model: no trees in gradient_booster.");
+            }
+            for (simdjson::dom::element tree_elem : trees) {
+                simdjson::dom::object tree_obj = tree_elem.get_object();
+
+                forest.push_back(build_tree(read_tree_arrays(tree_obj), 0));
             }
 
             if (n_outputs > 1) {
-                for (int64_t output : doc["learner"]["gradient_booster"]["model"]["tree_info"].get_array()) {
+                for (int64_t output : model["tree_info"].get_array()) {
                     if (output < 0 || output >= n_outputs) throw std::runtime_error("tree_info refers to an unknown class.");
                     info.tree_outputs.push_back(static_cast<uint16_t>(output));
                 }

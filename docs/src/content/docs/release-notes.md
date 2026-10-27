@@ -51,6 +51,11 @@ change the API. Install a specific version with `pip install pylignum==<version>
   longer load each other's libraries. The key is also stable across compilers (FNV-1a instead of
   `std::hash`), and a cached library that fails to load is rebuilt.
 - Errors when loading a library built for another platform name the platform that is needed.
+- XGBoost models that were predicted wrongly without an error are now rejected: linear boosters
+  (`booster="gblinear"`, which loaded as an empty forest predicting `base_score`) and DART models
+  that dropped trees (`rate_drop > 0`: XGBoost weights each tree, lignum ignored the weights). DART
+  files from XGBoost before 3.4 (trees nested under `gbtree`) used to load as an empty forest too;
+  they now predict correctly when no tree was dropped. LightGBM DART models were and are exact.
 
 The old `lignum_compiled` folder in the temp directory is no longer used and can be deleted.
 

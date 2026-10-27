@@ -3,6 +3,7 @@
 #include <cmath>
 #include <limits>
 #include <string>
+#include <vector>
 
 using lignum::test::predict_raw;
 using lignum::test::write_temp;
@@ -16,7 +17,7 @@ namespace {
         return R"({"learner": {
             "learner_model_param": {"base_score": ")" + base_score + R"(", "num_class": "0", "num_target": "1"},
             "objective": {"name": "reg:squarederror"},
-            "gradient_booster": {"model": {"trees": [{
+            "gradient_booster": {"name": "gbtree", "model": {"trees": [{
                 "left_children": [1, -1, -1], "right_children": [2, -1, -1],
                 "split_indices": [0, 0, 0], "split_conditions": [)" + threshold + R"(, -1.0, 1.0],
                 "default_left": [)" + std::to_string(default_left) + R"(, 0, 0]}]}}}})";
@@ -50,4 +51,46 @@ TEST(XGBoost, MissingFollowsDefaultLeft) {
 TEST(XGBoost, AddsBaseScoreForSquaredError) {
     auto model = lignum::load(write_temp("xgb_base.json", stump("0.5", 0, "[5E-1]")), "xgboost");
     EXPECT_EQ(predict_raw(model, {0.0, 1.0}, 1), (std::vector<double>{-0.5, 1.5}));
+}
+
+namespace {
+
+    // The stump above with a custom "gradient_booster" object.
+    std::string with_booster(const std::string& booster) {
+        return R"({"learner": {
+            "learner_model_param": {"base_score": "[0E0]", "num_class": "0", "num_target": "1"},
+            "objective": {"name": "reg:squarederror"},
+            "gradient_booster": )" + booster + "}}";
+    }
+
+    const std::string kTrees = R"({"trees": [{
+        "left_children": [1, -1, -1], "right_children": [2, -1, -1],
+        "split_indices": [0, 0, 0], "split_conditions": [0.5, -1.0, 1.0], "default_left": [0, 0, 0]}])";
+
+} // namespace
+
+TEST(XGBoost, DartWithUnitWeightsPredictsLikeGbtree) {
+    // XGBoost < 3.4 nests the trees in "gbtree"; 3.4 saves DART as gbtree with "weight_drop".
+    const std::string old_dart = R"({"name": "dart", "gbtree": {"name": "gbtree", "model": )" + kTrees + R"(, "tree_info": [0]}}, "weight_drop": [1.0]})";
+    const std::string new_dart = R"({"name": "gbtree", "model": )" + kTrees + R"(, "tree_info": [0], "weight_drop": [1]}})";
+    for (const auto& booster : {old_dart, new_dart}) {
+        auto model = lignum::load(write_temp("xgb_dart.json", with_booster(booster)), "xgboost");
+        EXPECT_EQ(predict_raw(model, {0.0, 1.0}, 1), (std::vector<double>{-1.0, 1.0}));
+    }
+}
+
+TEST(XGBoost, UnsupportedBoostersAreRejected) {
+    const std::vector<std::string> boosters = {
+        R"({"name": "dart", "gbtree": {"name": "gbtree", "model": )" + kTrees + R"(}}, "weight_drop": [0.5]})",
+        R"({"name": "gbtree", "model": )" + kTrees + R"(, "weight_drop": [0.75]}})",
+        R"({"name": "gblinear", "model": {"boosted_rounds": 1, "weights": [0.1, 0.2]}})",
+        R"({"name": "unknown", "model": )" + kTrees + "}}",
+        R"({"model": )" + kTrees + "}}",                              // no booster name
+        R"({"name": "gbtree", "model": {"tree_info": []}})",           // no trees
+        R"({"name": "dart", "model": )" + kTrees + R"(}, "weight_drop": [1]})",  // DART without its gbtree
+    };
+    for (const auto& booster : boosters) {
+        EXPECT_THROW(lignum::load(write_temp("xgb_booster.json", with_booster(booster)), "xgboost"), std::runtime_error)
+            << booster;
+    }
 }
