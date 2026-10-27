@@ -146,4 +146,31 @@ def catboost_frame(d: Dataset) -> pd.DataFrame:
     return frame
 
 
-LOADERS = {"california": california, "covtype": covtype, "adult": adult, "bank": bank, "diabetes": diabetes}
+def synthetic(n_rows: int = 300_000) -> Dataset:
+    """bench.py's synthetic data (make_classification, 20 features, 5% NaN), binary: the same
+    data the LightGBM / XGBoost numbers use."""
+    import bench
+
+    X, y = bench.make_data(n_rows, 20)
+    return _finish("synthetic", pd.DataFrame(X, columns=[f"f{j}" for j in range(X.shape[1])]), y, "binary")
+
+
+def synthetic_cat(n_rows: int = 300_000) -> Dataset:
+    """bench.py's categorical data (lightgbm-cat / xgboost-cat): 5 categorical columns of
+    cardinality 10 to 5000 (Zipf-skewed) and 15 numeric ones, 5% NaN, binary."""
+    import bench
+
+    X, y = bench.make_categorical_data(n_rows)
+    n_cat = len(bench.CAT_CARDINALITIES)
+    columns = {}
+    for j in range(X.shape[1]):
+        if j < n_cat:
+            codes = pd.Series(X[:, j])
+            columns[f"c{j}"] = codes.map(lambda v: f"v{int(v)}", na_action="ignore").astype("category")
+        else:
+            columns[f"f{j}"] = X[:, j]
+    return _finish("synthetic-cat", pd.DataFrame(columns), y, "binary")
+
+
+LOADERS = {"california": california, "covtype": covtype, "adult": adult, "bank": bank, "diabetes": diabetes,
+           "synthetic": synthetic, "synthetic-cat": synthetic_cat}

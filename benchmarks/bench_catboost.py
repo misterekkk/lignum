@@ -1,7 +1,8 @@
-"""CatBoost models on real data with categories: lignum against CatBoost, from every input.
+"""CatBoost models on real and synthetic data: lignum against CatBoost, from every input.
 
 Usage:
-    python benchmarks/bench_catboost.py                          # adult, bank, diabetes, california, covtype
+    python benchmarks/bench_catboost.py                          # adult, bank, diabetes, california, covtype,
+                                                                 # synthetic, synthetic-cat (bench.py's data)
     python benchmarks/bench_catboost.py --datasets adult --quick
     python benchmarks/bench_catboost.py --no-capi                # Python only
 
@@ -321,7 +322,7 @@ def render(results: list[Row], env: dict, args, shapes: dict) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--datasets", default="adult,bank,diabetes,california,covtype")
+    parser.add_argument("--datasets", default="adult,bank,diabetes,california,covtype,synthetic,synthetic-cat")
     parser.add_argument("--trees", type=int, default=500)
     parser.add_argument("--rows", type=int, default=500_000)
     parser.add_argument("--repeats", type=int, default=5)
