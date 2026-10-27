@@ -32,6 +32,10 @@ env:
   EXPERIMENT_CXX_FLAGS: ""
   BENCH_ARGS: ${{ github.event.inputs.args || '--only lightgbm,lightgbm-cat,lightgbm-real-diabetes,lightgbm-real-covtype,lightgbm-real-california,lightgbm-real-adult,lightgbm-real-bank --rows 300000 --trees 500 --repeats 5 --latency-budget 1' }}
 
+# Read-only token: the jobs only check out the code and pass artifacts between themselves.
+permissions:
+  contents: read
+
 jobs:
   bench:
     name: ${{ matrix.os }}

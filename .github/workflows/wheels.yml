@@ -25,6 +25,10 @@ concurrency:
   group: wheels-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
+# Read-only token by default; the publish job adds id-token: write for trusted publishing.
+permissions:
+  contents: read
+
 jobs:
   wheels:
     name: ${{ matrix.os }}

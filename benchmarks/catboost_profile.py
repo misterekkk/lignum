@@ -64,7 +64,7 @@ def loops(body: list[str]) -> list[list[str]]:
             addrs.append((int(m.group(1), 16), m.group(2).strip()))
     found = []
     for i, (addr, insn) in enumerate(addrs):
-        m = re.search(r"\b(?:j[a-z]+|b(?:\.[a-z]+)?|cbn?z|tbn?z)\s+(?:\S+,\s*)*(?:0x)?([0-9a-f]+)\b", insn)
+        m = re.search(r"\b(?:j[a-z]+|b(?:\.[a-z]+)?|cbn?z|tbn?z)\s+(?:[^\s,]+,\s*)*(?:0x)?([0-9a-f]+)\b", insn)
         if m:
             target = int(m.group(1), 16)
             if target <= addr:

@@ -12,6 +12,10 @@ on:
       - '.github/workflows/tests.yml'
   pull_request:
 
+# Read-only token: the jobs only check out the code and pass artifacts between themselves.
+permissions:
+  contents: read
+
 jobs:
   cpp:
     name: C++ tests on ${{ matrix.os }}

@@ -16,6 +16,10 @@ on:
       - '.github/workflows/catboost-profile.yml'
   workflow_dispatch:
 
+# Read-only token: the jobs only check out the code and pass artifacts between themselves.
+permissions:
+  contents: read
+
 jobs:
   profile:
     name: ${{ matrix.os }}
