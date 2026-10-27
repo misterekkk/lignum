@@ -1,0 +1,54 @@
+name: Upstream libraries
+
+# Bit-exactness against the newest LightGBM, XGBoost and CatBoost, every day: the Python tests with
+# the latest releases, and with pre-releases (release candidates) to hear about a change before it
+# ships. GitHub emails the author when a scheduled run fails; the job summary lists the versions
+# that ran, so the failing release is visible from the email.
+on:
+  schedule:
+    - cron: "17 5 * * *"  # daily, 05:17 UTC
+  workflow_dispatch:
+  push:  # changes to this workflow are tried on their branch at once
+    paths:
+      - '.github/workflows/upstream.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: ${{ matrix.libraries }} libraries on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]  # x86-64 and arm64 (CatBoost's exp differs between them)
+        libraries: [latest, pre-release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install libomp (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libomp
+
+      - name: Install package and the newest libraries
+        run: |
+          python -m pip install ".[test]"
+          python -m pip install --upgrade ${{ matrix.libraries == 'pre-release' && '--pre' || '' }} lightgbm xgboost catboost
+
+      - name: Versions
+        run: |
+          set -o pipefail
+          python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import importlib.metadata as m
+          print("**${{ matrix.libraries }} libraries on ${{ matrix.os }}**\n")
+          for name in ("lightgbm", "xgboost", "catboost", "numpy", "pandas", "pyarrow"):
+              print(f"- {name} {m.version(name)}")
+          PY
+
+      - name: Run tests
+        run: python -m pytest tests/python -q
