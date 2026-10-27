@@ -149,9 +149,6 @@ NB_MODULE(_core, m) {
         }, "Input columns that hold categories (CatBoost models), in increasing order.")
         .def_prop_ro("is_catboost", [](const Model& self) { return self.oblivious != nullptr; })
         .def("compile", [](Model& self, const std::string& compiler, const std::string& flags, const std::string& work_dir, int jobs, int block_trees, const std::string& output) {
-            if (self.oblivious) {
-                throw std::runtime_error("CatBoost models have no compiled mode: their symmetric trees are branch-free already.");
-            }
             CompileOptions options;
             options.compiler = compiler;
             options.flags = flags;
