@@ -921,4 +921,12 @@ namespace lignum {
         dispatch(*this, X, n_samples, n_features, out_preds, n_jobs, strategy, true);
     }
 
+    size_t Model::n_trees() const {
+        return oblivious ? oblivious->n_trees() : n_offsets;
+    }
+
+    size_t Model::total_leaves() const {
+        return oblivious ? oblivious->leaves.size() / std::max<size_t>(1, oblivious->dim) : n_leaves;
+    }
+
 } // namespace lignum

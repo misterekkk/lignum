@@ -116,6 +116,7 @@ namespace lignum {
 
             void parse_objective(std::string_view objective, ModelInfo& info) {
                 const std::string_view name = objective.substr(0, objective.find(' '));
+                info.objective = std::string(name);
 
                 if (name == "binary" || name == "multiclassova" || name == "ovr" || name == "multiclass_ova" || name == "ova") {
                     info.transform = transform::Sigmoid;  // per class for one-vs-all

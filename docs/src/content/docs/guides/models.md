@@ -24,6 +24,28 @@ model = lignum.load("model.txt")                    # LightGBM
 model = lignum.load("model.ubj", format="xgboost")  # XGBoost, checked
 ```
 
+## Inspecting a model
+
+Before serving a file, check that it is the model you expect:
+
+```python
+>>> model = lignum.load("california.bin")  # LightGBM, 500 trees, saved by lignum 0.4.0
+>>> model
+<lignum.Model lightgbm regression, 500 trees, 8 features>
+>>> model.info()
+{'source': 'lightgbm', 'objective': 'regression', 'transform': 'identity', 'n_trees': 500,
+ 'n_leaves': 15500, 'n_features': 8, 'n_outputs': 1,
+ 'feature_names': ['MedInc', 'HouseAge', 'AveRooms', 'AveBedrms', 'Population', 'AveOccup', 'Latitude', 'Longitude'],
+ 'categorical_features': [], 'kernel': 'binned', 'compiled_library': None, 'written_by': '0.4.0'}
+```
+
+`n_trees` counts every tree, so a multiclass model has one per class and iteration (LightGBM's
+`num_trees()`, XGBoost's `len(booster.get_dump())`, CatBoost's `tree_count_`). `objective`
+is the library's own name for it; `transform` is what lignum applies to the raw scores
+(`predict(raw_score=True)` skips it). `kernel` says which code predicts: `binned` or `direct`
+(the interpreter), `compiled` (after `compile()`) or `catboost`. `written_by` is the lignum version
+that wrote a `.bin` file, and `None` for the libraries' own files.
+
 ## The binary format
 
 `model.save("model.bin")` writes lignum's own format: the trees in the layout the kernels read, the
@@ -41,7 +63,8 @@ read-only and checks every stored index, so a damaged file is rejected instead o
 Measured on an Apple M4; parsing only, without building the binned kernel. Convert once and load the
 `.bin` file in production, and keep the original model file: a `.bin` file from an older lignum
 version is rejected, and is written again from the original. Format 0.8 (lignum 0.4) adds the
-feature names, the library the model came from and the lignum version that wrote the file; files
+feature names, the library the model came from, its objective and the lignum version that wrote the
+file (`model.info()["written_by"]`); files
 written by lignum 0.3 (format 0.6 and 0.7) must be saved again.
 
 ## What a model must look like

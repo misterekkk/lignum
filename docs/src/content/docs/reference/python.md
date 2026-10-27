@@ -3,7 +3,7 @@ title: Python API
 description: Every public function and method of the lignum package.
 ---
 
-Generated from the docstrings of lignum 0.3.1 by `docs/scripts/api_reference.py`.
+Generated from the docstrings of lignum 0.4.0 by `docs/scripts/api_reference.py`.
 
 ## `lignum.load`
 
@@ -169,6 +169,23 @@ Go back to the interpreter.
 names (trained on a matrix). `X[model.feature_names]` puts a DataFrame's columns in the
 model's order.
 
+### `Model.info`
+
+```python
+Model.info() -> dict
+```
+
+Summary of the model, for logs and checks before serving it.
+
+**Returns**
+
+- `dict` `source`, `objective`, `transform` (from raw scores to predictions: "identity", "sigmoid", "exp", "log1p_exp", "softmax" or "argmax"), `n_trees`, `n_leaves`, `n_features`, `n_outputs`, `feature_names`, `categorical_features`, `kernel` ("catboost", "compiled", "binned" or "direct"), `compiled_library` and `written_by` (lignum version that wrote a `.bin` file, otherwise None).
+
+**Examples**
+
+>>> lignum.load("model.txt").info()["n_trees"]
+500
+
 ### `Model.load_compiled`
 
 ```python
@@ -189,6 +206,16 @@ native code, so only load libraries you trust (like a pickle).
 ### `Model.n_outputs`
 
 *Property.* Number of model outputs: the number of classes for multiclass models, otherwise 1.
+
+### `Model.n_trees`
+
+*Property.* Number of trees. Multiclass models have one tree per class and iteration, all counted
+(like LightGBM's `num_trees()`).
+
+### `Model.objective`
+
+*Property.* Objective as the source library names it ("binary", "multi:softprob", "Logloss"), or None
+when the file does not say.
 
 ### `Model.predict`
 
@@ -245,6 +272,10 @@ subsequent sessions.
 ```python
 model.save("optimized_model.bin")
 ```
+
+### `Model.source`
+
+*Property.* Library the model was trained with: "lightgbm", "xgboost" or "catboost".
 
 ### `Model.uses_binned`
 

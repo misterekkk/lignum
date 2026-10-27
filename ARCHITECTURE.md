@@ -121,7 +121,8 @@ band and values placed exactly on every split threshold.
 64-byte header (`magic "LIGNUM"`, version, transform, flags {float32, special trees}, sigmoid,
 n_features, n_outputs, n_cat_words, section sizes), then a 64-byte `InfoHeader` (the lignum version
 that wrote the file, taken by CMake from `python/lignum/__init__.py`; the source library; the size of
-the feature names, which follow as length-prefixed UTF-8 strings), then 64-byte aligned sections: nodes, tree offsets,
+the feature names, which follow as length-prefixed UTF-8 strings, and of the objective's name, which
+follows them), then 64-byte aligned sections: nodes, tree offsets,
 leaves, tree kinds, base scores, tree outputs (multiclass only), categorical bitsets and, when the
 `Binned` flag is set, a `BinnedFileHeader` followed by the binned kernel's sections (nodes, roots,
 tree kinds, dense features, cuts, zero bins, categorical decision tables).

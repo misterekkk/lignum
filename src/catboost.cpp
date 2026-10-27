@@ -760,6 +760,7 @@ namespace lignum {
             model.oblivious = forest;
             model.data = forest;
             model.source = model_source::CatBoost;
+            model.objective = spec.loss;
             std::vector<std::string> names(n_columns);
             for (const SpecFloat& sf : spec.floats) names[sf.column] = sf.name;
             for (const SpecCat& sc : spec.cats) names[sc.column] = sc.name;

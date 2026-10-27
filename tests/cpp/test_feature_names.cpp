@@ -1,4 +1,5 @@
 #include "test_util.hpp"
+#include "catboost_test_model.hpp"
 #include "validate.hpp"
 
 #include <cstring>
@@ -130,7 +131,8 @@ TEST(FeatureNames, CorruptedNamesAreRejected) {
     model.save(path);
     std::ifstream in(path, std::ios::binary);
     const std::vector<char> bytes{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
-    // InfoHeader at 64: writer[24], names_bytes (u64) at 88, n_names (u32) at 96, source (u8) at 100;
+    // InfoHeader at 64: writer[24], names_bytes (u64) at 88, n_names (u32) at 96, source (u8) at 100,
+    // objective_bytes (u32) at 104;
     // the names start at 128 with the length of the first one.
     auto rejected = [&](size_t offset, const std::vector<unsigned char>& patch) {
         std::vector<char> mutated = bytes;
@@ -148,6 +150,44 @@ TEST(FeatureNames, CorruptedNamesAreRejected) {
     EXPECT_TRUE(rejected(96, {4, 0, 0, 0}));                                       // more names than bytes hold
     EXPECT_TRUE(rejected(96, {1, 0, 0, 0}));                                       // fewer names than features
     EXPECT_TRUE(rejected(100, {9}));                                               // unknown source
+    EXPECT_TRUE(rejected(104, {0xff, 0xff, 0xff, 0x7f}));                          // objective past the end
     EXPECT_TRUE(rejected(128, {0xff, 0xff, 0, 0}));                                // a name longer than the section
     EXPECT_FALSE(rejected(132, {'A'}));                                            // a changed character is still a name
+}
+
+TEST(ModelInfo, ObjectiveTreesAndLeavesFromEveryFormat) {
+    auto json = lignum::load(write_temp("info_lgb.json", lightgbm_json(R"("age", "my_income", "debt")")), "lightgbm");
+    EXPECT_EQ(json.objective, "binary");  // the name only, without "sigmoid:1"
+    EXPECT_EQ(json.n_trees(), 1u);
+    EXPECT_EQ(json.total_leaves(), 2u);
+    EXPECT_TRUE(json.written_by.empty());
+    EXPECT_EQ(lignum::load(write_temp("info_lgb.txt", kText), "lightgbm").objective, "binary");
+    auto xgb = lignum::load(write_temp("info_xgb.json", xgboost_json("")), "xgboost");
+    EXPECT_EQ(xgb.objective, "reg:squarederror");
+    EXPECT_EQ(xgb.n_trees(), 1u);
+    EXPECT_EQ(xgb.total_leaves(), 2u);
+    // CatBoost: two symmetric trees of depth 2 and 1.
+    auto cb = lignum::load(write_temp("info_cb.json", lignum::test::catboost_model_json()), "catboost");
+    EXPECT_EQ(cb.objective, "Logloss");
+    EXPECT_EQ(cb.n_trees(), 2u);
+    EXPECT_EQ(cb.total_leaves(), 6u);
+}
+
+TEST(ModelInfo, BinaryFormatKeepsObjectiveAndWriter) {
+    for (bool binned : {true, false}) {
+        auto model = lignum::load(write_temp("info_bin.json", lightgbm_json(R"("age", "my_income", "debt")")), "lightgbm", binned);
+        model.save(temp_path("info.bin"));
+        auto loaded = lignum::load(temp_path("info.bin"), "auto", binned);
+        EXPECT_EQ(loaded.objective, "binary");
+        EXPECT_EQ(loaded.n_trees(), 1u);
+        EXPECT_FALSE(loaded.written_by.empty());
+        EXPECT_NE(loaded.written_by, "unknown");
+        EXPECT_EQ(loaded.feature_names, model.feature_names);  // the objective follows the names
+    }
+    auto cb = lignum::load(write_temp("info_cb_bin.json", lignum::test::catboost_model_json()), "catboost");
+    cb.save(temp_path("info_cb.bin"));
+    auto loaded = lignum::load(temp_path("info_cb.bin"), "auto");
+    EXPECT_EQ(loaded.objective, "Logloss");
+    EXPECT_EQ(loaded.n_trees(), 2u);
+    EXPECT_EQ(loaded.total_leaves(), 6u);
 }

@@ -209,7 +209,21 @@ NB_MODULE(_core, m) {
         .def_prop_ro("n_outputs", [](const Model& self) { return self.n_outputs; }, "Number of outputs (classes for multiclass models).")
         .def_prop_ro("uses_binned", [](const Model& self) { return self.binned != nullptr; },
                      "Whether batches use the binned kernel (False when disabled or unsupported by the model).")
-        .def_prop_ro("n_features", [](const Model& self) { return self.n_features; }, "Minimum number of input columns.");
+        .def_prop_ro("n_features", [](const Model& self) { return self.n_features; }, "Minimum number of input columns.")
+        .def_prop_ro("n_trees", &Model::n_trees, "Number of trees, every class counted.")
+        .def_prop_ro("n_leaves", &Model::total_leaves, "Number of leaves of all trees.")
+        .def_prop_ro("objective", [](const Model& self) { return self.objective; }, "Objective as the source library names it.")
+        .def_prop_ro("written_by", [](const Model& self) { return self.written_by; }, "lignum version that wrote the .bin file.")
+        .def_prop_ro("transform", [](const Model& self) -> std::string {
+            switch (self.transform) {
+                case transform::Sigmoid: return "sigmoid";
+                case transform::Exp: return "exp";
+                case transform::Log1pExp: return "log1p_exp";
+                case transform::Softmax: return "softmax";
+                case transform::Argmax: return "argmax";
+                default: return "identity";
+            }
+        }, "Transform from raw scores to predictions.");
     
     m.def("cache_dir", &default_cache_dir, "Folder of the per-user cache of compiled libraries.");
     m.def("clear_cache", [] { return clear_compiled_cache(""); }, "Removes the cached compiled libraries; returns how many.");

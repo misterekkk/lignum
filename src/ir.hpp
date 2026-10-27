@@ -44,6 +44,7 @@ namespace lignum {
         uint8_t transform = 2;
         Precision precision = Precision::Float64;
         std::vector<std::string> feature_names;  // as stored in the file; may be empty or defaults
+        std::string objective;                   // the library's name for it ("binary", "reg:squarederror")
     };
 
 } // namespace lignum

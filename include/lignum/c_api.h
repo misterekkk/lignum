@@ -40,6 +40,9 @@ LIGNUM_API int LignumModelSave(LignumModelHandle handle, const char* filepath);
 /* Minimum number of columns X must have. */
 LIGNUM_API int LignumModelNumFeatures(LignumModelHandle handle, size_t* out_n_features);
 
+/* Number of trees, every class of a multiclass model counted. */
+LIGNUM_API int LignumModelNumTrees(LignumModelHandle handle, size_t* out_n_trees);
+
 /* Values per row written by LignumModelPredict: the number of classes for multiclass models,
  * except XGBoost multi:softmax (transformed) which writes one class index; otherwise 1. */
 LIGNUM_API int LignumModelOutputWidth(LignumModelHandle handle, int raw_score, size_t* out_width);

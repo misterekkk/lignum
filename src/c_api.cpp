@@ -63,6 +63,12 @@ int LignumModelNumFeatures(LignumModelHandle handle, size_t* out_n_features) {
     return 0;
 }
 
+int LignumModelNumTrees(LignumModelHandle handle, size_t* out_n_trees) {
+    if (!handle || !out_n_trees) return fail("LignumModelNumTrees: null argument.");
+    *out_n_trees = as_model(handle)->n_trees();
+    return 0;
+}
+
 int LignumModelOutputWidth(LignumModelHandle handle, int raw_score, size_t* out_width) {
     if (!handle || !out_width) return fail("LignumModelOutputWidth: null argument.");
     *out_width = as_model(handle)->output_width(raw_score != 0);
