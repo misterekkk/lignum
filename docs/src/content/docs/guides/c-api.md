@@ -48,7 +48,7 @@ int main(void) {
 | `LignumModelPredict(handle, X, n, n_features, raw, n_jobs, strategy, out)` | row-major `float64` input |
 | `LignumModelPredictArrow(handle, schema, batch, raw, n_jobs, strategy, out)` | an Arrow record batch ([Arrow input](../arrow/)) |
 | `LignumCatBoostHash(text, size)` | a category's hash for [CatBoost models](#catboost-models) |
-| `LignumModelCompile(handle, compiler, flags, work_dir, library)` | [compiled mode](../compiled/); `NULL` for defaults |
+| `LignumModelCompile(handle, compiler, flags, cache_dir, library)` | [compiled mode](../compiled/); `NULL` for defaults (per-user cache); `library` writes it there instead, a file or a folder |
 | `LignumModelLoadCompiled(handle, library)` | attach a library written by `LignumModelCompile` |
 | `LignumModelDecompile`, `LignumModelUsesCompiled` | back to the interpreter; which one predicts |
 | `LignumModelFree(handle)` | release the model |

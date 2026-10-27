@@ -92,14 +92,14 @@ int LignumModelPredictArrow(LignumModelHandle handle, const struct ArrowSchema* 
     });
 }
 
-int LignumModelCompile(LignumModelHandle handle, const char* compiler, const char* flags, const char* work_dir, const char* library) {
+int LignumModelCompile(LignumModelHandle handle, const char* compiler, const char* flags, const char* cache_dir, const char* library) {
     if (!handle) return fail("LignumModelCompile: null handle.");
     return guarded([&] {
         lignum::CompileOptions options;
         options.compiler = or_default(compiler, "auto");
         options.flags = or_default(flags, "");
-        options.work_dir = or_default(work_dir, "");
-        options.output = or_default(library, "");
+        options.cache_dir = or_default(cache_dir, "");
+        options.library = or_default(library, "");
         as_model(handle)->compiled = lignum::compile_forest(*as_model(handle), options, nullptr);
     });
 }

@@ -10,9 +10,12 @@ import lignum
 KERNELS = [True, False, "compiled"]
 
 
-@pytest.fixture(scope="session")
-def compiled_dir(tmp_path_factory):
-    return tmp_path_factory.mktemp("compiled")
+@pytest.fixture(scope="session", autouse=True)
+def compiled_cache(tmp_path_factory):
+    # Compiled libraries go to a cache of this test session, not the user's cache.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("LIGNUM_CACHE_DIR", str(tmp_path_factory.mktemp("lignum_cache")))
+        yield
 
 
 @pytest.fixture(autouse=True, params=KERNELS, ids=["binned", "direct", "compiled"])
@@ -23,12 +26,10 @@ def kernel(request, monkeypatch):
         return request.param
 
     # Small blocks so models of a few trees still span several blocks, one of them partial.
-    work_dir = request.getfixturevalue("compiled_dir")
-
     def load_compiled(*args, **kwargs):
         model = original(*args, **kwargs)
         if model.uses_binned:
-            model.compile(work_dir=str(work_dir), jobs=2, block_trees=3)
+            model.compile(jobs=2, block_trees=3)
         return model
 
     monkeypatch.setattr(lignum, "load", load_compiled)

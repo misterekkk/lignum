@@ -8,6 +8,39 @@ description: What changed in each lignum version.
 Versions follow [Semantic Versioning](https://semver.org/); before 1.0, minor versions may
 change the API. Install a specific version with `pip install pylignum==<version>`.
 
+## [Unreleased]
+
+### Changed
+
+- **Compiled-library files** (`Model.compile()`): without `library=`, libraries go to a per-user
+  cache (`~/.cache/lignum`, `~/Library/Caches/lignum`, `%LOCALAPPDATA%\lignum\Cache`, or
+  `LIGNUM_CACHE_DIR`) instead of `lignum_compiled` in the temp directory, and the code is built in a
+  temporary folder that is always removed: no `.c`, `.o` or log files are left behind (a failed
+  build keeps only its log, named in the error together with the compiler's last lines).
+  `library=` writes the library exactly there, always compiling it and bypassing the cache.
+- **Breaking:** `compile()` has no `work_dir` any more (set `LIGNUM_CACHE_DIR` to move the cache),
+  and its options after `flags` are keyword-only. In the C API the fourth argument of
+  `LignumModelCompile` is now the cache folder (`NULL`: the per-user cache).
+
+### Added
+
+- `lignum.cache_dir()`, `lignum.clear_cache()` and `Model.compiled_library` (the path of the
+  library in use).
+- `compile(library=folder)` writes `lignum_<model fingerprint>_<platform>.so` (`.dll` on Windows)
+  into the folder, and `load(..., compiled=folder)` picks the file for the model and platform, so one
+  folder can hold the libraries of several models and platforms.
+
+### Fixed
+
+- Processes compiling the same model at once no longer write the same files: each builds in its own
+  folder and the library is moved into place with an atomic rename.
+- The cache key includes the CPU architecture: x86-64 (e.g. under Rosetta) and arm64 processes no
+  longer load each other's libraries. The key is also stable across compilers (FNV-1a instead of
+  `std::hash`), and a cached library that fails to load is rebuilt.
+- Errors when loading a library built for another platform name the platform that is needed.
+
+The old `lignum_compiled` folder in the temp directory is no longer used and can be deleted.
+
 ## [0.3.1] — 2026-10-27
 
 ### Fixed

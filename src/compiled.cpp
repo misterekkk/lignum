@@ -2,13 +2,18 @@
 #include "binned.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -278,6 +283,62 @@ namespace lignum {
         constexpr const char* kLibraryExtension = ".so";
     #endif
 
+    #if defined(_WIN32)
+        #define LIGNUM_OS "windows"
+    #elif defined(__APPLE__)
+        #define LIGNUM_OS "macos"
+    #elif defined(__linux__)
+        #define LIGNUM_OS "linux"
+    #else
+        #define LIGNUM_OS "unknown"
+    #endif
+    #if defined(__x86_64__) || defined(_M_X64)
+        #define LIGNUM_ARCH "x86_64"
+    #elif defined(__aarch64__) || defined(_M_ARM64)
+        #define LIGNUM_ARCH "arm64"
+    #elif defined(__i386__) || defined(_M_IX86)
+        #define LIGNUM_ARCH "x86"
+    #else
+        #define LIGNUM_ARCH "unknown"
+    #endif
+
+        // Unique per call and process: names of temporary files and folders.
+        std::string unique_suffix() {
+            static std::atomic<uint64_t> counter{0};
+            std::random_device device;
+            const uint64_t v = (uint64_t{device()} << 32 ^ device()) ^ (counter++ * 0x9e3779b97f4a7c15ULL) ^
+                               static_cast<uint64_t>(Clock::now().time_since_epoch().count());
+            char text[24];
+            std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(v));
+            return text;
+        }
+
+        // A private folder for one build, removed when it goes out of scope, whatever happens.
+        struct BuildDir {
+            std::filesystem::path path;
+            BuildDir() : path(std::filesystem::temp_directory_path() / ("lignum-build-" + unique_suffix())) {
+                std::filesystem::create_directories(path);
+            }
+            ~BuildDir() {
+                std::error_code ec;
+                std::filesystem::remove_all(path, ec);
+            }
+            BuildDir(const BuildDir&) = delete;
+            BuildDir& operator=(const BuildDir&) = delete;
+        };
+
+        // Keeps the log of a failed build (its folder is removed) and throws with its path and end.
+        [[noreturn]] void build_failed(const std::string& what, const std::filesystem::path& log) {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            const fs::path kept = log.parent_path().parent_path() / (log.parent_path().filename().string() + ".log");
+            fs::copy_file(log, kept, fs::copy_options::overwrite_existing, ec);
+            std::ifstream in(log, std::ios::binary);
+            std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            if (text.size() > 2000) text = "..." + text.substr(text.size() - 2000);
+            throw std::runtime_error(what + (ec ? std::string() : " (log: " + kept.string() + ")") + (text.empty() ? "" : ":\n" + text));
+        }
+
         // The C compiler and how to drive it.
         struct Toolchain {
             std::string compiler;
@@ -346,18 +407,16 @@ namespace lignum {
                                      "or load a library compiled elsewhere.");
         }
 
-        // Compiles the sources (in parallel) and links them into `library`.
+        // Compiles the sources (in parallel) and links them into `library`, all inside `dir`.
         void build(const Toolchain& t, const std::string& flags, const std::vector<std::filesystem::path>& c_files,
-                   const std::filesystem::path& dir, const std::string& tag, const std::filesystem::path& library) {
+                   const std::filesystem::path& dir, const std::filesystem::path& library) {
+            const std::filesystem::path log = dir / "build.log";
             if (t.msvc) {
                 // One command: /MP compiles the files in parallel, /LD links the DLL.
                 std::string command = t.prefix + t.compiler + " /nologo " + (flags.empty() ? "/O2" : flags) + " /LD /MP /Fo" +
                                       quote(dir.string() + "\\\\") + " /Fe" + quote(library.string());  // "dir\\": a lone \ would escape the quote
                 for (const auto& c : c_files) command += " " + quote(c.string());
-                command += " > " + quote((dir / ("lignum_" + tag + "_build.log")).string()) + " 2>&1";
-                if (run(command) != 0) {
-                    throw std::runtime_error("Compiling the generated code failed; see " + (dir / ("lignum_" + tag + "_build.log")).string());
-                }
+                if (run(command + " > " + quote(log.string()) + " 2>&1") != 0) build_failed("Compiling the generated code failed", log);
                 return;
             }
         #if defined(_WIN32)
@@ -371,16 +430,22 @@ namespace lignum {
             for (size_t p = 0; p < c_files.size(); p++) {
                 objects[p] = (dir / (c_files[p].stem().string() + ".o")).string();
                 const std::string command = t.prefix + t.compiler + " " + (flags.empty() ? "-O2" : flags) + pic + " -c " +
-                                            quote(c_files[p].string()) + " -o " + quote(objects[p]);
+                                            quote(c_files[p].string()) + " -o " + quote(objects[p]) + " > " +
+                                            quote(objects[p] + ".log") + " 2>&1";
                 workers.emplace_back([&status, p, command] { status[p] = run(command); });
             }
             for (auto& w : workers) w.join();
-            for (int s : status) {
-                if (s != 0) throw std::runtime_error("Compiling the generated code failed (see compiler output).");
+            if (std::any_of(status.begin(), status.end(), [](int s) { return s != 0; })) {
+                std::ofstream out(log, std::ios::binary);
+                for (size_t p = 0; p < c_files.size(); p++) {
+                    if (status[p] != 0) out << std::ifstream(objects[p] + ".log", std::ios::binary).rdbuf();
+                }
+                out.close();
+                build_failed("Compiling the generated code failed", log);
             }
             std::string link = t.prefix + t.compiler + " -shared -o " + quote(library.string());
             for (const auto& o : objects) link += " " + quote(o);
-            if (run(link) != 0) throw std::runtime_error("Linking the generated code failed.");
+            if (run(link + " > " + quote(log.string()) + " 2>&1") != 0) build_failed("Linking the generated code failed", log);
         }
 
         // Version of the generated functions' interface and semantics; bump on any change to the
@@ -407,6 +472,29 @@ namespace lignum {
                 uint64_t h_ = 0xcbf29ce484222325ULL;
         };
 
+        std::string hex16(uint64_t v) {
+            char text[24];
+            std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(v));
+            return text;
+        }
+
+        // Moves a built library to `target`: a copy under a unique name in the target's folder,
+        // then an atomic rename, so no process sees a half-written file. Returns false when the
+        // rename failed but `target` exists: another process installed it first (Windows keeps a
+        // loaded library locked).
+        bool install(const std::filesystem::path& built, const std::filesystem::path& target) {
+            namespace fs = std::filesystem;
+            const fs::path tmp = target.string() + ".tmp-" + unique_suffix();
+            fs::copy_file(built, tmp);
+            std::error_code ec;
+            fs::rename(tmp, target, ec);
+            if (!ec) return true;
+            std::error_code ignored;
+            fs::remove(tmp, ignored);
+            if (fs::exists(target, ignored)) return false;
+            throw std::runtime_error("Cannot write " + target.string() + ": " + ec.message());
+        }
+
         std::string hex(uint64_t v) {
             char text[32];
             std::snprintf(text, sizeof(text), "0x%016llxULL", static_cast<unsigned long long>(v));
@@ -419,10 +507,13 @@ namespace lignum {
             std::wstring name = std::filesystem::path(library).wstring();
             if (!std::filesystem::path(library).has_extension()) name += L".";
             void* handle = static_cast<void*>(LoadLibraryW(name.c_str()));
-            if (!handle) throw std::runtime_error("LoadLibrary failed for " + library + " (error " + std::to_string(GetLastError()) + ")");
+            if (!handle) {
+                throw std::runtime_error("LoadLibrary failed for " + library + " (error " + std::to_string(GetLastError()) +
+                                         "); is it a library for " + compiled_platform() + "?");
+            }
         #else
             void* handle = dlopen(library.c_str(), RTLD_NOW | RTLD_LOCAL);
-            if (!handle) throw std::runtime_error(std::string("dlopen failed: ") + dlerror());
+            if (!handle) throw std::runtime_error(std::string("dlopen failed: ") + dlerror() + "; is it a library for " + compiled_platform() + "?");
         #endif
             return handle;
         }
@@ -505,6 +596,14 @@ namespace lignum {
 
     std::shared_ptr<const CompiledForest> load_compiled(const Model& model, const std::string& library) {
         require_compilable(model);
+        if (std::filesystem::is_directory(library)) {
+            const std::string file = (std::filesystem::path(library) / compiled_library_name(model)).string();
+            if (!std::filesystem::exists(file)) {
+                throw std::runtime_error("Compiled library not found: no " + compiled_library_name(model) + " (this model on " +
+                                         compiled_platform() + ") in " + library);
+            }
+            return open_library(model, file);
+        }
         if (!std::filesystem::exists(library)) throw std::runtime_error("Compiled library not found: " + library);
         return open_library(model, library);
     }
@@ -586,52 +685,110 @@ namespace lignum {
         }
         st.codegen_ms = ms_since(t0);
 
-        size_t hash = std::hash<std::string>{}(options.compiler + " " + options.flags + " " + kLibraryExtension);
+        // The cache key: everything the library is built from, and where it runs.
+        Fnv key;
+        key.value(kAbi);
+        for (const std::string* text : {&options.compiler, &options.flags}) key.array(text->data(), text->size());
+        key.array(compiled_platform(), std::strlen(compiled_platform()));
         st.source_bytes = 0;
         for (const auto& s : sources) {
-            hash = hash * 1000003u ^ std::hash<std::string>{}(s);
+            key.array(s.data(), s.size());
             st.source_bytes += s.size();
         }
 
-        // 2. Compile (cached by source hash; the toolchain is only looked up on a miss).
+        // 2. Where the library goes: exactly where asked (always built), or the cache.
         namespace fs = std::filesystem;
-        const fs::path dir = options.work_dir.empty() ? fs::temp_directory_path() / "lignum_compiled" : fs::path(options.work_dir);
-        fs::create_directories(dir);
-        char tag[32];
-        std::snprintf(tag, sizeof(tag), "%016zx", hash);
-        const fs::path library = dir / (std::string("lignum_") + tag + kLibraryExtension);
-        st.library = library.string();
+        const bool requested = !options.library.empty();
+        fs::path target;
+        if (requested) {
+            target = options.library;
+            const char last = options.library.back();
+            if (fs::is_directory(target) || last == '/' || last == '\\') {
+                fs::create_directories(target);
+                target /= compiled_library_name(model);
+            } else if (target.has_parent_path()) {
+                fs::create_directories(target.parent_path());
+            }
+        } else {
+            const fs::path dir = options.cache_dir.empty() ? fs::path(default_cache_dir()) : fs::path(options.cache_dir);
+            fs::create_directories(dir);
+            target = dir / ("lignum_" + hex16(key.get()) + "_" + compiled_platform() + kLibraryExtension);
+        }
+        st.library = target.string();
 
         t0 = Clock::now();
-        st.cached = fs::exists(library);
-        if (!st.cached) {
+        if (!requested && fs::exists(target)) {
+            try {
+                auto compiled = open_library(model, st.library);
+                st.cached = true;
+                st.compile_ms = ms_since(t0);
+                return compiled;
+            } catch (const std::runtime_error&) {
+                std::error_code ec;
+                fs::remove(target, ec);  // damaged or stale: build it again
+            }
+        }
+
+        // 3. Build in a private folder, then move the library into place.
+        {
             const Toolchain toolchain = find_toolchain(options.compiler);
+            const BuildDir dir;
             std::vector<fs::path> c_files(sources.size());
             for (size_t p = 0; p < sources.size(); p++) {
-                c_files[p] = dir / (std::string("lignum_") + tag + "_" + std::to_string(p) + ".c");
+                c_files[p] = dir.path / ("lignum_" + std::to_string(p) + ".c");
                 std::ofstream(c_files[p], std::ios::binary) << sources[p];
             }
-            // Build under a temporary name and rename, so a half-written library is never cached.
-            const fs::path tmp = dir / (std::string("lignum_") + tag + "_tmp" + kLibraryExtension);
-            build(toolchain, options.flags, c_files, dir, tag, tmp);
-            fs::rename(tmp, library);
+            const fs::path built = dir.path / (std::string("lignum") + kLibraryExtension);
+            build(toolchain, options.flags, c_files, dir.path, built);
+            if (!install(built, target) && requested) {
+                throw std::runtime_error("Cannot replace " + st.library + "; is it loaded by a running process?");
+            }
             st.compiler = toolchain.name();
         }
         st.compile_ms = ms_since(t0);
 
-        // 3. Copy next to the model if asked, then load.
-        if (!options.output.empty()) {
-            const fs::path output(options.output);
-            if (output.has_parent_path()) fs::create_directories(output.parent_path());
-            const fs::path tmp = output.string() + ".tmp";
-            fs::copy_file(library, tmp, fs::copy_options::overwrite_existing);
-            fs::rename(tmp, output);
-            st.library = output.string();
-        }
         t0 = Clock::now();
         auto compiled = open_library(model, st.library);
         st.load_ms = ms_since(t0);
         return compiled;
     }
+
+    std::string default_cache_dir() {
+        namespace fs = std::filesystem;
+        const auto env = [](const char* name) {
+            const char* value = std::getenv(name);
+            return value ? std::string(value) : std::string();
+        };
+        if (const std::string dir = env("LIGNUM_CACHE_DIR"); !dir.empty()) return dir;
+    #if defined(_WIN32)
+        if (const std::string base = env("LOCALAPPDATA"); !base.empty()) return (fs::path(base) / "lignum" / "Cache").string();
+    #elif defined(__APPLE__)
+        if (const std::string home = env("HOME"); !home.empty()) return (fs::path(home) / "Library" / "Caches" / "lignum").string();
+    #else
+        if (const std::string base = env("XDG_CACHE_HOME"); fs::path(base).is_absolute()) return (fs::path(base) / "lignum").string();
+        if (const std::string home = env("HOME"); !home.empty()) return (fs::path(home) / ".cache" / "lignum").string();
+    #endif
+        return (fs::temp_directory_path() / "lignum-cache").string();
+    }
+
+    size_t clear_compiled_cache(const std::string& cache_dir) {
+        namespace fs = std::filesystem;
+        const fs::path dir = cache_dir.empty() ? fs::path(default_cache_dir()) : fs::path(cache_dir);
+        std::error_code ec;
+        if (!fs::is_directory(dir, ec)) return 0;
+        std::vector<fs::path> files;
+        for (const auto& entry : fs::directory_iterator(dir, ec)) {
+            if (entry.is_regular_file(ec) && entry.path().filename().string().rfind("lignum_", 0) == 0) files.push_back(entry.path());
+        }
+        size_t removed = 0;
+        for (const auto& f : files) removed += fs::remove(f, ec) ? 1 : 0;
+        return removed;
+    }
+
+    std::string compiled_library_name(const Model& model) {
+        return "lignum_" + hex16(compiled_fingerprint(model)) + "_" + compiled_platform() + kLibraryExtension;
+    }
+
+    const char* compiled_platform() { return LIGNUM_OS "-" LIGNUM_ARCH; }
 
 } // namespace lignum

@@ -140,7 +140,12 @@ row into locals (int16 codes: NaN = -1, so the NaN-left comparison needs no wrap
 by an empty asm; leaf pairs become selects. Categorical decision bits, threads and transforms stay in
 the kernel (`BinnedKernel` receives the compiled forest; `Model::compiled_min_rows` sends small
 batches to the interpreter). Sources are compiled in parallel (gcc/clang, or one `cl /LD /MP`
-command), linked, cached by source hash and loaded with dlopen / LoadLibrary. The library exports
+command) in a private temp folder that is always removed, linked, and moved into place by a copy
+under a unique name plus an atomic rename (concurrent compiles never see a half-written file; on
+Windows a library another process loaded first is reused). Without an explicit `library`, it goes to
+the per-user cache (`default_cache_dir()`) under an FNV-1a key of the sources, compiler, flags, ABI
+and platform (OS + architecture, so Rosetta x86 and arm64 never share a file); a cached file that
+fails to load is rebuilt. It is loaded with dlopen / LoadLibrary. The library exports
 `lignum_abi` and `lignum_fingerprint` (FNV-1a of trees, cuts, leaves, outputs, precision), checked by
 `load_compiled`.
 
