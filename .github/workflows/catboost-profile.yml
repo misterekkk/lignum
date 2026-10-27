@@ -16,6 +16,10 @@ on:
       - '.github/workflows/catboost-profile.yml'
   workflow_dispatch:
 
+# Read-only token: the jobs only check out the code and pass artifacts between themselves.
+permissions:
+  contents: read
+
 jobs:
   profile:
     name: ${{ matrix.os }}
@@ -121,4 +125,7 @@ jobs:
         if: always()
         with:
           name: catboost-profile-windows-latest
-          path: benchmarks/results/*-catboost.md
+          path: |
+            benchmarks/results/*-catboost.md
+            generic.txt
+            default.txt

@@ -12,6 +12,10 @@ on:
         required: false
         default: "--rows 300000 --trees 500 --repeats 5"
 
+# Read-only token: the jobs only check out the code and pass artifacts between themselves.
+permissions:
+  contents: read
+
 jobs:
   bench:
     name: ${{ matrix.os }}

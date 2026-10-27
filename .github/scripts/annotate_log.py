@@ -20,7 +20,15 @@ def main() -> None:
         lines = [f"no log: {e}"]
     picked = [line for line in lines if FAILURE.search(line)][-40:]
     text = "\n".join(picked + ["--- last lines ---"] + lines[-40:])[-4000:]
-    print(f"::error title={title}::" + text.replace("%", "%25").replace("\r", "").replace("\n", "%0A"))
+    print(f"::error title={title}::" + escape(text))
+    # A native crash: faulthandler's report (error, then the stack of every thread) on its own.
+    crash = next((i for i, line in enumerate(lines) if line.startswith("Fatal Python error")), None)
+    if crash is not None:
+        print(f"::error title={title}: crash::" + escape("\n".join(lines[max(0, crash - 3):crash + 60])[:4000]))
+
+
+def escape(text: str) -> str:
+    return text.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
 
 
 if __name__ == "__main__":

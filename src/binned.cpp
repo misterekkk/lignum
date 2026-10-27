@@ -201,11 +201,11 @@ namespace lignum {
 
             std::vector<uint32_t> bit_of(f.cat_slots.size());
             uint32_t row_words = 0;
-            for (uint16_t j = 0; j < slots_of.size(); j++) {
+            for (size_t j = 0; j < slots_of.size(); j++) {  // at most 0xFFFF dense features (see build)
                 const auto& ids = slots_of[j];
                 if (ids.empty()) continue;
                 BinnedCatFeature cf{};
-                cf.dense = j;
+                cf.dense = static_cast<uint32_t>(j);
                 cf.words = static_cast<uint32_t>((ids.size() + 63) / 64);
                 cf.row_offset = row_words;
                 for (uint32_t id : ids) {
