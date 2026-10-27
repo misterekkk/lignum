@@ -2,16 +2,20 @@
 
 import json
 
-import catboost as cb
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
-import polars as pl
-import pyarrow as pa
 import pytest
 import xgboost as xgb
 
 import lignum as lg
+
+cb = pytest.importorskip("catboost")
+pa = pytest.importorskip("pyarrow")
+try:
+    import polars as pl
+except ImportError:  # optional: not in the test extras
+    pl = None
 
 NAMES = ["age", "my income", "zł/mies", "debt"]
 
@@ -75,7 +79,10 @@ def test_reordered_columns_raise_for_every_input(tmp_path, frame, make):
     path, reference = make(tmp_path, X, y)
     model = lg.load(str(path))
     swapped = X[["my income", "age", "zł/mies", "debt"]]
-    for data in (swapped, pa.Table.from_pandas(swapped), pa.RecordBatch.from_pandas(swapped), pl.from_pandas(swapped)):
+    inputs = [swapped, pa.Table.from_pandas(swapped), pa.RecordBatch.from_pandas(swapped)]
+    if pl is not None:
+        inputs.append(pl.from_pandas(swapped))
+    for data in inputs:
         with pytest.raises(ValueError, match="Column 0 is 'my income' but the model expects 'age'"):
             model.predict(data)
     # The fix the message suggests (for pandas), and the same predictions as the library.
