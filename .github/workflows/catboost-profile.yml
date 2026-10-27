@@ -11,6 +11,7 @@ on:
     branches: [main, 'dev/**']
     paths:
       - 'benchmarks/catboost_profile.py'
+      - 'benchmarks/bench_catboost.py'   # run by the Windows job
       - 'src/catboost.cpp'
       - 'src/catboost_kernel*'
       - '.github/workflows/catboost-profile.yml'
