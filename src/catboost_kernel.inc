@@ -73,6 +73,77 @@ namespace lignum::catboost_kernel::LIGNUM_CATBOOST_ISA {
             return static_cast<uint16_t>(std::lower_bound(borders.begin(), borders.end(), x) - borders.begin());
         }
 
+        // NaN test without <cmath>: MSVC's std::isnan is a shared template, and the /arch:AVX2
+        // object's copy could be picked for every caller (tests/cpp/check_kernel_isa.py).
+        inline bool is_nan(float x) { return x != x; }
+
+    #if LIGNUM_CATBOOST_X86
+        // Byte leaf indices from byte buckets with intrinsics (kIndexSimd), levels from the deepest
+        // up: v = 2 v + bit. Plain: bit = bucket >= lo, else (uint8_t)(bucket - lo) <= range.
+        // SSE2 / AVX2 have no unsigned byte >=, so x >= t is max(x, t) == x (x <= range is
+        // min(x, range) == x), and a true compare's 0xff is -1: v = 2 v - mask. The AVX2 build
+        // takes 32 rows at a time, then 16, then the rest one by one.
+        template <int Depth, bool Plain>
+        void index_x86(const uint8_t* const* b, const uint8_t* lo, const uint8_t* range, size_t rows, uint8_t* index) {
+            size_t r = 0;
+        #if defined(LIGNUM_CATBOOST_ISA_AVX2)
+            {
+                __m256i t[Depth], m[Depth];
+                for (int d = 0; d < Depth; d++) {
+                    t[d] = _mm256_set1_epi8(static_cast<char>(lo[d]));
+                    m[d] = _mm256_set1_epi8(static_cast<char>(Plain ? 0 : range[d]));
+                }
+                for (; r + 32 <= rows; r += 32) {
+                    __m256i v = _mm256_setzero_si256();
+                    for (int d = Depth - 1; d >= 0; d--) {
+                        __m256i x = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b[d] + r));
+                        __m256i bit;
+                        if constexpr (Plain) {
+                            bit = _mm256_cmpeq_epi8(_mm256_max_epu8(x, t[d]), x);
+                        } else {
+                            x = _mm256_sub_epi8(x, t[d]);
+                            bit = _mm256_cmpeq_epi8(_mm256_min_epu8(x, m[d]), x);
+                        }
+                        v = _mm256_sub_epi8(_mm256_add_epi8(v, v), bit);
+                    }
+                    _mm256_storeu_si256(reinterpret_cast<__m256i*>(index + r), v);
+                }
+            }
+        #endif
+            __m128i t[Depth], m[Depth];
+            for (int d = 0; d < Depth; d++) {
+                t[d] = _mm_set1_epi8(static_cast<char>(lo[d]));
+                m[d] = _mm_set1_epi8(static_cast<char>(Plain ? 0 : range[d]));
+            }
+            for (; r + 16 <= rows; r += 16) {
+                __m128i v = _mm_setzero_si128();
+                for (int d = Depth - 1; d >= 0; d--) {
+                    __m128i x = _mm_loadu_si128(reinterpret_cast<const __m128i*>(b[d] + r));
+                    __m128i bit;
+                    if constexpr (Plain) {
+                        bit = _mm_cmpeq_epi8(_mm_max_epu8(x, t[d]), x);
+                    } else {
+                        x = _mm_sub_epi8(x, t[d]);
+                        bit = _mm_cmpeq_epi8(_mm_min_epu8(x, m[d]), x);
+                    }
+                    v = _mm_sub_epi8(_mm_add_epi8(v, v), bit);
+                }
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(index + r), v);
+            }
+            for (; r < rows; r++) {
+                uint8_t v = 0;
+                for (int d = Depth - 1; d >= 0; d--) {
+                    const bool bit = Plain ? b[d][r] >= lo[d] : static_cast<uint8_t>(b[d][r] - lo[d]) <= range[d];
+                    v = static_cast<uint8_t>(v + v + bit);
+                }
+                index[r] = v;
+            }
+        }
+    #else
+        template <int Depth, bool Plain>  // declared for the discarded branches below; never used
+        void index_x86(const uint8_t* const* b, const uint8_t* lo, const uint8_t* range, size_t rows, uint8_t* index);
+    #endif
+
         // Leaf indices (16 bits: depth <= 16) of one tree for a block of rows, from buckets of type B
         // (uint16_t, or uint8_t when every source fits). With the depth known at compile time, all
         // levels are done in one pass over the rows with the index in a register. Both split kinds
@@ -90,10 +161,14 @@ namespace lignum::catboost_kernel::LIGNUM_CATBOOST_ISA {
                 lo[d] = static_cast<B>(threshold[d]);
                 range[d] = equal[d] ? B{0} : static_cast<B>(static_cast<B>(~B{0}) - threshold[d]);
             }
-            for (size_t r = 0; r < rows; r++) {
-                I v = 0;
-                for (int d = 0; d < Depth; d++) v |= static_cast<I>((static_cast<B>(b[d][r] - lo[d]) <= range[d]) << d);
-                index[r] = v;
+            if constexpr (kIndexSimd && sizeof(B) == 1 && sizeof(I) == 1) {
+                index_x86<Depth, false>(b, lo, range, rows, index);
+            } else {
+                for (size_t r = 0; r < rows; r++) {
+                    I v = 0;
+                    for (int d = 0; d < Depth; d++) v |= static_cast<I>((static_cast<B>(b[d][r] - lo[d]) <= range[d]) << d);
+                    index[r] = v;
+                }
             }
         }
 
@@ -124,10 +199,14 @@ namespace lignum::catboost_kernel::LIGNUM_CATBOOST_ISA {
                 b[d] = buckets + source[d] * stride;
                 lo[d] = static_cast<B>(threshold[d]);
             }
-            for (size_t r = 0; r < rows; r++) {
-                I v = 0;
-                for (int d = Depth - 1; d >= 0; d--) v = static_cast<I>(v + v + (b[d][r] >= lo[d]));
-                index[r] = v;
+            if constexpr (kIndexSimd && sizeof(B) == 1 && sizeof(I) == 1) {
+                index_x86<Depth, true>(b, lo, nullptr, rows, index);
+            } else {
+                for (size_t r = 0; r < rows; r++) {
+                    I v = 0;
+                    for (int d = Depth - 1; d >= 0; d--) v = static_cast<I>(v + v + (b[d][r] >= lo[d]));
+                    index[r] = v;
+                }
             }
         }
 
@@ -266,7 +345,7 @@ namespace lignum::catboost_kernel::LIGNUM_CATBOOST_ISA {
             if (mode == 0) {
                 for (size_t r = 0; r < rows; r++) {
                     const float x = static_cast<float>(X[r * n_features + ff.column]);
-                    b[r] = std::isnan(x) ? nan_bucket : static_cast<B>(bucket_search(ff.search, x));
+                    b[r] = is_nan(x) ? nan_bucket : static_cast<B>(bucket_search(ff.search, x));
                 }
                 return;
             }
@@ -291,7 +370,7 @@ namespace lignum::catboost_kernel::LIGNUM_CATBOOST_ISA {
                 }
             }
             if (ff.nan_as_true) {
-                for (size_t r = 0; r < rows; r++) b[r] = std::isnan(x[r]) ? nan_bucket : b[r];
+                for (size_t r = 0; r < rows; r++) b[r] = is_nan(x[r]) ? nan_bucket : b[r];
             }
         }
 

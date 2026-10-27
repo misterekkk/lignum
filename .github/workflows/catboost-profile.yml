@@ -95,8 +95,11 @@ jobs:
         run: |
           set -o pipefail
           args="--no-capi --datasets california,adult,covtype --rows 200000 --repeats 5 --latency-budget 0.3"
-          LIGNUM_ISA=generic python benchmarks/bench_catboost.py $args --label "MSVC, generic kernel" 2>&1 | tee generic.txt
-          python benchmarks/bench_catboost.py $args --label "MSVC, default kernel (AVX2 where the CPU has it)" 2>&1 | tee default.txt
+          # -X faulthandler: a crash prints the Python stack (60c5381 ended with exit code 139).
+          status=0
+          LIGNUM_ISA=generic python -X faulthandler benchmarks/bench_catboost.py $args --label "MSVC, generic kernel" 2>&1 | tee generic.txt || status=1
+          python -X faulthandler benchmarks/bench_catboost.py $args --label "MSVC, default kernel (AVX2 where the CPU has it)" 2>&1 | tee default.txt || status=1
+          exit $status
 
       - name: Failures as an annotation
         if: failure()

@@ -7,7 +7,8 @@ Usage: python annotate_log.py <title> <log file>
 import re
 import sys
 
-FAILURE = re.compile(r"fail|error|mismatch|differ|traceback|exception|assert|outside the AVX2 kernel|Expected|Which is|Actual",
+FAILURE = re.compile(r"fail|error|mismatch|differ|traceback|exception|assert|outside the AVX2 kernel|Expected|Which is|Actual|"
+                     r"Fatal Python|File \"|Current thread|Thread 0x",
                      re.IGNORECASE)
 
 
