@@ -77,15 +77,19 @@ LIGNUM_API unsigned int LignumCatBoostHash(const char* category, size_t size);
 /* Experimental compiled mode: compiles the trees to native code with the system C compiler
  * (see Model.compile in the Python docs). Predictions stay bit-identical.
  * compiler: NULL or "auto" (cc on POSIX; cl, Visual Studio, gcc, clang on Windows);
- * flags: NULL or "" for -O2 / /O2; work_dir: NULL for the system temp directory (cache);
- * library: NULL, or a path to also write the library to (to ship it next to the model).
+ * flags: NULL or "" for -O2 / /O2;
+ * cache_dir: NULL for the per-user cache (LIGNUM_CACHE_DIR, %LOCALAPPDATA%\lignum\Cache,
+ * ~/Library/Caches/lignum or ~/.cache/lignum); compiling the same model again loads the cached library;
+ * library: NULL, or where to write the library instead (always built; to ship it next to the model):
+ * a file, or a folder (existing, or ending in a separator) that gets lignum_<fingerprint>_<platform>.so/.dll.
  * Needs a model loaded with the binned kernel (the default).
  * Compile, LoadCompiled and Decompile change the handle: call them before sharing it between
  * threads, not concurrently with LignumModelPredict. */
 LIGNUM_API int LignumModelCompile(LignumModelHandle handle, const char* compiler, const char* flags,
-                                  const char* work_dir, const char* library);
+                                  const char* cache_dir, const char* library);
 
-/* Attaches a library written by LignumModelCompile for this model, without a compiler. Fails for a
+/* Attaches a library written by LignumModelCompile for this model, without a compiler: a file, or
+ * a folder written with LignumModelCompile(..., library = folder). Fails for a
  * library of another model or lignum version. Loading runs the library's code: only load
  * libraries you trust. */
 LIGNUM_API int LignumModelLoadCompiled(LignumModelHandle handle, const char* library);

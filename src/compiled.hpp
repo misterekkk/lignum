@@ -29,8 +29,10 @@ namespace lignum {
     struct CompileOptions {
         std::string compiler = "auto";  // auto: cc on POSIX; on Windows cl, Visual Studio (vswhere), gcc, clang
         std::string flags;              // empty: -O2 (gcc/clang) or /O2 (cl)
-        std::string work_dir;  // empty: system temp directory
-        std::string output;    // also copy the library here (to ship it next to the model file)
+        std::string cache_dir;  // empty: default_cache_dir()
+        // Write the library exactly here, always building it, instead of using the cache: a file,
+        // or a folder (an existing one, or a path ending in a separator) for compiled_library_name().
+        std::string library;
         int jobs = 0;          // translation units compiled in parallel; 0 = hardware threads
         int block_trees = 16;  // trees per block function (larger blocks compile slower, run about the same)
     };
@@ -44,14 +46,33 @@ namespace lignum {
     };
 
     // Requires the binned kernel (Model::binned). Throws std::runtime_error when the compiler is
-    // missing or fails.
+    // missing or fails. The code is built in a private temporary folder that is always removed
+    // (a failed build keeps only its log, named in the error); the library is moved into place
+    // with an atomic rename, so concurrent compiles of one model never see a half-written file.
     std::shared_ptr<const CompiledForest> compile_forest(const Model& model, const CompileOptions& options, CompileStats* stats);
 
-    // Attaches a library built earlier by compile_forest (e.g. shipped next to the model file).
-    // The library records the fingerprint of the model it was generated from and the ABI of the
-    // generated functions; a library for another model or lignum version is rejected with
-    // std::runtime_error. Loading runs the library's code: only load libraries you trust.
+    // Attaches a library built earlier by compile_forest (e.g. shipped next to the model file):
+    // a file, or a folder holding compiled_library_name(model). The library records the
+    // fingerprint of the model it was generated from and the ABI of the generated functions; a
+    // library for another model or lignum version is rejected with std::runtime_error. Loading
+    // runs the library's code: only load libraries you trust.
     std::shared_ptr<const CompiledForest> load_compiled(const Model& model, const std::string& library);
+
+    // Per-user cache of compiled libraries: LIGNUM_CACHE_DIR if set, otherwise
+    // %LOCALAPPDATA%\lignum\Cache (Windows), ~/Library/Caches/lignum (macOS) or
+    // $XDG_CACHE_HOME/lignum, ~/.cache/lignum (Linux).
+    std::string default_cache_dir();
+
+    // Removes the compiled libraries in `cache_dir` (empty: default_cache_dir()) and returns how
+    // many; libraries a process has loaded on Windows cannot be removed and stay.
+    size_t clear_compiled_cache(const std::string& cache_dir);
+
+    // File name of the model's library in a folder: lignum_<fingerprint>_<platform><extension>,
+    // e.g. lignum_0123456789abcdef_linux-x86_64.so.
+    std::string compiled_library_name(const Model& model);
+
+    // Operating system and CPU architecture of this build, e.g. "linux-x86_64", "macos-arm64".
+    const char* compiled_platform();
 
     // Stable 64-bit hash of everything the generated code depends on (trees, cuts, leaves,
     // outputs, numeric precision) and of the generator's ABI.

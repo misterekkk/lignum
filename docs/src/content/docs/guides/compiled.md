@@ -14,8 +14,32 @@ stats = model.compile()      # a few seconds for 500 trees
 preds = model.predict(X)     # now uses the compiled trees
 ```
 
-Compiled libraries are cached by content (in the temp directory, or `work_dir`), so compiling the
-same model again is instant.
+## Where the library goes
+
+Without `library=`, the library is kept in a per-user cache, so compiling the same model again (with
+the same compiler and flags) only loads it. The code is built in a temporary folder that is always
+removed; a failed build keeps only its log, whose path and last lines are in the error. Nothing else
+is left behind.
+
+```python
+stats = model.compile()
+stats["library"]                 # where it is, e.g. ~/.cache/lignum/lignum_3f..._linux-x86_64.so
+model.compiled_library           # the same, while the model uses it
+lignum.cache_dir()               # the cache folder
+lignum.clear_cache()             # remove the cached libraries; returns how many
+```
+
+| Platform | Cache folder |
+|---|---|
+| Linux | `$XDG_CACHE_HOME/lignum`, or `~/.cache/lignum` |
+| macOS | `~/Library/Caches/lignum` |
+| Windows | `%LOCALAPPDATA%\lignum\Cache` |
+| any | `LIGNUM_CACHE_DIR`, when set |
+
+Libraries are keyed by the generated code, the compiler, the flags and the platform, so x86-64 and
+arm64 builds (e.g. under Rosetta) never mix. Processes that compile the same model at once (e.g.
+several workers starting together) are safe: each builds in its own folder and the library is moved
+into place atomically.
 
 ## Ship the library, not the compiler
 
@@ -29,6 +53,17 @@ model.compile(library="model.so")
 
 # production: attaching the library takes about 2 ms
 model = lignum.load("model.bin", compiled="model.so")
+```
+
+`library=` writes the library exactly there and always compiles it; the cache is not used. It can
+also be a folder (an existing one, or a path ending in `/`): the file is then named after the model
+and the platform, `lignum_<fingerprint>_<platform>.so` (`.dll` on Windows), so one folder can hold the
+libraries of several models, built on Linux, macOS and Windows. `load(..., compiled=folder)` picks
+the file for this model and platform:
+
+```python
+model.compile(library="libs/")                     # on each platform you deploy to
+model = lignum.load("model.bin", compiled="libs/")
 ```
 
 The library records the fingerprint of the model it was compiled from and the version of lignum's
@@ -74,13 +109,14 @@ change any prediction. `model.decompile()` returns to the interpreter.
 
 ## Options
 
+All options after `flags` are keyword-only.
+
 | Option | Default | Meaning |
 |---|---|---|
 | `compiler` | `"auto"` | C compiler (see above) |
 | `flags` | `""` | optimisation flags; empty means `-O2` or `/O2` |
-| `work_dir` | temp dir | cache of compiled libraries |
 | `jobs` | all cores | source files compiled in parallel |
 | `block_trees` | 16 | trees per generated function; larger blocks compile slower and run about the same |
-| `library` | none | also write the library to this path |
+| `library` | none | write the library here (a file or a folder) instead of the cache |
 | `fallback` | `False` | keep the interpreter when compiling fails |
 | `autotune` | none | sample to run `autotune` on after compiling |

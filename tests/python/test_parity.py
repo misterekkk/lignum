@@ -281,7 +281,7 @@ def test_compiled_mode_is_bit_identical(tmp_path, data, fmt, kernel):
         booster.save_model(str(path))
         model = lg.load(str(path), format="xgboost")
         reference = lambda X: booster.predict(xgb.DMatrix(X))
-    model.compile(work_dir=str(tmp_path / "compiled"), jobs=2)
+    model.compile(jobs=2)
     assert model.uses_compiled
     X = stress_inputs(data["X_nan"], [], data["rng"])
     np.testing.assert_array_equal(model.predict(X), reference(X))

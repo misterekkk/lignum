@@ -19,8 +19,26 @@ import numpy as np
 
 from . import _core
 
-__all__ = ["Model", "load", "catboost_hash"]
+__all__ = ["Model", "load", "catboost_hash", "cache_dir", "clear_cache"]
 __version__ = "0.3.1"
+
+
+def cache_dir() -> str:
+    """
+    Folder where `Model.compile()` keeps compiled libraries: `LIGNUM_CACHE_DIR` if set, otherwise
+    `~/.cache/lignum` (Linux, or `$XDG_CACHE_HOME/lignum`), `~/Library/Caches/lignum` (macOS) or
+    `%LOCALAPPDATA%\\lignum\\Cache` (Windows).
+    """
+    return _core.cache_dir()
+
+
+def clear_cache() -> int:
+    """
+    Remove the compiled libraries from `cache_dir()` and return how many were removed. Models that
+    already use one keep working; on Windows a library loaded by a running process stays.
+    Libraries written with `compile(library=...)` are not in the cache and are not touched.
+    """
+    return _core.clear_cache()
 
 
 def _is_pandas(X) -> bool:
@@ -203,8 +221,8 @@ class Model:
         """Number of model outputs: the number of classes for multiclass models, otherwise 1."""
         return self._c_model.n_outputs
 
-    def compile(self, compiler: str = "auto", flags: str = "", work_dir: str = "", jobs: int = 0,
-                block_trees: int = 16, library: str | os.PathLike | None = None, fallback: bool = False,
+    def compile(self, compiler: str = "auto", flags: str = "", *, library: str | os.PathLike | None = None,
+                jobs: int = 0, block_trees: int = 16, fallback: bool = False,
                 autotune: np.ndarray | None = None) -> dict:
         """
         Experimental: compile the trees to native code with the system C compiler.
@@ -213,8 +231,12 @@ class Model:
         tables. Trees are grouped in blocks of `block_trees`, and a block is walked for a whole
         chunk of rows before the next one; binning of categorical features, threads and
         transforms stay in lignum and every row sums its trees in model order, so predictions
-        are unchanged (bit-identical). Libraries are cached by content in `work_dir` (default:
-        a `lignum_compiled` folder in the temp directory).
+        are unchanged (bit-identical).
+
+        Without `library`, the library is kept in a per-user cache (`lignum.cache_dir()`) and
+        compiling the same model again only loads it; `lignum.clear_cache()` empties the cache.
+        The code is built in a temporary folder that is always removed. Where the library is:
+        `model.compiled_library`, and `library` in the returned dict.
 
         Parameters
         ----------
@@ -226,8 +248,15 @@ class Model:
         flags : str, default=''
             Optimisation flags; empty means `-O2` (gcc, clang) or `/O2` (MSVC).
         library : path, optional
-            Also write the compiled library here, e.g. next to the `.bin` model, so production
-            can attach it with `lignum.load(model_path, compiled=library)` without a compiler.
+            Write the library here instead of the cache, e.g. next to the `.bin` model, so
+            production can attach it with `lignum.load(model_path, compiled=library)` without a
+            compiler. A file path, or a folder (an existing one, or a path ending in `/`) that
+            gets `lignum_<model fingerprint>_<platform>.so` (`.dll` on Windows); one folder can
+            hold the libraries of several models and platforms. Always compiled anew.
+        jobs : int, default=0
+            Source files compiled in parallel; 0 means one per CPU core.
+        block_trees : int, default=16
+            Trees per generated function; larger blocks compile slower and run about the same.
         fallback : bool, default=False
             When the compiler is missing or fails, warn and keep the interpreter instead of
             raising. The returned dict then has `compiled=False` and the `error`.
@@ -252,7 +281,7 @@ class Model:
         ```
         """
         try:
-            stats = dict(self._c_model.compile(compiler, flags, str(work_dir), jobs, block_trees,
+            stats = dict(self._c_model.compile(compiler, flags, jobs, block_trees,
                                                "" if library is None else os.fspath(library)))
         except RuntimeError as error:
             if not fallback:
@@ -338,7 +367,8 @@ class Model:
 
     def load_compiled(self, library: str | os.PathLike) -> None:
         """
-        Attach a library built earlier by `compile(library=...)` for this model.
+        Attach a library built earlier by `compile(library=...)` for this model: the file, or
+        the folder it was written to (the file for this model and platform is picked).
 
         The library records which model it was generated from and the lignum ABI; a library
         for another model or lignum version raises `RuntimeError`. Loading runs the library's
@@ -354,6 +384,12 @@ class Model:
     def uses_compiled(self) -> bool:
         """Whether predictions use compiled trees."""
         return self._c_model.uses_compiled
+
+    @property
+    def compiled_library(self) -> str | None:
+        """Path of the compiled library the model uses (in the cache, or where it was written or
+        loaded from), or None when it uses the interpreter."""
+        return self._c_model.compiled_library
 
     @property
     def uses_binned(self) -> bool:
@@ -410,8 +446,9 @@ def load(filepath: str, format: str = "auto", binned: bool = True,
         categorical decisions are precomputed, so the tree walk compares small integers. Results are identical either way; False keeps
         only the direct traversal (lower memory use).
     compiled : path, optional
-        Library written by `Model.compile(library=...)` for this model; predictions then use
-        the compiled trees without compiling again. Needs `binned=True`. A library for another
+        Library written by `Model.compile(library=...)` for this model, or the folder it was
+        written to (the file for this model and platform is picked); predictions then use the
+        compiled trees without compiling again. Needs `binned=True`. A library for another
         model or lignum version raises `RuntimeError`. Only load libraries you trust.
 
     Returns

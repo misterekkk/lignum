@@ -6,6 +6,7 @@
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/map.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/vector.h>
 
 #include <algorithm>
@@ -148,14 +149,13 @@ NB_MODULE(_core, m) {
             return columns;
         }, "Input columns that hold categories (CatBoost models), in increasing order.")
         .def_prop_ro("is_catboost", [](const Model& self) { return self.oblivious != nullptr; })
-        .def("compile", [](Model& self, const std::string& compiler, const std::string& flags, const std::string& work_dir, int jobs, int block_trees, const std::string& output) {
+        .def("compile", [](Model& self, const std::string& compiler, const std::string& flags, int jobs, int block_trees, const std::string& library) {
             CompileOptions options;
             options.compiler = compiler;
             options.flags = flags;
-            options.work_dir = work_dir;
             options.jobs = jobs;
             options.block_trees = block_trees;
-            options.output = output;
+            options.library = library;
             CompileStats stats;
             {
                 nb::gil_scoped_release release;
@@ -170,7 +170,7 @@ NB_MODULE(_core, m) {
             result["library"] = stats.library;
             result["compiler"] = stats.compiler;
             return result;
-        }, nb::arg("compiler") = "auto", nb::arg("flags") = "", nb::arg("work_dir") = "", nb::arg("jobs") = 0, nb::arg("block_trees") = 16, nb::arg("output") = "",
+        }, nb::arg("compiler") = "auto", nb::arg("flags") = "", nb::arg("jobs") = 0, nb::arg("block_trees") = 16, nb::arg("library") = "",
            "Experimental: compiles the trees to native code with the system compiler.")
         .def("load_compiled", [](Model& self, const std::string& library) {
             std::shared_ptr<const CompiledForest> compiled;
@@ -182,6 +182,10 @@ NB_MODULE(_core, m) {
         }, nb::arg("library"), "Attaches a library built earlier by compile() for this model.")
         .def("decompile", [](Model& self) { self.compiled = nullptr; }, "Drops the compiled trees.")
         .def_prop_ro("uses_compiled", [](const Model& self) { return self.compiled != nullptr; })
+        .def_prop_ro("compiled_library", [](const Model& self) -> std::optional<std::string> {
+            if (!self.compiled) return std::nullopt;
+            return self.compiled->library;
+        }, "Path of the compiled library in use, or None.")
         .def_prop_rw("compiled_min_rows", [](const Model& self) { return self.compiled_min_rows; },
                      [](Model& self, size_t rows) { self.compiled_min_rows = rows; },
                      "Batches with fewer rows use the interpreter even when compiled.")
@@ -191,6 +195,8 @@ NB_MODULE(_core, m) {
                      "Whether batches use the binned kernel (False when disabled or unsupported by the model).")
         .def_prop_ro("n_features", [](const Model& self) { return self.n_features; }, "Minimum number of input columns.");
     
+    m.def("cache_dir", &default_cache_dir, "Folder of the per-user cache of compiled libraries.");
+    m.def("clear_cache", [] { return clear_compiled_cache(""); }, "Removes the cached compiled libraries; returns how many.");
     m.def("catboost_hash", [](nb::handle value) { return hash_category(value.ptr()); }, nb::arg("category"),
           "CatBoost's hash of a category (str, or int hashed as its decimal text).");
     m.def("_catboost_hashes", [](nb::handle values) {

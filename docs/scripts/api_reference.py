@@ -56,12 +56,12 @@ def main() -> None:
         "",
         f"Generated from the docstrings of lignum {lignum.__version__} by `docs/scripts/api_reference.py`.",
         "",
-        "## `lignum.load`",
-        "",
-        signature("lignum.load", lignum.load),
-        "",
-        docstring(lignum.load),
-        "",
+    ]
+    for name in lignum.__all__:
+        if name != "Model":
+            function = getattr(lignum, name)
+            parts += [f"## `lignum.{name}`", "", signature(f"lignum.{name}", function), "", docstring(function), ""]
+    parts += [
         "## `lignum.Model`",
         "",
         docstring(lignum.Model),

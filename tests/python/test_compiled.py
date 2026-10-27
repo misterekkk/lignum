@@ -1,6 +1,7 @@
 """Compiled mode as shipped to production: library next to the model, checks, fallback."""
 
 import json
+import os
 import sys
 import warnings
 
@@ -53,14 +54,14 @@ def test_shipped_library_is_bit_identical(tmp_path, data, make):
     source, fmt, reference = make(tmp_path, X, y)
     build = lg.load(str(source), format=fmt)
     build.save(str(tmp_path / "model.bin"))
-    stats = build.compile(work_dir=str(tmp_path / "cache"), library=tmp_path / "model.so", block_trees=5)
+    stats = build.compile(library=tmp_path / "model.so", block_trees=5)
     assert stats["compiled"] and stats["library"] == str(tmp_path / "model.so")
+    assert build.compiled_library == str(tmp_path / "model.so")
 
-    # Production: the cache is gone, only the model and its library are shipped.
-    for f in (tmp_path / "cache").iterdir():
-        f.unlink()
+    # Production: only the model and its library are shipped.
+    lg.clear_cache()
     model = lg.load(str(tmp_path / "model.bin"), compiled=tmp_path / "model.so")
-    assert model.uses_compiled
+    assert model.uses_compiled and model.compiled_library == str(tmp_path / "model.so")
     np.testing.assert_array_equal(model.predict(X), reference(X))
     np.testing.assert_array_equal(model.predict(X[:1]), reference(X[:1]))
     np.testing.assert_array_equal(model.predict(X, n_jobs=1), reference(X))
@@ -70,7 +71,7 @@ def test_rejects_library_of_another_model(tmp_path, data):
     X, y = data
     source, fmt, _ = lightgbm_model(tmp_path, X, y)
     model = lg.load(str(source), format=fmt)
-    model.compile(work_dir=str(tmp_path / "cache"), library=tmp_path / "a.so")
+    model.compile(library=tmp_path / "a.so")
 
     other = lgb.train({"objective": "binary", "verbose": -1}, lgb.Dataset(X, (y > 0).astype(int)), num_boost_round=5)
     other_path = tmp_path / "other.json"
@@ -86,11 +87,11 @@ def test_fallback_keeps_the_interpreter(tmp_path, data):
     source, fmt, reference = lightgbm_model(tmp_path, X, y)
     model = lg.load(str(source), format=fmt)
     with pytest.raises(RuntimeError, match="not found"):
-        model.compile(compiler="lignum-no-such-compiler", work_dir=str(tmp_path / "cache"))
+        model.compile(compiler="lignum-no-such-compiler")
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        stats = model.compile(compiler="lignum-no-such-compiler", work_dir=str(tmp_path / "cache"), fallback=True)
+        stats = model.compile(compiler="lignum-no-such-compiler", fallback=True)
     assert stats["compiled"] is False and "not found" in stats["error"]
     assert any(issubclass(w.category, RuntimeWarning) for w in caught)
     assert not model.uses_compiled
@@ -100,7 +101,7 @@ def test_fallback_keeps_the_interpreter(tmp_path, data):
 def test_compiled_needs_binned_kernel(tmp_path, data):
     X, y = data
     source, fmt, _ = lightgbm_model(tmp_path, X, y)
-    lg.load(str(source), format=fmt).compile(work_dir=str(tmp_path / "cache"), library=tmp_path / "m.so")
+    lg.load(str(source), format=fmt).compile(library=tmp_path / "m.so")
     with pytest.raises(RuntimeError, match="binned"):
         lg.load(str(source), format=fmt, binned=False, compiled=tmp_path / "m.so")
 
@@ -109,7 +110,7 @@ def test_compiled_min_rows_switches_paths_exactly(tmp_path, data):
     X, y = data
     source, fmt, reference = lightgbm_model(tmp_path, X, y)
     model = lg.load(str(source), format=fmt)
-    model.compile(work_dir=str(tmp_path / "cache"), block_trees=4)
+    model.compile(block_trees=4)
     model.compiled_min_rows = 50
     for rows in (1, 7, 49, 50, 51, 1000):
         np.testing.assert_array_equal(model.predict(X[:rows]), reference(X[:rows]))
@@ -122,7 +123,7 @@ def test_autotune_picks_a_threshold_and_stays_exact(tmp_path, data):
     model = lg.load(str(source), format=fmt)
     with pytest.raises(RuntimeError, match="compile"):
         model.autotune(X[:256])
-    stats = model.compile(work_dir=str(tmp_path / "cache"), autotune=X[:1024])
+    stats = model.compile(autotune=X[:1024])
     result = stats["autotune"]
     assert sorted(result["timings"]) == [1, 4, 16, 64, 256, 1024]
     assert all(t > 0 for pair in result["timings"].values() for t in pair)
@@ -130,3 +131,58 @@ def test_autotune_picks_a_threshold_and_stays_exact(tmp_path, data):
     assert result["compiled_min_rows"] == sys.maxsize or result["compiled_min_rows"] in result["timings"]
     for rows in (1, 16, 3000):
         np.testing.assert_array_equal(model.predict(X[:rows]), reference(X[:rows]))
+
+
+def test_cache_in_cache_dir_and_clear_cache(tmp_path, data, monkeypatch):
+    X, y = data
+    source, fmt, reference = lightgbm_model(tmp_path, X, y)
+    cache = tmp_path / "user cache"  # a space in the path
+    monkeypatch.setenv("LIGNUM_CACHE_DIR", str(cache))
+    assert lg.cache_dir() == str(cache)
+
+    model = lg.load(str(source), format=fmt)
+    assert model.compiled_library is None
+    first = model.compile(block_trees=5)
+    assert not first["cached"] and first["compiler"]
+    assert [p.name for p in cache.iterdir()] == [os.path.basename(first["library"])]  # only the library
+    assert model.compiled_library == first["library"]
+
+    again = lg.load(str(source), format=fmt)
+    second = again.compile(block_trees=5)
+    assert second["cached"] and second["library"] == first["library"] and second["compiler"] == ""
+    np.testing.assert_array_equal(again.predict(X), reference(X))
+
+    model.decompile()
+    again.decompile()
+    assert model.compiled_library is None
+    assert lg.clear_cache() == 1
+    assert list(cache.iterdir()) == []
+    assert lg.clear_cache() == 0
+
+
+def test_library_folder_holds_one_file_per_model_and_platform(tmp_path, data):
+    X, y = data
+    folder = tmp_path / "libs"
+    models = []
+    for make in (lightgbm_model, xgboost_model):
+        source, fmt, reference = make(tmp_path, X, y)
+        stats = lg.load(str(source), format=fmt).compile(library=str(folder) + os.sep, block_trees=5)
+        assert os.path.dirname(stats["library"]) == str(folder)
+        models.append((source, fmt, reference, stats["library"]))
+    assert len(list(folder.iterdir())) == 2
+    assert not any(folder.glob("*.c")) and not any(folder.glob("*.log"))
+
+    for source, fmt, reference, library in models:
+        model = lg.load(str(source), format=fmt, compiled=folder)
+        assert model.compiled_library == library
+        np.testing.assert_array_equal(model.predict(X), reference(X))
+
+
+def test_compile_options_are_keywords(tmp_path, data):
+    X, y = data
+    source, fmt, _ = lightgbm_model(tmp_path, X, y)
+    model = lg.load(str(source), format=fmt)
+    with pytest.raises(TypeError):
+        model.compile("auto", "", str(tmp_path))  # the old positional work_dir
+    with pytest.raises(TypeError):
+        model.compile(work_dir=str(tmp_path))

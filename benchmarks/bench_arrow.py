@@ -53,7 +53,7 @@ def engines_for(name, txt, js, tmp):
     out["lignum"] = (lambda t, n, m=model: m.predict(t, n_jobs=n), 0.0)
     compiled = lignum.load(str(js), format="lightgbm")
     t0 = time.perf_counter()
-    compiled.compile(work_dir=str(tmp / "compiled"))
+    compiled.compile(library=tmp / "compiled" / f"{name}_lignum.lib")
     out["lignum-compiled"] = (lambda t, n, m=compiled: m.predict(t, n_jobs=n), time.perf_counter() - t0)
     try:
         import lleaves

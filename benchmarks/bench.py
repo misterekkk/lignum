@@ -278,7 +278,7 @@ def engine_lignum_compiled(w: Workload, tmp: Path) -> Predict:
     import lignum
 
     model = lignum.load(str(w.model_json), format=w.family)
-    model.compile(work_dir=str(tmp / "compiled"))
+    model.compile(library=tmp / "compiled" / f"{w.name}_lignum.lib")
     return lambda X, n: model.predict(X, n_jobs=n)
 
 
