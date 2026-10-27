@@ -1,19 +1,20 @@
 [build-system]
-requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+requires = ["scikit-build-core>=0.11", "nanobind>=2.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
 # Installed as `pylignum`, imported as `lignum` ("lignum" on PyPI belongs to another project).
 name = "pylignum"
 dynamic = ["version"]
-description = "Bit-exact, fast inference for LightGBM and XGBoost models: interpreter, compiled trees, Arrow input"
+description = "Bit-exact, fast inference for LightGBM, XGBoost and CatBoost models: interpreter, compiled trees, Arrow input"
 readme = "python/README.md"
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [
     { name = "Kacper Piotrowski" }
 ]
-keywords = ["lightgbm", "xgboost", "gradient boosting", "inference", "decision trees", "arrow"]
+keywords = ["lightgbm", "xgboost", "catboost", "gradient boosting", "inference", "decision trees", "arrow"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -31,6 +32,7 @@ dependencies = [
 ]
 
 [project.urls]
+Changelog = "https://github.com/misterekkk/lignum/blob/main/CHANGELOG.md"
 Repository = "https://github.com/misterekkk/lignum"
 Documentation = "https://misterekkk.github.io/lignum/"
 Issues = "https://github.com/misterekkk/lignum/issues"

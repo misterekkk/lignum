@@ -1,0 +1,10 @@
+lignum
+Copyright 2026 Kacper Piotrowski
+
+This product includes software developed by Kacper Piotrowski
+(https://github.com/misterekkk/lignum).
+
+Releases up to and including 0.2.0 were published under the MIT License.
+
+This product includes simdjson (https://github.com/simdjson/simdjson), vendored in extern/simdjson,
+used under the Apache License 2.0 (simdjson is licensed under Apache-2.0 OR MIT).
