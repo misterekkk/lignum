@@ -51,7 +51,8 @@ The package is installed as `pylignum` and imported as `lignum`.
   and Tweedie.
 
 Models lignum cannot predict exactly (LightGBM linear trees and random forests, XGBoost
-multi-target models, CatBoost non-symmetric trees and text features) are rejected at load time.
+multi-target models, linear boosters and DART models that dropped trees, CatBoost non-symmetric
+trees and text features) are rejected at load time.
 
 ## Requirements
 

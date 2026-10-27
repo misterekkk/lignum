@@ -227,5 +227,6 @@ their indices.
 
 ## Known limitations
 
-No multi-target / vector-leaf models, no LightGBM linear trees or random forests (rejected at load
-time). CatBoost: no non-symmetric trees and no text or embedding features (see the CatBoost guide).
+No multi-target / vector-leaf models, no XGBoost gblinear or DART with dropped trees, no LightGBM
+linear trees or random forests (rejected at load time). CatBoost: no non-symmetric trees and no text
+or embedding features (see the CatBoost guide).

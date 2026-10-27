@@ -25,7 +25,7 @@ namespace {
         return R"({"learner": {"feature_names": [)" + names + R"(],
             "learner_model_param": {"base_score": "[0E0]", "num_class": "0", "num_target": "1"},
             "objective": {"name": "reg:squarederror"},
-            "gradient_booster": {"model": {"trees": [{
+            "gradient_booster": {"name": "gbtree", "model": {"trees": [{
                 "left_children": [1, -1, -1], "right_children": [2, -1, -1],
                 "split_indices": [1, 0, 0], "split_conditions": [0.5, -1.0, 1.0], "default_left": [0, 0, 0]}]}}}})";
     }

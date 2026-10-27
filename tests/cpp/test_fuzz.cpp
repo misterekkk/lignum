@@ -84,7 +84,7 @@ TEST(Fuzz, XGBoostTreeCyclesAreRejected) {
     const std::string json = R"({"learner": {
         "learner_model_param": {"base_score": "[5E-1]", "num_class": "0", "num_target": "1"},
         "objective": {"name": "reg:squarederror"},
-        "gradient_booster": {"model": {"trees": [{
+        "gradient_booster": {"name": "gbtree", "model": {"trees": [{
             "left_children": [1, 0, -1], "right_children": [2, 2, -1],
             "split_indices": [0, 0, 0], "split_conditions": [0.5, 0.1, 1.0],
             "default_left": [0, 0, 0]}]}}}})";
@@ -122,7 +122,7 @@ namespace {
         out += '{'; key("learner"); out += '{';
         key("learner_model_param"); out += '{'; key("base_score"); str("[5E-1]"); key("num_class"); str("0"); key("num_target"); str("1"); out += '}';
         key("objective"); out += '{'; key("name"); str("reg:squarederror"); out += '}';
-        key("gradient_booster"); out += '{'; key("model"); out += '{'; key("trees"); out += '['; out += '{';
+        key("gradient_booster"); out += '{'; key("name"); str("gbtree"); key("model"); out += '{'; key("trees"); out += '['; out += '{';
         key("left_children"); ints({1, -1, -1}); key("right_children"); ints({2, -1, -1});
         key("split_indices"); ints({0, 0, 0}); key("split_conditions"); floats({0.5f, 0.1f, 1.0f});
         key("default_left"); ints({0, 0, 0});

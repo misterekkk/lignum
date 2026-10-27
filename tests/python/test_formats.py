@@ -136,3 +136,30 @@ def test_unsupported_lightgbm_models_are_rejected(tmp_path, data, params, messag
     for path in (txt, js):
         with pytest.raises(RuntimeError, match=message):
             lg.load(str(path))
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning")  # booster=dart is deprecated in XGBoost 3.x
+def test_dart_without_dropped_trees_matches_both_libraries(tmp_path, data):
+    # LightGBM bakes the DART weights into the saved leaves; XGBoost keeps one weight per tree,
+    # all 1 when DART dropped nothing (rate_drop=0, the default).
+    X, y = data["X"], data["y"]
+    booster = lgb.train({"objective": "regression", "boosting": "dart", "drop_rate": 0.3, "verbose": -1},
+                        lgb.Dataset(X, y), num_boost_round=15)
+    for path in lightgbm_files(booster, tmp_path):
+        assert_same(lg.load(str(path)), lambda d, raw: booster.predict(d, raw_score=raw), X)
+    xb = xgb.train({"objective": "binary:logistic", "booster": "dart"}, xgb.DMatrix(X, y > np.median(y)), num_boost_round=10)
+    for name in ("model.json", "model.ubj"):
+        xb.save_model(str(tmp_path / name))
+        assert_same(lg.load(str(tmp_path / name)), lambda d, raw: xb.predict(xgb.DMatrix(d), output_margin=raw), X)
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning")  # dart and gblinear are deprecated in XGBoost 3.x
+@pytest.mark.parametrize("params, message", [({"booster": "dart", "rate_drop": 0.3, "skip_drop": 0.0}, "DART"),
+                                             ({"booster": "gblinear"}, "gblinear")])
+def test_unsupported_xgboost_boosters_are_rejected(tmp_path, data, params, message):
+    xb = xgb.train({"objective": "binary:logistic", **params}, xgb.DMatrix(data["X"], data["y"] > np.median(data["y"])),
+                   num_boost_round=10)
+    for name in ("model.json", "model.ubj"):
+        xb.save_model(str(tmp_path / name))
+        with pytest.raises(RuntimeError, match=message):
+            lg.load(str(tmp_path / name))
