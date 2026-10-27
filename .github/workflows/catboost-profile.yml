@@ -1,0 +1,124 @@
+name: CatBoost profile
+
+# Work per row of lignum and CatBoost (C API) on CatBoost models, counted by cachegrind on x86-64
+# and aarch64: instructions, memory reads and writes, simulated cache misses and branch
+# mispredictions, lignum's hot source lines, and stack accesses in its kernel (objdump).
+# Every variant of the CatBoost kernel (LIGNUM_CATBOOST_FLOATS, LIGNUM_CATBOOST_U8) is built and
+# measured in the same job, with CatBoost as the reference. Runs when this file or the profiling
+# script change, or by hand.
+on:
+  push:
+    branches: [main, 'dev/**']
+    paths:
+      - 'benchmarks/catboost_profile.py'
+      - 'src/catboost.cpp'
+      - 'src/catboost_kernel*'
+      - '.github/workflows/catboost-profile.yml'
+  workflow_dispatch:
+
+jobs:
+  profile:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lignum, CatBoost, valgrind and perf
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q valgrind
+          sudo apt-get install -y -q linux-tools-common "linux-tools-$(uname -r)" || echo "no perf for this kernel"
+          sudo sysctl -w kernel.perf_event_paranoid=-1 || true
+          python -m pip install --upgrade pip
+          python -m pip install ".[test]" polars
+
+      - name: Cache datasets
+        uses: actions/cache@v4
+        with:
+          path: benchmarks/.cache/datasets
+          key: datasets-v1
+
+      - name: Profile every kernel variant (float buckets search / count / two levels, u16 / u8)
+        run: |
+          set -o pipefail
+          python benchmarks/catboost_profile.py --datasets california,adult,covtype --rows 20000 | tee profile.md
+
+      # The tables as a notice too: annotations can be read without logging in.
+      - name: Tables as an annotation
+        if: always()
+        run: |
+          python - <<'EOF'
+          import os
+          lines = [l.rstrip() for l in open("profile.md") if l.startswith(("CPU", "## ", "| ", "perf stat", "Not run"))
+                   and not l.startswith(("| instructions", "|---", "| engine"))]
+          text = "\n".join(l for l in lines if not l.startswith("## Stack") and not l.startswith("## Assembly"))[:60000]
+          print("::notice title=CatBoost profile ${{ matrix.os }}::" + text.replace("%", "%25").replace("\r", "").replace("\n", "%0A"))
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: catboost-profile-${{ matrix.os }}
+          path: profile.md
+
+  # Windows (MSVC): no valgrind or CatBoost C API here, so the Python front is timed with the
+  # default kernel (AVX2 where the CPU has it) and the generic one, CatBoost in the same job.
+  windows:
+    name: windows-latest (timings)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lignum and CatBoost
+        run: python -m pip install ".[test]" polars
+
+      - name: Cache datasets
+        uses: actions/cache@v4
+        with:
+          path: benchmarks/.cache/datasets
+          key: datasets-v1
+
+      - name: Default kernel and generic kernel
+        shell: bash
+        env:
+          PYTHONUTF8: "1"   # the report has non-ASCII characters (µ, —); Windows pipes default to cp1252
+        run: |
+          set -o pipefail
+          args="--no-capi --datasets california,adult,covtype --rows 200000 --repeats 5 --latency-budget 0.3"
+          # -X faulthandler: a crash prints the Python stack (60c5381 ended with exit code 139).
+          status=0
+          LIGNUM_ISA=generic python -X faulthandler benchmarks/bench_catboost.py $args --label "MSVC, generic kernel" 2>&1 | tee generic.txt || status=1
+          python -X faulthandler benchmarks/bench_catboost.py $args --label "MSVC, default kernel (AVX2 where the CPU has it)" 2>&1 | tee default.txt || status=1
+          exit $status
+
+      - name: Failures as an annotation
+        if: failure()
+        shell: bash
+        run: cat generic.txt default.txt > bench.log 2>/dev/null || true; python .github/scripts/annotate_log.py "CatBoost on Windows" bench.log
+
+      - name: Tables as an annotation
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import glob
+          text = "\n\n".join(open(f).read() for f in sorted(glob.glob("benchmarks/results/*-catboost.md")))
+          lines = [l for l in text.splitlines() if l.startswith(("# ", "- lignum", "## ", "| catboost | pandas", "| lignum | pandas"))]
+          print("::notice title=CatBoost on Windows::" + "\n".join(lines)[:4000].replace("%", "%25").replace("\n", "%0A"))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: catboost-profile-windows-latest
+          path: benchmarks/results/*-catboost.md

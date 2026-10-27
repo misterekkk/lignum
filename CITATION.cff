@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use lignum in your work, please cite it as below."
+title: "lignum: bit-exact, fast inference for LightGBM, XGBoost and CatBoost models"
+type: software
+authors:
+  - family-names: Piotrowski
+    given-names: Kacper
+repository-code: "https://github.com/misterekkk/lignum"
+url: "https://misterekkk.github.io/lignum/"
+license: Apache-2.0
+keywords:
+  - gradient boosting
+  - decision trees
+  - inference
+  - LightGBM
+  - XGBoost
+  - CatBoost

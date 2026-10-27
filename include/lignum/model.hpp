@@ -70,6 +70,7 @@ namespace lignum {
 
     struct BinnedForest;    // binned representation (src/binned.hpp)
     struct CompiledForest;  // experimental compiled trees (src/compiled.hpp)
+    struct ObliviousForest; // CatBoost symmetric trees (src/catboost.hpp)
 
     class Data {
         public:
@@ -115,6 +116,7 @@ namespace lignum {
             std::shared_ptr<const BinnedForest> binned;  // binned kernel for batches; null when disabled or unsupported
             std::shared_ptr<const CompiledForest> compiled;  // experimental: trees compiled to native code (needs binned)
             size_t compiled_min_rows = 0;  // batches with fewer rows use the interpreter even when compiled
+            std::shared_ptr<const ObliviousForest> oblivious;  // CatBoost model: predicted by its own kernel, no KNodes
 
             Model() = default;
 

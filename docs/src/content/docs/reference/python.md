@@ -3,7 +3,7 @@ title: Python API
 description: Every public function and method of the lignum package.
 ---
 
-Generated from the docstrings of lignum 0.2.0.dev0 by `docs/scripts/api_reference.py`.
+Generated from the docstrings of lignum 0.3.0 by `docs/scripts/api_reference.py`.
 
 ## `lignum.load`
 
@@ -16,7 +16,7 @@ Load a trained model: LightGBM or XGBoost files, or a lignum `.bin`.
 **Parameters**
 
 - `filepath` *(str)* Path to the model file on disk.
-- `format` *({'auto', 'lignum', 'lightgbm', 'xgboost'}, default='auto')* Library of the model. The file's own bytes tell which of its formats it is, so 'auto' loads a lignum `.bin`, a LightGBM `model.txt` (`save_model`) or `dump_model()` JSON, and an XGBoost `.json` or `.ubj` (`save_model`). Naming the library only adds a check.
+- `format` *({'auto', 'lignum', 'lightgbm', 'xgboost', 'catboost'}, default='auto')* Library of the model. The file's own bytes tell which of its formats it is, so 'auto' loads a lignum `.bin`, a LightGBM `model.txt` (`save_model`) or `dump_model()` JSON, an XGBoost `.json` or `.ubj` (`save_model`) and a CatBoost JSON (`save_model(..., format="json")`). Naming the library only adds a check.
 - `binned` *(bool, default=True)* Prepare the binned kernel: inputs are mapped once per row to integer bin codes and categorical decisions are precomputed, so the tree walk compares small integers. Results are identical either way; False keeps only the direct traversal (lower memory use).
 - `compiled` *(path, optional)* Library written by `Model.compile(library=...)` for this model; predictions then use the compiled trees without compiling again. Needs `binned=True`. A library for another model or lignum version raises `RuntimeError`. Only load libraries you trust.
 
@@ -38,7 +38,7 @@ model = lignum.load("xgboost_model.json", format="xgboost")
 
 ## `lignum.Model`
 
-A loaded LightGBM or XGBoost model.
+A loaded LightGBM, XGBoost or CatBoost model.
 
 Create it with `lignum.load()`. Predictions use the interpreter, or the compiled trees after
 `compile()` / `load(..., compiled=...)`; both give the same, bit-identical results.
@@ -67,6 +67,10 @@ Predictions are identical either way.
 **Returns**
 
 - `dict` `compiled_min_rows` and `timings`: {rows: (interpreter_us, compiled_us)}, median per call.
+
+### `Model.categorical_features`
+
+*Property.* Columns that hold categories (CatBoost models with categorical features), in order.
 
 ### `Model.compile`
 
@@ -150,7 +154,7 @@ Otherwise, an internal copy will be triggered, which may degrade performance.
 
 **Parameters**
 
-- `X` *(array-like or Arrow data, shape (n_samples, n_features))* The input samples to predict: anything numpy converts to a float64 matrix, or Arrow data through the PyCapsule interface (`pyarrow.RecordBatch` / `Table` / `RecordBatchReader`, polars `DataFrame`, ...). Arrow columns are used by position; float64, float32, integer, boolean and null columns are read without copying the table, nulls are NaN and dictionary (categorical) columns give their category codes. Predictions equal those for the same float64 matrix. pandas DataFrames are converted with numpy; pass `pyarrow.Table.from_pandas(df)` for categorical columns.
+- `X` *(array-like or Arrow data, shape (n_samples, n_features))* The input samples to predict: anything numpy converts to a float64 matrix, or Arrow data through the PyCapsule interface (`pyarrow.RecordBatch` / `Table` / `RecordBatchReader`, polars `DataFrame`, ...). Arrow columns are used by position; float64, float32, integer, boolean and null columns are read without copying the table, nulls are NaN and dictionary (categorical) columns give their category codes. Predictions equal those for the same float64 matrix. pandas DataFrames are converted with numpy; pass `pyarrow.Table.from_pandas(df)` for categorical columns. A 1-D array or a flat list is one row. CatBoost models predict pandas frames of 50,000 rows or more through pyarrow when it is installed (faster, same results). CatBoost models with categorical features take their categories as strings or integers: a pandas DataFrame, a numpy object array, or a list (one row) or list of rows; see `categorical_features` and `catboost_hash`.
 - `raw_score` *(bool, default=False)* Whether to output raw scores (leaf values) instead of transformed predictions.
 - `n_jobs` *(int, default=-1)* Number of OpenMP threads to use. `-1` means using all available logical cores.
 - `strategy` *({'auto', 'serial', 'rows'}, default='auto')* How the work is spread across threads. All strategies return identical results; only speed differs. `'serial'` runs on the calling thread (lowest latency for a few rows), `'rows'` splits rows between threads. `'auto'` uses `'serial'` below 8 rows or with one thread, `'rows'` otherwise.

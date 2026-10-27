@@ -1,6 +1,6 @@
 # Lignum — rules for working in this repo
 
-Lignum is a production inference engine for LightGBM/XGBoost models (C++20 core, Python bindings).
+Lignum is a production inference engine for LightGBM/XGBoost/CatBoost models (C++20 core, Python bindings).
 Read [ARCHITECTURE.md](ARCHITECTURE.md) before touching the kernel or parsers. The roadmap with past measurements
 (`TASKS.md`) and the session handoff (`HANDOFF.md`) are local, untracked notes: read them when present.
 Published on PyPI as `pylignum`, imported as `lignum`.
@@ -23,7 +23,9 @@ Published on PyPI as `pylignum`, imported as `lignum`.
    `tests/python` against real LightGBM/XGBoost models (include NaN, zeros, values exactly on thresholds).
    Every Python test runs three times (`tests/python/conftest.py`): the binned kernel (default), the
    KNode walk (`binned=False` / unsupported models) and compiled trees (`compile()`, blocks of 3 trees);
-   kernel and code-generator changes must keep all three exact. Parser changes also get fuzz tests
+   kernel and code-generator changes must keep all three exact. CatBoost models have one kernel
+   (`src/catboost.*`), so `test_catboost.py` runs once and compares with the trained model, not
+   with CatBoost's lossy JSON loader. Parser changes also get fuzz tests
    (`tests/cpp/test_fuzz.cpp`) and must reject corrupted files without crashing on Windows' 1 MB stack.
 8. Distributed builds never use `-march=native`/`-mcpu=native` (`LIGNUM_NATIVE` is for local benchmarks only).
 9. Kernel ideas are measured on x86-64 and aarch64 before they are kept: put compile flags in
@@ -42,7 +44,8 @@ Published on PyPI as `pylignum`, imported as `lignum`.
 ```
 include/lignum/   public API (lignum.hpp, model.hpp, c_api.h, arrow.h)
 src/              engine: parsers/ (LightGBM text/JSON, XGBoost JSON/UBJSON), ir.hpp, builder,
-                  model.cpp (kernels), binned.*, compiled.* (code generator), arrow.cpp, io.cpp (.bin)
+                  model.cpp (kernels), binned.*, compiled.* (code generator), arrow.cpp, io.cpp (.bin),
+                  catboost.* (CatBoost: CityHash, JSON parser, symmetric-tree kernel)
 python/           nanobind bindings (bindings.cpp) + lignum package; python/README.md is the PyPI page
 tests/cpp         GoogleTest      tests/python   pytest parity tests (+ smoke.py for wheels)
 benchmarks/       bench.py, bench_arrow.py, cloud.sh (cloud server run); generated models/data gitignored
@@ -57,7 +60,7 @@ make venv        # .venv with Python 3.12 via uv (lightgbm, xgboost, pytest, nan
 make py-build    # editable install of the package into .venv
 make test        # cpp-test + py-test
 make cpp-test    # cmake -DLIGNUM_BUILD_TESTS=ON, build, ctest
-cd docs && python scripts/api_reference.py && npm run build   # documentation site
+make docs        # documentation site (Starlight, needs Node.js) into docs/dist
 ```
 
 macOS needs `brew install libomp`; CMake finds Homebrew's keg-only libomp automatically.

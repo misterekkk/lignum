@@ -38,6 +38,7 @@ jobs:
         working-directory: docs
         run: |
           python scripts/api_reference.py
+          python scripts/release_notes.py
           npm ci
           npm run build
 

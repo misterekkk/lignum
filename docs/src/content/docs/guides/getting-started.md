@@ -15,7 +15,7 @@ other platforms pip builds it from source, which needs a C++20 compiler and CMak
 
 ## Load a model and predict
 
-lignum reads the files LightGBM and XGBoost write. There is nothing to convert first:
+lignum reads the files LightGBM, XGBoost and CatBoost write. There is nothing to convert first:
 
 ```python
 import lightgbm as lgb
@@ -35,6 +35,22 @@ assert np.array_equal(preds, booster.predict(X))   # equal, not merely close
 
 `predict` returns probabilities for classifiers (`raw_score=True` gives margins), one column per class
 for multiclass models. See [Predicting](../predicting/) for threads, input types and output shapes.
+
+## CatBoost models with categories
+
+CatBoost models take the same DataFrame CatBoost does, categories as strings included:
+
+```python
+from catboost import CatBoostClassifier
+
+clf = CatBoostClassifier(iterations=200, verbose=False).fit(df, y, cat_features=["city", "device"])
+clf.save_model("model.cbm")
+
+model = lignum.load("model.cbm")
+assert np.array_equal(model.predict(df), clf.predict_proba(df)[:, 1])
+```
+
+[CatBoost](../catboost/) lists the supported models and the accepted input types.
 
 ## Save a binary model for production
 

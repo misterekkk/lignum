@@ -3,7 +3,9 @@
 #include <lignum/arrow.h>
 #include <lignum/model.hpp>
 
+#include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace lignum {
@@ -12,6 +14,11 @@ namespace lignum {
     // precomputed categorical decisions), used for every prediction when the model supports it;
     // false keeps only the direct KNode traversal. Both give identical results.
     Model load(const std::string& filepath, const std::string& format = "auto", bool binned = true);
+
+    // CatBoost models take categorical features as category hashes: a categorical column holds
+    // catboost_hash(category) as a double. Categories are strings (UTF-8); CatBoost hashes integer
+    // categories as their decimal text, e.g. catboost_hash("42").
+    uint32_t catboost_hash(std::string_view category);
 
     // Arrow input (C Data Interface, no libarrow needed). `batch` is a record batch (struct array)
     // described by `schema`; its first model.n_features columns are the features, by position.

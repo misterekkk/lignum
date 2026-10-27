@@ -9,7 +9,7 @@ on:
       - 'tests/**'
       - 'CMakeLists.txt'
       - 'pyproject.toml'
-      - '.github/workflows/py-check.yml'
+      - '.github/workflows/tests.yml'
   pull_request:
 
 jobs:
@@ -34,7 +34,14 @@ jobs:
         run: cmake --build build --config Release --parallel
 
       - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
+        shell: bash
+        run: |
+          set -o pipefail
+          ctest --test-dir build -C Release --output-on-failure 2>&1 | tee ctest.log
+
+      - name: Failures as an annotation
+        if: failure()
+        run: python .github/scripts/annotate_log.py "C++ tests on ${{ matrix.os }}" ctest.log
 
   sanitizers:
     name: C++ tests with ASan + UBSan (incl. fuzzing of model files)
@@ -58,7 +65,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.10", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -75,3 +82,11 @@ jobs:
 
       - name: Run tests
         run: python -m pytest tests/python -v
+
+      # x86-64 Linux and Windows runners have AVX2, so the run above used the AVX2 build of the
+      # CatBoost kernel; this one forces the generic build (what CPUs without AVX2 get).
+      - name: Run CatBoost tests with the generic kernel (x86-64 Linux and Windows)
+        if: runner.os != 'macOS' && runner.arch == 'X64'
+        env:
+          LIGNUM_ISA: generic
+        run: python -m pytest tests/python/test_catboost.py tests/python/test_real_data.py -v -k "catboost"

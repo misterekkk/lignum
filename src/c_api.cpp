@@ -48,6 +48,10 @@ int LignumModelLoad(const char* filepath, const char* format, LignumModelHandle*
     return guarded([&] { *out_handle = new lignum::Model(lignum::load(filepath, format)); });
 }
 
+unsigned int LignumCatBoostHash(const char* category, size_t size) {
+    return lignum::catboost_hash(std::string_view(category ? category : "", category ? size : 0));
+}
+
 int LignumModelSave(LignumModelHandle handle, const char* filepath) {
     if (!handle || !filepath) return fail("LignumModelSave: null argument.");
     return guarded([&] { as_model(handle)->save(filepath); });

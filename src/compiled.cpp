@@ -495,14 +495,22 @@ namespace lignum {
         return h.get();
     }
 
+    namespace {
+        // CatBoost models have no compiled mode; other models need the binned kernel the code is made from.
+        void require_compilable(const Model& model) {
+            if (model.oblivious) throw std::runtime_error("CatBoost models have no compiled mode: their symmetric trees are branch-free already.");
+            if (!model.binned) throw std::runtime_error("Compiled mode needs the binned kernel (load with binned=True).");
+        }
+    } // namespace
+
     std::shared_ptr<const CompiledForest> load_compiled(const Model& model, const std::string& library) {
-        if (!model.binned) throw std::runtime_error("Compiled mode needs the binned kernel (load with binned=True).");
+        require_compilable(model);
         if (!std::filesystem::exists(library)) throw std::runtime_error("Compiled library not found: " + library);
         return open_library(model, library);
     }
 
     std::shared_ptr<const CompiledForest> compile_forest(const Model& model, const CompileOptions& options, CompileStats* stats) {
-        if (!model.binned) throw std::runtime_error("Compiled mode needs the binned kernel (load with binned=True).");
+        require_compilable(model);
         const BinnedForest& f = *model.binned;
         CompileStats local;
         CompileStats& st = stats ? *stats : local;

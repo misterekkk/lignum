@@ -5,7 +5,7 @@ CPP_BUILD_DIR ?= build/cpp
 
 venv:
 	uv venv --python 3.12 .venv
-	uv pip install --python $(PYTHON) numpy pandas scikit-learn lightgbm xgboost pytest nanobind scikit-build-core pyarrow ninja
+	uv pip install --python $(PYTHON) numpy pandas scikit-learn lightgbm xgboost catboost pytest nanobind scikit-build-core pyarrow ninja
 
 # Competitor engines for benchmarks/bench.py (lleaves 1.3 needs llvmlite < 0.45).
 bench-deps:
@@ -33,10 +33,9 @@ bench:
 bench-quick:
 	$(PYTHON) benchmarks/bench.py --quick
 
-docs:
-	rm -rf site/
-	$(PYTHON) -m pip install mkdocs-material "mkdocstrings[python]"
-	$(PYTHON) -m mkdocs build
+# Starlight site in docs/dist (needs Node.js); the Python reference comes from the installed package.
+docs: py-build
+	cd docs && $(abspath $(PYTHON)) scripts/api_reference.py && $(abspath $(PYTHON)) scripts/release_notes.py && npm ci && npm run build
 
 clean:
-	rm -rf build/ .pytest_cache/ benchmarks/.cache site/
+	rm -rf build/ .pytest_cache/ benchmarks/.cache docs/dist/

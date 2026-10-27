@@ -144,6 +144,58 @@ command), linked, cached by source hash and loaded with dlopen / LoadLibrary. Th
 `lignum_abi` and `lignum_fingerprint` (FNV-1a of trees, cuts, leaves, outputs, precision), checked by
 `load_compiled`.
 
+## CatBoost (src/catboost.*)
+
+CatBoost models do not go through the KNode IR. The JSON and `.cbm` readers fill a neutral `Spec`.
+`build_model` turns it into an `ObliviousForest` (held by `Model::oblivious`), and `Model::predict`
+sends such models to their own kernel.
+
+- **`.cbm`**: `"CBM1"`, a size (`ui32`, or `0xffffffff` + `ui64`), the `TModelCore` FlatBuffer,
+  then the CTR tables. The tables are a count, then a size and a `TCtrValueTable` FlatBuffer each:
+  packed 12-byte `TBucket {ui64 hash; ui32 index}` plus a blob of int counts, or `{float sum; int
+  count}` for mean CTRs. A small bounds-checked reader (`Flat`, `FlatTable`) replaces the
+  flatbuffers library.
+- **`.bin`**: version 0.7 with the `Oblivious` flag, used only for CatBoost models. The header, the
+  bias, then the forest as 64-byte aligned arrays, each with an 8-byte count. Loading copies them
+  and checks every index (`validate`). Other models are still written as 0.6.
+- **Rows**: fewer than 4 rows take `predict_row` (scalar, no per-split loop over rows; one row is
+  2.8 µs instead of 6.4 for 500 trees). Larger batches use the block kernel below.
+
+- **Input**: float features as usual. A categorical column holds the category's CatBoost hash as a
+  double: `CityHash64(utf8) & 0xffffffff`, using the CityHash release in CatBoost's
+  `util/digest/city.cpp` (later releases differ above 64 bytes). Integer categories are hashed as
+  decimal text. The Python layer hashes strings and integers in C++. `predict_arrow` hashes
+  `string` / `large_string` / `string_view` and integer columns in place, and dictionaries once
+  per batch (nulls are rejected, as CatBoost does).
+- **Phase 1, per block of up to 128 rows**: every *source* gets a 16-bit bucket per row, stored
+  column-major:
+  - float feature: the number of borders below the float32 value; NaN gets 0, or every border with
+    `AsTrue` (`nan_mode=Max`);
+  - one-hot feature: 1 + index of the matching value;
+  - CTR: hash the combination with CatBoost's `CalcHash`: categories (sign-extended int32), then
+    binarised floats, then one-hot equalities. Look it up in the projection's tables (open
+    addressing). The bucket of every table entry was computed at load time with CatBoost's float
+    formula `((count + prior) / (total + prior_denom) + shift) * scale`; combinations missing from
+    the table get the bucket of the empty statistics.
+- **Phase 2, per tree**: a symmetric tree is one node. The leaf index is
+  `Σ (bucket[src_d] >= t_d) << d` (`==` for one-hot) over the block, branch-free and vectorisable.
+  Leaves are added in model order in double, then `scale * sum + bias`.
+- **Outputs**: the sigmoid is the shared one. `exp` (Poisson, Tweedie) is CatBoost's
+  `FastExpWithInfInplace`, which differs by platform:
+  - x86: herumi's `fmath::expd_v`, a table-based approximation (`catboost_exp`, a scalar copy of the
+    SSE2/AVX2 loops), which differs from `std::exp` in the last bit on about a third of the values.
+    Its table is `pow(2, i/2048)` from the platform's libm, as in CatBoost: macOS x86_64's `pow` is
+    off by 1 ulp at two entries. Windows uses correctly rounded constants, which match CatBoost's
+    Windows build;
+  - other platforms: `std::exp`.
+  The softmax (`MultiClass`) subtracts the maximum, applies the same exp and divides by the sum. On
+  x86, elements in full SIMD groups (4 with AVX2, 2 with SSE2, detected like CatBoost) clamp the
+  argument; the rest use fmath's scalar `expd`, which returns exactly 0 below -708.4.
+- **Verification**: bit-exact against CatBoost on binary and regression models (`tests/python/test_catboost.py`).
+  Covered: CTR complexity 1-4, every CPU CTR type, NaN modes, more than 255 borders, unseen
+  categories and CityHash for every length branch. CatBoost's own JSON loader is lossy, so the
+  reference is the trained / `.cbm` model.
+
 ## Arrow input (src/arrow.cpp, src/columns.hpp)
 
 `predict_arrow` takes a record batch through the Arrow C Data Interface (`include/lignum/arrow.h`).
@@ -167,4 +219,4 @@ their indices.
 ## Known limitations
 
 No multi-target / vector-leaf models, no LightGBM linear trees or random forests (rejected at load
-time).
+time). CatBoost: no non-symmetric trees and no text or embedding features (see the CatBoost guide).
