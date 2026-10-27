@@ -43,6 +43,8 @@ namespace lignum {
     // CityHash64 as in CatBoost's util/digest/city.cpp (Google's first release, MIT licence):
     // categories are hashed with CityHash64(utf8) & 0xffffffff. Later CityHash versions give
     // different values (for over 64 bytes even 1.0.3 does).
+    // Derived from CityHash, Copyright (c) 2011 Google, Inc., by Geoff Pike and Jyrki Alakuijala,
+    // under the MIT License; the full notice is in NOTICE.
 
     namespace {
 
@@ -164,6 +166,8 @@ namespace lignum {
     }
 
     // ---------------------------------------------------------------------------------------------
+    // Derived from fmath (https://github.com/herumi/fmath) by herumi, under the BSD 3-Clause
+    // License; the full notice is in NOTICE.
     // CatBoost's exp (NCB::FastExpWithInfInplace). On x86 it is herumi's fmath::expd_v, whose SSE2
     // and AVX2 loops do the same double operations as this scalar copy (no FMA): a 2^11-entry table
     // of 2^(i/2048), the index and exponent taken from x * 2048/ln2 + 3 * 2^51, and a cubic
@@ -780,8 +784,8 @@ namespace lignum {
                     sf.column = get_index<uint32_t>(ff["flat_feature_index"], kMaxColumns, "flat_feature_index");
                     simdjson::dom::array borders;
                     if (ff["borders"].get_array().get(borders) == simdjson::SUCCESS) sf.borders = float_list(borders, "float feature borders");
-                    std::string_view nan_treatment = "AsIs";
-                    (void)ff["nan_value_treatment"].get_string().get(nan_treatment);
+                    std::string_view nan_treatment;  // optional field
+                    if (ff["nan_value_treatment"].get_string().get(nan_treatment) != simdjson::SUCCESS) nan_treatment = "AsIs";
                     sf.nan_as_true = nan_treatment == "AsTrue";
                     spec.floats.push_back(std::move(sf));
                 }
@@ -1217,7 +1221,7 @@ namespace lignum {
         // The block kernel for this CPU: AVX2 where the CPU and the build have it, else generic.
         // LIGNUM_ISA=generic or avx2 chooses (tests run both); avx2 without AVX2 support falls back.
         BlockKernel select_block_kernel() {
-            bool avx2 = false;
+            [[maybe_unused]] bool avx2 = false;  // only read where the AVX2 kernel is built
         #if defined(LIGNUM_CATBOOST_AVX2)
             #if defined(_MSC_VER)
                 int info[4];

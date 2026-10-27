@@ -8,6 +8,19 @@ description: What changed in each lignum version.
 Versions follow [Semantic Versioning](https://semver.org/); before 1.0, minor versions may
 change the API. Install a specific version with `pip install pylignum==<version>`.
 
+## [0.3.1] — 2026-10-27
+
+### Fixed
+
+- **License notices**: `NOTICE` now carries the notices of the third-party code lignum derives
+  from, as their licenses require for source and binary copies: CityHash (Copyright (c) 2011
+  Google, Inc., MIT License; CatBoost's category hash) and fmath by herumi (BSD 3-Clause; the
+  `exp` CatBoost uses on x86). The 0.3.0 wheels lacked them. No change to predictions or the API.
+- Two GCC warnings (`-Wall -Wextra`): an unchecked simdjson result for an optional field of CatBoost
+  JSON models, and an unused variable on ARM.
+- The CatBoost benchmark no longer asks CatBoost to read polars 2.x Categorical columns, which it
+  does not support (on Windows CatBoost could crash on them); lignum was not affected.
+
 ## [0.3.0] — 2026-10-27
 
 ### Added
@@ -72,7 +85,8 @@ First release on PyPI (`pip install pylignum`, `import lignum`).
 
 Initial release of the package (GitHub only).
 
-[Unreleased]: https://github.com/misterekkk/lignum/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/misterekkk/lignum/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/misterekkk/lignum/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/misterekkk/lignum/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/misterekkk/lignum/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/misterekkk/lignum/releases/tag/v0.1.0

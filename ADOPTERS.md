@@ -6,7 +6,8 @@ use it (which models, batch or real-time, which platform) helps others and shape
 
 | Who | How lignum is used |
 |---|---|
-| | |
+
+<!-- Add a row above, e.g.: | [Your company](https://example.com) | Real-time scoring of a CatBoost model in a Go service through the C API | -->
 
 Prefer not to be listed publicly? Telling us in an
 [issue](https://github.com/misterekkk/lignum/issues) or a discussion is just as useful.

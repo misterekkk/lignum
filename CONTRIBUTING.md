@@ -26,8 +26,10 @@ macOS needs `brew install libomp`. [ARCHITECTURE.md](ARCHITECTURE.md) describes 
    go into the commit message. Kernel decisions are measured on x86-64 and arm64.
 3. **Tests with every feature.** GoogleTest in `tests/cpp` for logic, pytest parity tests in
    `tests/python` against real LightGBM / XGBoost / CatBoost models, with NaN, zeros and values
-   exactly on thresholds. Every Python test runs in three kernels (binned, KNode walk, compiled);
-   all three must stay exact. Parser changes also get fuzz tests in `tests/cpp/test_fuzz.cpp`.
+   exactly on thresholds. Every LightGBM / XGBoost Python test runs in three kernels (binned,
+   KNode walk, compiled); all three must stay exact. CatBoost models have one kernel, so
+   `test_catboost.py` runs once and compares with the trained model (not with CatBoost's lossy
+   JSON loader). Parser changes also get fuzz tests in `tests/cpp/test_fuzz.cpp`.
 4. **Portable.** Linux, macOS and Windows (MSVC) are all tested in CI; no POSIX-only code without a
    Windows path. C++20, no new dependencies beyond the vendored simdjson and OpenMP.
 
