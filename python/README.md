@@ -24,6 +24,8 @@ The package is installed as `pylignum` and imported as `lignum`.
 
 - **Exact.** Raw scores and probabilities equal the library's `predict` bit for bit: NaN and
   zero-as-missing, categorical splits, XGBoost's float32 arithmetic and CatBoost's CTRs included.
+  Named columns (pandas, Arrow) are checked against the model's feature names, so a reordered
+  DataFrame raises instead of predicting wrong.
 - **Fast to predict.** A cache-friendly interpreter for any batch size, and an optional compiled
   mode that turns LightGBM and XGBoost trees into native code with the system C compiler in a few
   seconds:

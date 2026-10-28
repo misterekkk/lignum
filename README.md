@@ -39,7 +39,9 @@ Installed as `pylignum`, imported as `lignum`. Wheels for Linux (x86_64, aarch64
 
 - **Exact.** Raw scores and probabilities equal the library's `predict` bit for bit: NaN and
   zero-as-missing, categorical splits, XGBoost's float32 arithmetic and CatBoost's CTRs included.
-  What the data scientist saw in the notebook is what production returns.
+  Named columns (pandas, Arrow) are checked against the model's feature names, so a reordered
+  DataFrame raises instead of predicting wrong. What the data scientist saw in the notebook is what
+  production returns.
 - **Fast.** A binned interpreter for any batch size, and a compiled mode that turns LightGBM and
   XGBoost trees into native code in a few seconds (`model.compile()`); `model.autotune(X)` picks
   the faster one per batch size. Single rows take a few microseconds.
@@ -85,8 +87,8 @@ Arrow input, and how to reproduce them.
 | Library | Files | Notes |
 |---|---|---|
 | LightGBM | `model.txt`, JSON | numeric and categorical splits, multiclass; not linear trees or random forests |
-| XGBoost | JSON, UBJSON | float32 semantics, categorical splits, multiclass; not multi-target models |
-| CatBoost | `.cbm`, JSON | symmetric trees, one-hot and CTR categories, multiclass, Poisson / Tweedie |
+| XGBoost | JSON, UBJSON | float32 semantics, categorical splits, multiclass, DART; not multi-target models, gblinear or DART with dropped trees |
+| CatBoost | `.cbm`, JSON | symmetric trees, one-hot and CTR categories, multiclass, Poisson / Tweedie; not Depthwise / Lossguide trees or text features |
 
 Unsupported models are rejected at load time with a message that says why, never predicted wrongly.
 
