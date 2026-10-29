@@ -423,12 +423,14 @@ def time_batch(predict: Predict, X: np.ndarray, n: int, repeats: int) -> tuple[f
     return min(times), statistics.median(times)
 
 
-def time_latency(predict: Predict, X: np.ndarray, n: int, budget_s: float, with_p99: bool = False):
-    """Median latency in µs (and p99 when with_p99)."""
-    predict(X, n)
+def time_latency(predict: Predict, pool: list[np.ndarray], n: int, budget_s: float, with_p99: bool = False):
+    """Median latency in µs (and p99 when with_p99); every call takes the next input of the pool, so
+    branch predictors and caches cannot learn one row's path."""
+    predict(pool[0], n)
     times = []
     deadline = time.perf_counter() + budget_s
     while len(times) < 50 or (time.perf_counter() < deadline and len(times) < 20000):
+        X = pool[len(times) % len(pool)]
         t0 = time.perf_counter()
         predict(X, n)
         times.append(time.perf_counter() - t0)
@@ -460,7 +462,9 @@ def run_engine(w: Workload, engine: str, args, tmp: Path, reference: dict) -> Re
         best_st, _ = time_batch(predict, X_st, 1, max(1, args.repeats // 2))
         r.batch1_best_s = best_st * (len(w.X) / len(X_st))  # normalised to the full batch size
 
-        X1, X100 = np.ascontiguousarray(w.X[:1]), np.ascontiguousarray(w.X[:100])
+        starts = np.random.default_rng(0).integers(0, len(w.X) - 100, 1000)
+        X1 = [np.ascontiguousarray(w.X[s:s + 1]) for s in starts]
+        X100 = [np.ascontiguousarray(w.X[s:s + 100]) for s in starts]
         r.lat1_us = time_latency(predict, X1, N_THREADS, args.latency_budget)
         r.lat1_st_us, r.lat1_st_p99_us = time_latency(predict, X1, 1, args.latency_budget, with_p99=True)
         r.lat100_us = time_latency(predict, X100, N_THREADS, args.latency_budget)
@@ -537,7 +541,7 @@ def render(results: list[Result], env: dict, args) -> str:
         "- versions: " + ", ".join(f"{k} {v}" for k, v in env["versions"].items() if v),
         "",
         "Batch = full data set, all threads (best / median of repeats); 1 thread is normalised to the full data set.",
-        "Latency = median per call. Mismatch = rows not bit-identical to the native library on held-out rows / training rows (training rows hit split thresholds exactly).",
+        "Latency = median per call, on different rows every call (1,000 in rotation). Mismatch = rows not bit-identical to the native library on held-out rows / training rows (training rows hit split thresholds exactly).",
         "",
     ]
     for model in dict.fromkeys(r.model for r in results):

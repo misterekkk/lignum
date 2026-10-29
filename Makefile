@@ -1,4 +1,4 @@
-.PHONY: venv bench-deps py-build py-test cpp-build cpp-test test bench bench-quick docs clean
+.PHONY: venv bench-deps py-build py-test cpp-build cpp-test test bench bench-quick bench-suite docs clean
 
 PYTHON ?= .venv/bin/python
 CPP_BUILD_DIR ?= build/cpp
@@ -32,6 +32,10 @@ bench:
 
 bench-quick:
 	$(PYTHON) benchmarks/bench.py --quick
+
+# The published benchmark (benchmarks/README.md).
+bench-suite:
+	$(PYTHON) benchmarks/suite.py
 
 # Starlight site in docs/dist (needs Node.js); the Python reference comes from the installed package.
 docs: py-build
