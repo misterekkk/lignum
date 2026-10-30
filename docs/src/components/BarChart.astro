@@ -1,12 +1,14 @@
 ---
 // Horizontal bar chart in plain HTML and CSS, rendered at build time (no JavaScript): readable at
 // any width, light and dark themes from CSS variables (src/styles/custom.css, .lg-chart), a
-// hidden table for screen readers. lignum is always the teal series, the other engine orange.
+// hidden table for screen readers. lignum is always teal (its second mode a lighter or darker
+// teal), the other engine orange, a third engine purple. The compiled mode keeps the main teal
+// wherever it appears, the interpreter takes the second one.
 import type { Group } from '../data/benchmarks';
 
 interface Series {
   name: string;
-  tone: 'lignum' | 'other';
+  tone: 'lignum' | 'lignum-alt' | 'other' | 'third';
 }
 interface Props {
   title: string;

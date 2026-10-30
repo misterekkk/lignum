@@ -6,6 +6,18 @@ All notable changes to lignum (`pip install pylignum`). The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **New benchmarks.** `benchmarks/suite.py` replaces the earlier comparisons: the same models on every
+  machine (500 rounds; LightGBM `num_leaves=63`, XGBoost `lossguide` with `max_leaves=63`, CatBoost
+  depth 6), seven data sets, batches of 1 to 1,000,000 rows on one thread and all threads, p50 / p99 /
+  p99.9 latencies, preparation (compile) times and a bit-exactness check, against LightGBM, XGBoost,
+  CatBoost, lleaves and TL2cgen, from numpy and from Arrow. Single rows now differ on every call:
+  the earlier latencies predicted the same row again and again, which the branch predictor learns,
+  so they were too optimistic for every engine. With that, the new models and another server, one
+  California row on x86 went from 2.9 to 11 µs for lignum and from 7.8 to 24.6 µs for lleaves. The benchmarks page, the README and the home page show only the new
+  results (Apple M4 and a Hetzner CCX33 with AMD EPYC-Milan); the old reports are removed.
+
 ### Fixed
 
 - **`compile()` on macOS compiles in parallel again.** The generated files were compiled from

@@ -72,19 +72,24 @@ the model that wrote the file. lignum reads the JSON exactly, so it matches the 
 
 ## Speed
 
-500 trees of depth 6 on public data sets, CatBoost 1.2.10 / lignum, one thread through the C API
-(categories passed as strings):
+500 trees of depth 6 on public data sets, CatBoost 1.2.10 / lignum, from Python with a pandas
+DataFrame (categories as strings), a different row on every call:
 
-| | x86-64 (EPYC 9V45) | ARM (Neoverse-N2) | Apple M4 |
-|---|---:|---:|---:|
-| Adult, 300k rows | 0.424 / **0.213 s** | 0.941 / **0.339 s** | 0.805 / **0.307 s** |
-| Diabetes 130-US, 300k rows | 1.624 / **0.735 s** | 2.926 / **1.209 s** | 2.030 / **0.891 s** |
-| Covertype (numeric), 300k rows | 0.287 / **0.119 s** | 0.818 / **0.265 s** | 0.545 / **0.195 s** |
-| One row, Adult | 20.1 / **2.3 µs** | 50.7 / **4.9 µs** | 23.0 / **2.1 µs** |
+| | x86-64 (EPYC-Milan) | Apple M4 |
+|---|---:|---:|
+| Adult, 1M rows, one thread | 2.24 / **1.25 s** | 1.55 / **0.613 s** |
+| Diabetes 130-US, 1M rows, one thread | 7.42 / **4.20 s** | 3.66 / **1.55 s** |
+| Covertype, 1M rows, one thread | 1.76 / **0.593 s** | 1.19 / **0.437 s** |
+| California housing, 1M rows, one thread | 0.344 / **0.292 s** | 0.415 / **0.159 s** |
+| One row, Adult (DataFrame) | 582 / **55.1 µs** | 245 / **27.5 µs** |
+| One row, Diabetes 130-US (DataFrame) | 5,761 / **237 µs** | 2,417 / **102 µs** |
+| One row, Adult (pyarrow Table) | 5,567 / **18.2 µs** | 755 / **9.1 µs** |
+| One row, Diabetes 130-US (pyarrow Table) | 31,577 / **98.4 µs** | 4,759 / **32.8 µs** |
 
-From Python the gap grows for small inputs, where CatBoost converts the data first: one Adult row
-from a list takes 70 µs in CatBoost and 4 µs in lignum (x86). More data sets, all threads, Windows
-and the cases where the gap is small: [Benchmarks](../../benchmarks/#catboost).
+For single rows most of CatBoost's time is converting its input; lignum reads Arrow tables directly
+(CatBoost needs `to_pandas()` first). On purely numeric models with all threads on x86, CatBoost
+comes within 5-11%. Every data set, all threads and the methodology:
+[Benchmarks](../../benchmarks/#catboost-models).
 
 Loading, on the M4: Adult takes 0.15 ms from lignum's `.bin`, 0.76 ms from `.cbm` (CatBoost: 0.33
 ms). Models with large CTR tables load more slowly, because lignum copies the tables into its own

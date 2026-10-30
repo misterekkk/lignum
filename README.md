@@ -43,10 +43,11 @@ Installed as `pylignum`, imported as `lignum`. Wheels for Linux (x86_64, aarch64
   DataFrame raises instead of predicting wrong. What the data scientist saw in the notebook is what
   production returns.
 - **Fast.** A binned interpreter for any batch size, and a compiled mode that turns LightGBM and
-  XGBoost trees into native code in a few seconds (`model.compile()`); `model.autotune(X)` picks
-  the faster one per batch size. Single rows take a few microseconds.
+  XGBoost trees into native code in a few seconds for 500 trees (`model.compile()`);
+  `model.autotune(X)` picks the faster one per batch size. One row of a 500-tree model takes
+  10-30 µs on one x86 core, 6-21 µs on an Apple M4.
 - **CatBoost with categories.** Categorical features, one-hot, CTRs and their combinations, from
-  strings in pandas, Arrow or lists: 2-3x faster than CatBoost on batches, 7-14x on single rows.
+  strings in pandas, Arrow or lists: 1.2-3x faster than CatBoost on batches, 7-27x on single rows.
 - **Instant start.** `model.save("model.bin")` writes a file that loads by memory mapping in under
   a millisecond.
 - **Arrow and C.** `predict` reads pyarrow, polars and any Arrow PyCapsule object without copies; a
@@ -55,32 +56,32 @@ Installed as `pylignum`, imported as `lignum`. Wheels for Linux (x86_64, aarch64
 
 ## Benchmarks
 
-**LightGBM**, 500 trees on public data sets, AMD EPYC-Milan (4 dedicated vCPU). The whole data set
-on all threads, and one row on one thread:
+The same models everywhere (500 rounds, 63 leaves; CatBoost depth 6), a different row on every call,
+AMD EPYC-Milan (Hetzner CCX33, 8 vCPU). **LightGBM** models, 1,000,000 rows on all threads and one
+row on one thread (median / p99):
 
-| | lignum compiled | lleaves | LightGBM |
-|---|---:|---:|---:|
-| California housing (20k rows) | **0.014 s** | 0.021 s | 0.140 s |
-| Covertype (581k rows, 7 classes) | **0.265 s** | 0.269 s | 2.401 s |
-| Diabetes 130-US (102k rows, categorical) | **0.151 s** | 0.803 s | 1.830 s |
-| One row, one thread (Covertype) | **2.9 µs** | 7.8 µs | 32.0 µs |
-| Bit-identical to LightGBM | yes | no (81-100% of rows differ) | — |
+| | lignum | lleaves | TL2cgen | LightGBM |
+|---|---:|---:|---:|---:|
+| California housing, 1M rows | **0.32 s** | 0.48 s | 1.96 s | 3.56 s |
+| Covertype (7 classes, 3,500 trees), 1M rows | **1.57 s** | 2.20 s | 34.5 s | 37.4 s |
+| Diabetes 130-US (categorical), 1M rows | **0.75 s** | 4.23 s | 31.9 s | 9.33 s |
+| One row, California housing | **11.0 / 23.7 µs** | 24.6 / 56.4 µs | 49.2 / 87.8 µs | 57.7 / 92.9 µs |
+| One row, Diabetes 130-US | **13.3 / 34.2 µs** | 77.6 / 118 µs | 280 / 365 µs | 82.5 / 121 µs |
+| Compile the model (Covertype) | **22 s** (interpreter: 0.1 s) | 503 s | 70 s | — |
+| Bit-identical to LightGBM | yes | no (55-100% of rows differ) | yes | — |
 
-**CatBoost**, 500 trees of depth 6, CatBoost 1.2.10 / lignum through the C API, one thread,
-300k rows:
+lignum: the compiled mode for a million rows; for one row the faster of its two modes (the
+interpreter on California, the compiled trees on Diabetes), which `model.autotune(X)` picks for you.
 
-| | x86-64 (AMD EPYC 9V45) | ARM (Neoverse-N2) |
-|---|---:|---:|
-| Adult (8 categorical columns) | 0.424 / **0.213 s** | 0.941 / **0.339 s** |
-| Diabetes 130-US (categorical, large CTR tables) | 1.624 / **0.735 s** | 2.926 / **1.209 s** |
-| Covertype (numeric, 7 classes) | 0.287 / **0.119 s** | 0.818 / **0.265 s** |
-| California housing (numeric) | 0.071 / **0.061 s** | 0.318 / **0.088 s** |
-| One row, Adult | 20.1 / **2.3 µs** | 50.7 / **4.9 µs** |
+**XGBoost** models: 4-8x faster than XGBoost on a million rows and 5-15x on single rows (TL2cgen
+cannot load XGBoost 3 models trained on pandas categories, and is not bit-identical on the others).
+**CatBoost** models, from a pandas DataFrame: 1.2-3x faster on a million rows on one thread
+(2.3-2.7x on an Apple M4) and 8-27x on single rows (216x with high-cardinality categories).
 
-lignum is not the fastest everywhere: lleaves wins Covertype on one thread by about 7%, and on x86
-CatBoost comes within 10-15% of lignum on some purely numeric models (California above).
-[All results](https://misterekkk.github.io/lignum/benchmarks/): more data sets, Apple M4, Windows,
-Arrow input, and how to reproduce them.
+lignum is not the fastest everywhere: on an Apple M4 lleaves predicts one Covertype row in 38 µs
+against lignum's 43 µs, and on x86 the compiled mode's p99 on single rows is worse than the interpreter's.
+[All results](https://misterekkk.github.io/lignum/benchmarks/): every data set, Apple M4, Arrow
+input, compile times, the methodology and how to reproduce them.
 
 ## Supported models
 

@@ -16,7 +16,7 @@ hero:
 ---
 
 import BarChart from '../../components/BarChart.astro';
-import { lightgbmSpeedup, catboostSpeedup } from '../../data/benchmarks';
+import { machine, lightgbmSpeedup, lightgbmRow, catboostSpeedup } from '../../data/benchmarks';
 
 ```bash
 pip install pylignum
@@ -28,37 +28,46 @@ pip install pylignum
     <span class="lg-stat-label">rows that differ from the library's own predictions, in every test and benchmark</span>
   </div>
   <div class="lg-stat">
-    <span class="lg-stat-value">9-12×</span>
-    <span class="lg-stat-label">faster than LightGBM on real data sets (x86, all threads)</span>
+    <span class="lg-stat-value">8-24×</span>
+    <span class="lg-stat-label">faster than LightGBM on a million rows, 4-8× faster than XGBoost (x86, all threads)</span>
   </div>
   <div class="lg-stat">
-    <span class="lg-stat-value">2-3×</span>
-    <span class="lg-stat-label">faster than CatBoost on batches, 7-14× on single rows</span>
+    <span class="lg-stat-value">4-6×</span>
+    <span class="lg-stat-label">faster than LightGBM on single rows, a different row every call</span>
   </div>
   <div class="lg-stat">
-    <span class="lg-stat-value">2.9 µs</span>
-    <span class="lg-stat-label">for one row of a 500-tree LightGBM model, on one thread</span>
+    <span class="lg-stat-value">11 µs</span>
+    <span class="lg-stat-label">median for one row of a 500-tree LightGBM model (California housing) on one x86 core; 7 µs on an Apple M4</span>
   </div>
 </div>
 
 <BarChart
   title="LightGBM models: times faster than LightGBM"
-  subtitle="500 trees, whole data set on all threads, AMD EPYC-Milan (4 vCPU). Higher is better."
-  series={[{ name: 'lignum (compiled)', tone: 'lignum' }, { name: 'lleaves', tone: 'other' }]}
+  subtitle={`500 rounds, 63 leaves, 1,000,000 rows on all threads, ${machine.x86}. Higher is better.`}
+  series={[{ name: 'lignum (compiled)', tone: 'lignum' }, { name: 'lleaves', tone: 'other' }, { name: 'TL2cgen', tone: 'third' }]}
   groups={lightgbmSpeedup('x86')}
   unit="×"
   reference={{ value: 1, label: 'LightGBM' }}
-  note="lignum's predictions equal LightGBM's on every row; lleaves differs on 81-100% of the rows."
+  note="lignum's predictions equal LightGBM's on every row; lleaves differs on 55-100% of them. Diabetes 130-US and synthetic-cat have categorical features with hundreds to thousands of values."
+/>
+
+<BarChart
+  title="One row: times faster than LightGBM"
+  subtitle={`Median of up to 100,000 calls on one thread, a different row every call, ${machine.x86}. Higher is better.`}
+  series={[{ name: 'lignum (interpreter)', tone: 'lignum-alt' }, { name: 'lignum (compiled)', tone: 'lignum' }, { name: 'lleaves', tone: 'other' }]}
+  groups={lightgbmRow('x86')}
+  unit="×"
+  reference={{ value: 1, label: 'LightGBM' }}
 />
 
 <BarChart
   title="CatBoost models: times faster than CatBoost"
-  subtitle="500 trees of depth 6, C API on one thread, AMD EPYC 9V45. Higher is better."
+  subtitle={`500 trees of depth 6, 1,000,000 rows on one thread from a pandas DataFrame, ${machine.x86}. Higher is better.`}
   series={[{ name: 'lignum', tone: 'lignum' }]}
   groups={catboostSpeedup('x86')}
   unit="×"
   reference={{ value: 1, label: 'CatBoost' }}
-  note="The first four data sets have categorical features (CTRs); the last three are numeric. On ARM lignum is 2.2-3.6× faster."
+  note="On an Apple M4 lignum is 2.3-2.7× faster; on single rows from a DataFrame 7-27× (up to 216× with high-cardinality categories)."
 />
 
 <div class="lg-features not-content">
@@ -68,7 +77,7 @@ pip install pylignum
   </div>
   <div class="lg-feature">
     <h3>Fast to predict</h3>
-    <p>A binned interpreter for any batch size, and a compiled mode that turns LightGBM and XGBoost trees into native code in a few seconds. <code>autotune</code> picks the faster one for your data.</p>
+    <p>A binned interpreter for any batch size, and a compiled mode that turns LightGBM and XGBoost trees into native code in a few seconds for 500 trees. <code>autotune</code> picks the faster one for your data.</p>
   </div>
   <div class="lg-feature">
     <h3>CatBoost with categories</h3>

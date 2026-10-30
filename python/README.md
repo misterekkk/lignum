@@ -37,8 +37,8 @@ The package is installed as `pylignum` and imported as `lignum`.
 
   `model.autotune(X_sample)` measures both on your data and uses each where it is faster.
 - **CatBoost with categorical features.** One-hot, CTRs and combinations of categories; categories
-  come as strings or integers from pandas, numpy object arrays, lists, pyarrow or polars. 2-3x
-  faster than CatBoost on batches and 7-14x on single rows.
+  come as strings or integers from pandas, numpy object arrays, lists, pyarrow or polars. 1.2-3x
+  faster than CatBoost on batches and 7-27x on single rows.
 - **Fast to start.** `model.save("model.bin")` writes a binary file that loads by memory mapping in
   well under a millisecond.
 - **Arrow input without copies.** `predict` reads pyarrow tables and batches, polars data frames and
