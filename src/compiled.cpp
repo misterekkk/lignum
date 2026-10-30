@@ -30,7 +30,15 @@
     #endif
     #include <windows.h>
 #else
+    #include <cerrno>
     #include <dlfcn.h>
+    #include <spawn.h>
+    #include <sys/wait.h>
+    #if defined(__APPLE__)
+        #include <crt_externs.h>  // a dylib has no `environ`: _NSGetEnviron()
+    #else
+extern char** environ;
+    #endif
 #endif
 
 namespace lignum {
@@ -269,7 +277,22 @@ namespace lignum {
             // cmd /c drops the first and last quote of the line; wrap it so quoted paths survive.
             return std::system(("\"" + command + "\"").c_str());
         #else
-            return std::system(command.c_str());
+            // /bin/sh -c through posix_spawn, not std::system: macOS' system() holds a global lock
+            // until the child exits, so the parallel compiles ran one after another (M4, California:
+            // 8.3 s instead of 1.6 s).
+            #if defined(__APPLE__)
+            char** env = *_NSGetEnviron();
+            #else
+            char** env = environ;
+            #endif
+            const char* argv[] = {"sh", "-c", command.c_str(), nullptr};
+            pid_t pid;
+            if (posix_spawn(&pid, "/bin/sh", nullptr, nullptr, const_cast<char* const*>(argv), env) != 0) return -1;
+            int status = 0;
+            while (waitpid(pid, &status, 0) < 0) {
+                if (errno != EINTR) return -1;
+            }
+            return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
         #endif
         }
 

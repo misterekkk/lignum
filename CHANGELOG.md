@@ -6,6 +6,14 @@ All notable changes to lignum (`pip install pylignum`). The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`compile()` on macOS compiles in parallel again.** The generated files were compiled from
+  several threads through `system()`, which macOS serialises with a global lock, so they ran one
+  after another. The compiler is now started with `posix_spawn` on Linux and macOS. Apple M4,
+  500 rounds with 63 leaves: California 8.4 -> 2.1 s, Diabetes 7.0 -> 1.7 s; Covertype
+  (3,500 trees) 63 -> 13 s. Linux (glibc) already ran them in parallel; Windows is unchanged.
+
 ## [0.4.0] — 2026-10-27
 
 ### Changed
