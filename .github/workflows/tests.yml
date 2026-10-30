@@ -31,11 +31,23 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install libomp
 
+      # The compiler's default target, as an annotation (readable without the logs): the AVX check
+      # (check_kernel_isa.py) depends on it.
+      - name: Compiler defaults
+        if: runner.os == 'Linux'
+        run: |
+          echo "::notice title=Compiler defaults::$(c++ --version | head -1); $(c++ -Q --help=target | grep -E '^\s+-march=' | tr -s ' \t' ' '); __AVX macros: $(echo | c++ -dM -E -x c++ - | grep -c __AVX || true); CXXFLAGS='${CXXFLAGS:-}' CFLAGS='${CFLAGS:-}'; cmake $(cmake --version | head -1 | cut -d' ' -f3); nproc $(nproc)"
+
       - name: Configure
-        run: cmake -S . -B build -DLIGNUM_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -DLIGNUM_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: Build
         run: cmake --build build --config Release --parallel
+
+      - name: Compile command of the C API
+        if: runner.os == 'Linux'
+        run: |
+          echo "::notice title=c_api.cpp::$(python3 -c "import json; print(next(c['command'] for c in json.load(open('build/compile_commands.json')) if c['file'].endswith('src/c_api.cpp')))")"
 
       - name: Test
         shell: bash
