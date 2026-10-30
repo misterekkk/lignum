@@ -31,7 +31,18 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install libomp
 
+      # The compiler's default target, as an annotation (readable without the logs). GitHub's
+      # Ubuntu 26.04 image sets GCC's default to x86-64-v3 (AVX2); the builds below ask for the
+      # x86-64 baseline the wheels use, so that check_kernel_isa.py finds AVX only where lignum
+      # chooses it at run time.
+      - name: Compiler defaults
+        if: runner.os == 'Linux'
+        run: |
+          echo "::notice title=Compiler defaults::$(c++ --version | head -1); $(c++ -Q --help=target | grep -E '^\s+-march=' | tr -s ' \t' ' ')"
+
       - name: Configure
+        env:
+          CXXFLAGS: ${{ runner.os == 'Linux' && '-march=x86-64 -mtune=generic' || '' }}
         run: cmake -S . -B build -DLIGNUM_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
@@ -54,6 +65,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure
+        env:
+          CXXFLAGS: -march=x86-64 -mtune=generic  # the wheels' baseline (see the job above)
         run: cmake -S . -B build -DLIGNUM_BUILD_TESTS=ON -DLIGNUM_SANITIZE=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
       - name: Build

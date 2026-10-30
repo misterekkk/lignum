@@ -48,7 +48,7 @@ src/              engine: parsers/ (LightGBM text/JSON, XGBoost JSON/UBJSON), ir
                   catboost.* (CatBoost: CityHash, JSON parser, symmetric-tree kernel)
 python/           nanobind bindings (bindings.cpp) + lignum package; python/README.md is the PyPI page
 tests/cpp         GoogleTest      tests/python   pytest parity tests (+ smoke.py for wheels)
-benchmarks/       bench.py, bench_arrow.py, cloud.sh (cloud server run); generated models/data gitignored
+benchmarks/       suite.py (published tables), bench.py (experiments), cloud.sh (cloud server run); models/data gitignored
 docs/             Starlight (Astro) site; docs/scripts/api_reference.py writes the Python reference
 extern/simdjson   vendored (also used for exact number parsing in the text formats)
 ```

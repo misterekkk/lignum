@@ -1,31 +1,40 @@
 #!/usr/bin/env bash
 # One-shot benchmark run on a fresh Ubuntu 24.04 cloud server (e.g. Hetzner CCX / CAX):
-# installs the toolchain, builds lignum, runs the comparisons and packs the reports.
+# installs the toolchain, builds lignum, runs benchmarks/suite.py and packs the report.
 #
-#   curl -LsSf https://raw.githubusercontent.com/misterekkk/lignum/main/benchmarks/cloud.sh | bash
-#   # or, from a clone: bash benchmarks/cloud.sh
+#   git clone https://github.com/misterekkk/lignum.git && cd lignum
+#   # copy the data sets and models (below), then, inside tmux so that a dropped SSH connection
+#   # does not stop the run (detach: Ctrl-b d, reattach: tmux attach -t bench):
+#   tmux new -s bench 'bash benchmarks/cloud.sh'
 #
-# Result: ~/lignum-bench-<host>-<date>.tar.gz with the Markdown reports, CPU info and the commit.
-# About 30-40 minutes on 4-8 cores (dataset downloads, training, lleaves compiling its models).
-# Delete the server afterwards: a stopped server is still billed.
+# The output also goes to ~/lignum-bench.log (tail -f ~/lignum-bench.log to follow it).
+#
+# Every platform must predict with the same model files, so the server does not train: copy the data
+# sets and the models trained on your machine (benchmarks/suite.py trains them on its first run)
+# before running this script:
+#   scp -r benchmarks/.cache/datasets benchmarks/.cache/suite root@<server-ip>:<clone>/benchmarks/.cache/
+# (scikit-learn's source for California and Covertype, figshare, also refuses most cloud servers.)
+#
+# Result: ~/lignum-bench-<host>-<arch>-<date>.tar.gz with the reports, CPU info and the commit.
+# About 2 hours on 4-8 cores. Delete the server afterwards: a stopped server is still billed.
 # Works on x86-64 (CCX, AMD EPYC) and aarch64 (CAX, Ampere Altra); run it once per server.
 set -euo pipefail
 
 # Everything runs inside main, so a `curl | bash` pipe cut short cannot run half a script.
 main() {
 
+exec > >(tee -a "$HOME/lignum-bench.log") 2>&1
 BRANCH="${BRANCH:-main}"
-TREES="${TREES:-500}"
-REAL="lightgbm-real-california,lightgbm-real-covtype,lightgbm-real-adult,lightgbm-real-bank,lightgbm-real-diabetes"
+ROUNDS="${ROUNDS:-500}"
 
 sudo apt-get update -qq
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential cmake git curl linux-tools-common >/dev/null
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential cmake git curl tmux linux-tools-common >/dev/null
 command -v uv >/dev/null || { curl -LsSf https://astral.sh/uv/install.sh | sh; }
 export PATH="$HOME/.local/bin:$PATH"
 # uv's own Python 3.12 (with headers for the extension), whatever the image ships or lacks.
 export UV_PYTHON_PREFERENCE=only-managed
 
-if [ ! -d lignum ] && [ ! -f benchmarks/bench.py ]; then
+if [ ! -d lignum ] && [ ! -f benchmarks/suite.py ]; then
     git clone -q https://github.com/misterekkk/lignum.git
     cd lignum
 elif [ -d lignum ]; then
@@ -39,23 +48,36 @@ sudo cpupower frequency-set -g performance >/dev/null 2>&1 || true
 
 make venv >/dev/null
 uv pip install -q --python .venv/bin/python ".[test]" nanobind scikit-build-core
-# Only lleaves of the competitors (make bench-deps also pulls tl2cgen, which has no aarch64 wheel).
 uv pip install -q --python .venv/bin/python lleaves "llvmlite<0.45"
+# tl2cgen has no aarch64 wheel: try the source build, and report it as not installed if that fails.
+uv pip install -q --python .venv/bin/python treelite tl2cgen \
+    || echo "tl2cgen could not be installed: the report marks it n/a on this platform"
 make py-build >/dev/null
 PY=.venv/bin/python
 
-mkdir -p benchmarks/.cache   # target of the scp below
-# Data sets first, so a blocked download stops the run now and not after half an hour.
-# scikit-learn fetches California and Covertype from figshare, which often refuses cloud servers.
-if ! $PY -c "
-import sys; sys.path.insert(0, 'benchmarks')
-import datasets
+# Data sets and models first, so a missing file stops the run now and not after an hour.
+missing=$($PY - "$ROUNDS" <<'EOF'
+import sys
+sys.path.insert(0, "benchmarks")
+import datasets, suite
+rounds = int(sys.argv[1])
+ext = {"lightgbm": "txt", "xgboost": "json", "catboost": "cbm"}
 for name, load in datasets.LOADERS.items():
-    load(); print('data set', name, 'ok')
-"; then
+    try:
+        load()
+    except Exception as e:
+        print(f"data set {name}: {type(e).__name__}")
+for lib in suite.LIBRARIES:
+    for name in suite.DATASETS:
+        if not (suite.CACHE / f"{lib}_{name}_r{rounds}.{ext[lib]}").exists():
+            print(f"model {lib}_{name}_r{rounds}")
+EOF
+)
+if [ -n "$missing" ]; then
+    echo "$missing"
     echo
-    echo "A data set could not be downloaded. Copy them from a machine that has them, then run again:"
-    echo "  scp -r benchmarks/.cache/datasets root@<server-ip>:$PWD/benchmarks/.cache/"
+    echo "Copy the data sets and models from the machine that trained them, then run again:"
+    echo "  scp -r benchmarks/.cache/datasets benchmarks/.cache/suite root@<server-ip>:$PWD/benchmarks/.cache/"
     exit 1
 fi
 
@@ -75,38 +97,10 @@ touch "$OUT/.start"   # reports newer than this are the ones from this run
 head -20 "$OUT/machine.txt"
 
 start=$(date +%s)
-# 1. Real data sets and the synthetic models: interpreter, compiled, lleaves, native LightGBM.
-$PY benchmarks/bench.py --engines lignum,lignum-compiled,lleaves,native \
-    --only "lightgbm,lightgbm-cat,$REAL" --trees "$TREES" --repeats 5
-# 2. Arrow input end to end (lignum vs lleaves via pandas vs LightGBM).
-$PY benchmarks/bench_arrow.py --trees "$TREES"
-# 3. Host-tuned build, for comparison with lleaves (which always targets the host CPU).
-CMAKE_ARGS="-DLIGNUM_NATIVE=ON" make py-build >/dev/null
-$PY benchmarks/bench.py --engines lignum,lignum-compiled --only "lightgbm,$REAL" --trees "$TREES" --repeats 5
-native_report=$(ls -t benchmarks/results/2*.md | head -1)
-CMAKE_ARGS="" make py-build >/dev/null
-# 4. Which path autotune picks per model on this CPU.
-TREES="$TREES" $PY - <<'EOF' | tee "$OUT/autotune.txt"
-import os, sys
-sys.path.insert(0, "benchmarks")
-import numpy as np, lignum, datasets
-for name in ["california", "covtype", "adult", "diabetes"]:
-    d = datasets.LOADERS[name]()
-    m = lignum.load(f"benchmarks/.cache/real/{name}_t{os.environ['TREES']}.txt")
-    r = m.compile(autotune=d.X[:4096])["autotune"]
-    print(name, "compiled_min_rows", r["compiled_min_rows"], {k: (round(a), round(b)) for k, (a, b) in r["timings"].items()})
-# The synthetic model bench.py trained above (1M rows, 20 features, independent: hard to predict).
-import glob
-cache = sorted(glob.glob("benchmarks/.cache/r1000000_f20_t*_d6"))[-1]
-X = np.load(f"{cache}/data.npz")["X"][:4096]
-m = lignum.load(f"{cache}/lgb.txt")
-r = m.compile(autotune=X)["autotune"]
-print("synthetic", "compiled_min_rows", r["compiled_min_rows"], {k: (round(a), round(b)) for k, (a, b) in r["timings"].items()})
-EOF
+$PY benchmarks/suite.py --rounds "$ROUNDS"
 echo "total $(( ($(date +%s) - start) / 60 )) min" >> "$OUT/machine.txt"
 
 find benchmarks/results -maxdepth 1 -type f -newer "$OUT/.start" -exec cp {} "$OUT"/ \;
-mv "$OUT/$(basename "$native_report")" "$OUT/native-$(basename "$native_report")"
 rm "$OUT/.start"
 tar -czf "$OUT.tar.gz" -C "$(dirname "$OUT")" "$(basename "$OUT")"
 echo

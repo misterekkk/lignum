@@ -21,10 +21,13 @@
 
 /* ---- Charts (src/components/BarChart.astro) ----------------------------------------------
    Series colours validated for both themes against the page background (dataviz palette check:
-   chroma, lightness band, colour-blind separation, contrast): lignum teal, the other engine orange. */
+   chroma, lightness band, colour-blind separation, contrast): lignum teal (its second mode a
+   lighter / darker teal), the other engine orange, a third engine purple. */
 .lg-chart {
   --lg-lignum: #00a3ad;
+  --lg-lignum-alt: #8bdbe0;
   --lg-other: #d95926;
+  --lg-third: #a98bea;
   --lg-grid: var(--sl-color-gray-5);
   margin: 1.75rem 0;
   padding: 1rem 1.25rem 1.1rem;
@@ -34,7 +37,9 @@
 }
 :root[data-theme='light'] .lg-chart {
   --lg-lignum: #0094a0;
+  --lg-lignum-alt: #0b5d63;
   --lg-other: #eb6834;
+  --lg-third: #7856c9;
   --lg-grid: var(--sl-color-gray-5);
 }
 .sl-markdown-content .lg-chart * + * { margin-top: 0; }
@@ -50,6 +55,8 @@
 .lg-swatch { width: 0.85rem; height: 0.6rem; border-radius: 2px; }
 .lg-swatch.lignum, .lg-bar.lignum { background: var(--lg-lignum); }
 .lg-swatch.other, .lg-bar.other { background: var(--lg-other); }
+.lg-swatch.lignum-alt, .lg-bar.lignum-alt { background: var(--lg-lignum-alt); }
+.lg-swatch.third, .lg-bar.third { background: var(--lg-third); }
 .lg-plot { margin-top: 0.85rem !important; display: flex; flex-direction: column; gap: 0.7rem; }
 .lg-group {
   display: grid; grid-template-columns: minmax(6.5rem, 10rem) 1fr;

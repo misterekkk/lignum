@@ -1,0 +1,9 @@
+Apple MacBook Pro, Apple M4
+cores: 10 (4 performance + 6 efficiency)
+memory: 16 GB
+L1i per performance core: 192 KB, L2 per performance cluster: 16 MB
+ProductName:  macOS
+ProductVersion:  26.6.2
+BuildVersion:  25G83
+Apple clang version 17.0.0 (clang-1700.0.13.3)
+on AC power; browsers and other heavy applications closed (an editor stayed open)
