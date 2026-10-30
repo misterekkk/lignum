@@ -62,16 +62,19 @@ row on one thread (median / p99):
 
 | | lignum | lleaves | TL2cgen | LightGBM |
 |---|---:|---:|---:|---:|
-| California housing, 1M rows | **0.32 s** | 0.48 s | 1.96 s | 3.56 s |
-| Covertype (7 classes, 3,500 trees), 1M rows | **1.57 s** | 2.20 s | 34.5 s | 37.4 s |
-| Diabetes 130-US (categorical), 1M rows | **0.75 s** | 4.23 s | 31.9 s | 9.33 s |
-| One row, California housing | **11.0 / 23.7 µs** | 24.6 / 56.4 µs | 49.2 / 87.8 µs | 57.7 / 92.9 µs |
-| One row, Diabetes 130-US | **13.3 / 34.2 µs** | 77.6 / 118 µs | 280 / 365 µs | 82.5 / 121 µs |
-| Compile the model (Covertype) | **22 s** (interpreter: 0.1 s) | 503 s | 70 s | — |
-| Bit-identical to LightGBM | yes | no (55-100% of rows differ) | yes | — |
+| California, 1M rows | **0.32 s** | 0.48 s | 1.96 s | 3.56 s |
+| Covertype, 1M rows | **1.57 s** | 2.20 s | 34.5 s | 37.4 s |
+| Diabetes, 1M rows | **0.75 s** | 4.23 s | 31.9 s | 9.33 s |
+| California, 1 row (µs) | **11.0 / 23.7** | 24.6 / 56.4 | 49.2 / 87.8 | 57.7 / 92.9 |
+| Diabetes, 1 row (µs) | **13.3 / 34.2** | 77.6 / 118 | 280 / 365 | 82.5 / 121 |
+| Covertype, compile | **22 s** | 503 s | 70 s | — |
+| Bit-identical | yes | no | yes | — |
 
-lignum: the compiled mode for a million rows; for one row the faster of its two modes (the
+Covertype has 7 classes (3,500 trees), Diabetes 130-US categorical features with hundreds of
+values. lignum: the compiled mode for a million rows; for one row the faster of its two modes (the
 interpreter on California, the compiled trees on Diabetes), which `model.autotune(X)` picks for you.
+The interpreter needs no compiling and loads Covertype in 0.1 s. lleaves differs from LightGBM on
+55-100% of the rows.
 
 **XGBoost** models: 4-8x faster than XGBoost on a million rows and 5-15x on single rows (TL2cgen
 cannot load XGBoost 3 models trained on pandas categories, and is not bit-identical on the others).
