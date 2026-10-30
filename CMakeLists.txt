@@ -56,7 +56,10 @@ set_source_files_properties(src/io.cpp PROPERTIES COMPILE_DEFINITIONS "LIGNUM_VE
 # x86-64: the CatBoost block kernel also compiled for AVX2, chosen at run time by cpuid. GCC and
 # Clang switch the target inside catboost_kernel_avx2.cpp (the build stays generic); MSVC has no
 # per-function target, so that one file is compiled with /arch:AVX2, and without /GL: link-time
-# code generation could inline its functions into generic callers.
+# code generation could inline its functions into generic callers. The file stays out of LTO with
+# GCC and Clang too: GCC 15's LTO gave that target to functions of other files (the C API, the
+# parsers, the generic kernel; tests/cpp/check_kernel_isa.py). The kernel is reached through a
+# function pointer, so LTO has nothing to gain there.
 if(CMAKE_OSX_ARCHITECTURES)  # macOS cross builds (e.g. x86_64 on Apple silicon): the target decides
     string(COMPARE EQUAL "${CMAKE_OSX_ARCHITECTURES}" "x86_64" LIGNUM_TARGET_X86_64)
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
@@ -67,6 +70,8 @@ if(LIGNUM_TARGET_X86_64)
     target_compile_definitions(lignum PRIVATE LIGNUM_CATBOOST_AVX2)
     if(MSVC)
         set_source_files_properties(src/catboost_kernel_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2;/GL-")
+    else()
+        set_source_files_properties(src/catboost_kernel_avx2.cpp PROPERTIES COMPILE_OPTIONS "-fno-lto")
     endif()
     set(LIGNUM_CATBOOST_AVX2 ON)
 endif()
