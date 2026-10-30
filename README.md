@@ -65,8 +65,8 @@ row on one thread (median / p99):
 | California, 1M rows | **0.32 s** | 0.48 s | 1.96 s | 3.56 s |
 | Covertype, 1M rows | **1.57 s** | 2.20 s | 34.5 s | 37.4 s |
 | Diabetes, 1M rows | **0.75 s** | 4.23 s | 31.9 s | 9.33 s |
-| California, 1 row (µs) | **11.0 / 23.7** | 24.6 / 56.4 | 49.2 / 87.8 | 57.7 / 92.9 |
-| Diabetes, 1 row (µs) | **13.3 / 34.2** | 77.6 / 118 | 280 / 365 | 82.5 / 121 |
+| California, 1 row | **11.0 / 23.7 µs** | 24.6 / 56.4 µs | 49.2 / 87.8 µs | 57.7 / 92.9 µs |
+| Diabetes, 1 row | **13.3 / 34.2 µs** | 77.6 / 118 µs | 280 / 365 µs | 82.5 / 121 µs |
 | Covertype, compile | **22 s** | 503 s | 70 s | — |
 | Bit-identical | yes | no | yes | — |
 

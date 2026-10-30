@@ -19,6 +19,33 @@
 /* Benchmark tables: aligned digits. */
 .sl-markdown-content table td { font-variant-numeric: tabular-nums; }
 
+/* Benchmark tables (benchmarks.mdx wraps them in .lg-table): a card like the charts, numbers kept
+   on one line; a table wider than the column scrolls inside its card. */
+.sl-markdown-content .lg-table {
+  margin: 1.5rem 0;
+  padding: 0.35rem 1.1rem 0.5rem;
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 0.75rem;
+  background: var(--sl-color-bg-nav);
+  overflow-x: auto;
+}
+.sl-markdown-content .lg-table table {
+  display: table; width: 100%; margin: 0; border: none; border-collapse: collapse;
+  font-size: var(--sl-text-sm);
+}
+.sl-markdown-content .lg-table tr { background: transparent; }
+.sl-markdown-content .lg-table th,
+.sl-markdown-content .lg-table td {
+  border: none; border-bottom: 1px solid var(--sl-color-hairline); background: transparent;
+  padding: 0.5rem 0.75rem; white-space: nowrap;
+}
+.sl-markdown-content .lg-table th { color: var(--sl-color-white); font-weight: 600; vertical-align: bottom; }
+.sl-markdown-content .lg-table th:first-child,
+.sl-markdown-content .lg-table td:first-child { padding-left: 0; }
+.sl-markdown-content .lg-table th:last-child,
+.sl-markdown-content .lg-table td:last-child { padding-right: 0; }
+.sl-markdown-content .lg-table tr:last-child td { border-bottom: none; }
+
 /* ---- Charts (src/components/BarChart.astro) ----------------------------------------------
    Series colours validated for both themes against the page background (dataviz palette check:
    chroma, lightness band, colour-blind separation, contrast): lignum teal (its second mode a

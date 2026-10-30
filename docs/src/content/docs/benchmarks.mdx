@@ -97,9 +97,11 @@ The same charts on the Apple M4:
 **1,000,000 rows**, seconds, one thread / all threads (8 on x86, 10 on the M4). Lower is better; the
 fastest engine on one thread is in bold.
 
+<div class="lg-table">
+
 | Data set | lignum | lignum compiled | lleaves | TL2cgen | LightGBM |
 |---|---:|---:|---:|---:|---:|
-| **x86-64 (AMD EPYC-Milan, 8 vCPU)** | | | | | |
+| **x86-64** | | | | | |
 | California housing | 6.56 / 1.19 | **1.89 / 0.321** | 2.68 / 0.476 | 10.4 / 1.96 | 21.2 / 3.56 |
 | Covertype | 42.7 / 8.40 | **7.52 / 1.57** | 9.59 / 2.20 | 247 / 34.5 | 209 / 37.4 |
 | Adult | 10.8 / 1.68 | **2.56 / 0.404** | 3.50 / 0.585 | 20.1 / 2.86 | 30.7 / 5.30 |
@@ -107,7 +109,7 @@ fastest engine on one thread is in bold.
 | Diabetes 130-US | 13.6 / 2.33 | **4.78 / 0.752** | 20.6 / 4.23 | 226 / 31.9 | 59.0 / 9.32 |
 | synthetic | 6.20 / 1.12 | **3.33 / 0.546** | 4.98 / 0.750 | 27.7 / 3.81 | 31.2 / 4.58 |
 | synthetic-cat | 22.4 / 3.50 | **6.96 / 1.15** | 41.8 / 8.96 | 281 / 39.3 | 79.2 / 11.9 |
-| **Apple M4 (10 cores)** | | | | | |
+| **Apple M4** | | | | | |
 | California housing | 4.13 / 0.625 | **0.990 / 0.154** | 1.59 / 0.259 | 3.09 / 0.535 | 19.7 / 3.44 |
 | Covertype | 24.3 / 3.89 | **5.05 / 0.761** | 5.75 / 1.00 | 22.1 / 4.73 | 132 / 26.9 |
 | Adult | 6.92 / 1.03 | **1.37 / 0.206** | 1.55 / 0.254 | 4.29 / 0.716 | 22.6 / 3.47 |
@@ -116,11 +118,15 @@ fastest engine on one thread is in bold.
 | synthetic | 3.84 / 0.591 | **1.39 / 0.232** | 2.40 / 0.366 | 5.62 / 0.852 | 24.2 / 3.67 |
 | synthetic-cat | 15.7 / 2.28 | **3.70 / 0.520** | 27.9 / 5.32 | 69.8 / 12.2 | 48.2 / 6.74 |
 
+</div>
+
 **One row**, one thread, a different row on every call: median / p99 in microseconds.
+
+<div class="lg-table">
 
 | Data set | lignum | lignum compiled | lleaves | TL2cgen | LightGBM |
 |---|---:|---:|---:|---:|---:|
-| **x86-64 (AMD EPYC-Milan, 8 vCPU)** | | | | | |
+| **x86-64** | | | | | |
 | California housing | **11.0 / 23.7** | 11.4 / 31.0 | 24.6 / 56.4 | 49.2 / 87.8 | 57.7 / 92.9 |
 | Covertype | **90.7 / 129** | 142 / 183 | 185 / 233 | 294 / 394 | 355 / 421 |
 | Adult | 13.0 / 23.2 | **10.8 / 28.6** | 17.3 / 41.6 | 57.2 / 97.6 | 62.2 / 96.4 |
@@ -128,7 +134,7 @@ fastest engine on one thread is in bold.
 | Diabetes 130-US | 17.4 / 30.4 | **13.3 / 34.2** | 77.6 / 118 | 280 / 365 | 82.5 / 121 |
 | synthetic | **10.6 / 22.6** | 11.3 / 30.8 | 17.7 / 38.5 | 66.0 / 95.0 | 57.7 / 80.4 |
 | synthetic-cat | 29.0 / 49.0 | **17.3 / 43.7** | 106 / 145 | 342 / 432 | 109 / 149 |
-| **Apple M4 (10 cores)** | | | | | |
+| **Apple M4** | | | | | |
 | California housing | 7.0 / 8.6 | **6.9 / 12.2** | 9.3 / 12.0 | 13.8 / 17.4 | 33.7 / 43.5 |
 | Covertype | 46.9 / 56.9 | 43.4 / 61.4 | **38.1 / 57.7** | 43.2 / 71.2 | 210 / 274 |
 | Adult | 7.8 / 10.9 | **7.0 / 9.4** | 7.3 / 9.7 | 13.6 / 20.7 | 32.8 / 43.1 |
@@ -137,12 +143,16 @@ fastest engine on one thread is in bold.
 | synthetic | **5.8 / 6.9** | 6.7 / 8.2 | 7.9 / 10.2 | 15.3 / 18.7 | 34.6 / 41.0 |
 | synthetic-cat | 21.0 / 23.1 | **9.8 / 10.6** | 49.4 / 56.3 | 88.8 / 118 | 57.6 / 72.4 |
 
+</div>
+
 **Preparation**, seconds: loading the model and, for the compiled engines, generating and compiling
 the code, from a cold cache. LightGBM itself needs no preparation worth measuring.
 
+<div class="lg-table">
+
 | Data set | lignum | lignum compiled | lleaves | TL2cgen |
 |---|---:|---:|---:|---:|
-| **x86-64 (AMD EPYC-Milan, 8 vCPU)** | | | | |
+| **x86-64** | | | | |
 | California housing | **0.02** | 3.82 | 40 | 5.62 |
 | Covertype | **0.11** | 22 | 503 | 70 |
 | Adult | **0.02** | 3.52 | 47 | 7.17 |
@@ -150,7 +160,7 @@ the code, from a cold cache. LightGBM itself needs no preparation worth measurin
 | Diabetes 130-US | **0.06** | 3.26 | 240 | 75 |
 | synthetic | **0.03** | 3.96 | 50 | 5.98 |
 | synthetic-cat | **0.09** | 3.30 | 291 | 68 |
-| **Apple M4 (10 cores)** | | | | |
+| **Apple M4** | | | | |
 | California housing | **0.01** | 2.69 | 13 | 2.49 |
 | Covertype | **0.06** | 13 | 112 | 43 |
 | Adult | **0.01** | 1.96 | 15 | 3.53 |
@@ -158,6 +168,8 @@ the code, from a cold cache. LightGBM itself needs no preparation worth measurin
 | Diabetes 130-US | **0.03** | 1.82 | 126 | 13 |
 | synthetic | **0.01** | 2.24 | 16 | 2.42 |
 | synthetic-cat | **0.05** | 1.76 | 120 | 27 |
+
+</div>
 
 lignum (both modes) and TL2cgen equal LightGBM's predictions on every row. lleaves differs from
 LightGBM in the last bits on 55-100% of the held-out rows, depending on the data set: its compiled
@@ -171,9 +183,11 @@ categorical features. XGBoost predicts through `inplace_predict` (no `DMatrix` p
 
 **1,000,000 rows**, seconds, one thread / all threads:
 
+<div class="lg-table">
+
 | Data set | lignum | lignum compiled | TL2cgen | XGBoost |
 |---|---:|---:|---:|---:|
-| **x86-64 (AMD EPYC-Milan, 8 vCPU)** | | | | |
+| **x86-64** | | | | |
 | California housing | 4.88 / 0.910 | **1.51 / 0.249** | 6.00 / 1.19 | 6.95 / 1.37 |
 | Covertype | 38.6 / 6.86 | **7.20 / 1.41** | 195 / 26.2 | 48.8 / 10.8 |
 | Adult | 13.4 / 2.11 | **3.09 / 0.486** | n/a | 24.3 / 4.03 |
@@ -181,7 +195,7 @@ categorical features. XGBoost predicts through `inplace_predict` (no `DMatrix` p
 | Diabetes 130-US | 11.1 / 1.85 | **3.42 / 0.535** | n/a | 23.4 / 4.31 |
 | synthetic | 6.59 / 1.16 | **3.45 / 0.554** | 19.8 / 2.78 | 14.3 / 2.38 |
 | synthetic-cat | 19.1 / 2.97 | **7.22 / 1.05** | n/a | 44.2 / 6.50 |
-| **Apple M4 (10 cores)** | | | | |
+| **Apple M4** | | | | |
 | California housing | 2.87 / 0.447 | **0.806 / 0.127** | 3.03 / 0.567 | 4.11 / 0.691 |
 | Covertype | 19.7 / 3.24 | **4.91 / 0.724** | 22.7 / 5.75 | 25.6 / 4.74 |
 | Adult | 8.88 / 1.31 | **1.82 / 0.295** | n/a | 13.6 / 2.09 |
@@ -190,11 +204,15 @@ categorical features. XGBoost predicts through `inplace_predict` (no `DMatrix` p
 | synthetic | 4.07 / 0.654 | **1.46 / 0.245** | 6.78 / 1.19 | 9.08 / 1.34 |
 | synthetic-cat | 13.3 / 1.92 | **3.62 / 0.520** | n/a | 23.0 / 3.44 |
 
+</div>
+
 **One row**, one thread: median / p99 in microseconds.
+
+<div class="lg-table">
 
 | Data set | lignum | lignum compiled | TL2cgen | XGBoost |
 |---|---:|---:|---:|---:|
-| **x86-64 (AMD EPYC-Milan, 8 vCPU)** | | | | |
+| **x86-64** | | | | |
 | California housing | **8.6 / 17.6** | 9.1 / 27.2 | 36.9 / 76.7 | 111 / 200 |
 | Covertype | **88.6 / 151** | 112 / 161 | 252 / 316 | 442 / 543 |
 | Adult | 15.6 / 27.4 | **11.6 / 29.2** | n/a | 161 / 224 |
@@ -202,7 +220,7 @@ categorical features. XGBoost predicts through `inplace_predict` (no `DMatrix` p
 | Diabetes 130-US | 13.7 / 25.3 | **12.5 / 34.2** | n/a | 187 / 255 |
 | synthetic | **9.6 / 20.5** | 11.6 / 30.4 | 51.5 / 93.3 | 130 / 178 |
 | synthetic-cat | 24.2 / 43.2 | **21.7 / 52.2** | n/a | 222 / 281 |
-| **Apple M4 (10 cores)** | | | | |
+| **Apple M4** | | | | |
 | California housing | **4.9 / 6.1** | 5.6 / 9.4 | 13.0 / 16.1 | 46.2 / 51.4 |
 | Covertype | 40.9 / 49.6 | **39.8 / 54.5** | 47.7 / 65.6 | 211 / 247 |
 | Adult | 9.8 / 14.0 | **6.3 / 8.8** | n/a | 60.2 / 72.3 |
@@ -211,11 +229,15 @@ categorical features. XGBoost predicts through `inplace_predict` (no `DMatrix` p
 | synthetic | **6.2 / 7.1** | 6.4 / 7.8 | 15.8 / 18.4 | 52.0 / 61.5 |
 | synthetic-cat | 17.0 / 18.7 | **9.8 / 10.8** | n/a | 81.1 / 92.0 |
 
+</div>
+
 **Preparation**, seconds:
+
+<div class="lg-table">
 
 | Data set | lignum | lignum compiled | TL2cgen |
 |---|---:|---:|---:|
-| **x86-64 (AMD EPYC-Milan, 8 vCPU)** | | | |
+| **x86-64** | | | |
 | California housing | **0.02** | 4.65 | 6.01 |
 | Covertype | **0.21** | 27 | 60 |
 | Adult | **0.04** | 4.75 | n/a |
@@ -223,7 +245,7 @@ categorical features. XGBoost predicts through `inplace_predict` (no `DMatrix` p
 | Diabetes 130-US | **0.28** | 4.96 | n/a |
 | synthetic | **0.03** | 3.76 | 6.39 |
 | synthetic-cat | **0.72** | 5.73 | n/a |
-| **Apple M4 (10 cores)** | | | |
+| **Apple M4** | | | |
 | California housing | **0.01** | 1.93 | 1.32 |
 | Covertype | **0.09** | 12 | 22 |
 | Adult | **0.02** | 1.81 | n/a |
@@ -231,6 +253,8 @@ categorical features. XGBoost predicts through `inplace_predict` (no `DMatrix` p
 | Diabetes 130-US | **0.14** | 2.63 | n/a |
 | synthetic | **0.01** | 1.69 | 1.58 |
 | synthetic-cat | **0.34** | 2.87 | n/a |
+
+</div>
 
 lignum equals XGBoost on every row. TL2cgen differs on 31-100% of the held-out rows: XGBoost
 compares and adds in float32, and TL2cgen's generated code does not follow it exactly.
@@ -245,9 +269,11 @@ models 3,500.
 
 **1,000,000 rows**, seconds, one thread / all threads:
 
+<div class="lg-table">
+
 | Data set | lignum | CatBoost |
 |---|---:|---:|
-| **x86-64 (AMD EPYC-Milan, 8 vCPU)** | | |
+| **x86-64** | | |
 | California housing | **0.292 / 0.079** | 0.344 / 0.088 |
 | Covertype | **0.593 / 0.162** | 1.76 / 0.695 |
 | Adult | **1.25 / 0.275** | 2.24 / 0.467 |
@@ -255,7 +281,7 @@ models 3,500.
 | Diabetes 130-US | **4.20 / 0.880** | 7.42 / 1.49 |
 | synthetic | **0.369 / 0.113** | 0.424 / 0.119 |
 | synthetic-cat | **1.85 / 0.360** | 2.84 / 0.594 |
-| **Apple M4 (10 cores)** | | |
+| **Apple M4** | | |
 | California housing | **0.159 / 0.030** | 0.415 / 0.082 |
 | Covertype | **0.437 / 0.120** | 1.19 / 0.235 |
 | Adult | **0.613 / 0.111** | 1.55 / 0.278 |
@@ -264,13 +290,17 @@ models 3,500.
 | synthetic | **0.189 / 0.043** | 0.465 / 0.094 |
 | synthetic-cat | **0.687 / 0.141** | 1.59 / 0.310 |
 
+</div>
+
 **One row**, one thread, from a one-row DataFrame: median / p99 in microseconds. Most of CatBoost's
 time here is the conversion of the DataFrame, which grows with the number of category values
 (synthetic-cat has columns with up to 5,000).
 
+<div class="lg-table">
+
 | Data set | lignum | CatBoost |
 |---|---:|---:|
-| **x86-64 (AMD EPYC-Milan, 8 vCPU)** | | |
+| **x86-64** | | |
 | California housing | **27.9 / 44.8** | 328 / 408 |
 | Covertype | **30.5 / 55.4** | 827 / 1,023 |
 | Adult | **55.1 / 77.4** | 582 / 853 |
@@ -278,7 +308,7 @@ time here is the conversion of the DataFrame, which grows with the number of cat
 | Diabetes 130-US | **237 / 288** | 5,761 / 6,200 |
 | synthetic | **28.9 / 56.1** | 382 / 527 |
 | synthetic-cat | **52.6 / 85.3** | 11,340 / 11,737 |
-| **Apple M4 (10 cores)** | | |
+| **Apple M4** | | |
 | California housing | **19.8 / 21.1** | 155 / 166 |
 | Covertype | **21.2 / 22.4** | 467 / 502 |
 | Adult | **27.5 / 30.5** | 245 / 264 |
@@ -286,6 +316,8 @@ time here is the conversion of the DataFrame, which grows with the number of cat
 | Diabetes 130-US | **102 / 109** | 2,417 / 2,496 |
 | synthetic | **20.0 / 20.6** | 196 / 222 |
 | synthetic-cat | **25.8 / 27.7** | 4,740 / 4,838 |
+
+</div>
 
 lignum equals CatBoost on every row of every data set.
 
@@ -296,9 +328,11 @@ categorical (dictionary) columns too. LightGBM and XGBoost predict a table of nu
 go through `to_pandas()` when it has dictionary columns; lleaves and CatBoost always do. One row, one
 thread, median / p99 in microseconds, LightGBM models:
 
+<div class="lg-table">
+
 | Data set | lignum | lignum compiled | lleaves | LightGBM |
 |---|---:|---:|---:|---:|
-| **x86-64 (AMD EPYC-Milan, 8 vCPU)** | | | | |
+| **x86-64** | | | | |
 | California housing | **15.9 / 31.1** | 18.1 / 37.8 | 347 / 927 | 112 / 162 |
 | Covertype | **141 / 185** | 191 / 249 | 1,195 / 2,722 | 541 / 633 |
 | Adult | 24.5 / 45.3 | **24.3 / 53.4** | 8,146 / 9,645 | 8,601 / 10,263 |
@@ -306,7 +340,7 @@ thread, median / p99 in microseconds, LightGBM models:
 | Diabetes 130-US | **67.8 / 95.0** | 68.4 / 109 | 30,967 / 35,461 | 31,744 / 36,253 |
 | synthetic | **21.8 / 39.1** | 25.2 / 46.1 | 529 / 1,267 | 138 / 180 |
 | synthetic-cat | 45.7 / 73.5 | **36.7 / 72.1** | 7,588 / 17,991 | 7,698 / 18,352 |
-| **Apple M4 (10 cores)** | | | | |
+| **Apple M4** | | | | |
 | California housing | 9.5 / 11.1 | **9.4 / 13.0** | 100 / 111 | 58.6 / 67.3 |
 | Covertype | 59.0 / 69.0 | **56.7 / 75.3** | 259 / 321 | 267 / 332 |
 | Adult | 13.4 / 16.8 | **12.7 / 15.8** | 1,226 / 1,353 | 1,349 / 1,479 |
@@ -314,6 +348,8 @@ thread, median / p99 in microseconds, LightGBM models:
 | Diabetes 130-US | 29.8 / 31.2 | **25.2 / 26.7** | 5,189 / 5,539 | 5,470 / 5,817 |
 | synthetic | **10.7 / 11.7** | 11.5 / 13.0 | 125 / 148 | 65.2 / 72.4 |
 | synthetic-cat | 26.7 / 29.5 | **15.7 / 16.9** | 2,797 / 2,932 | 2,865 / 2,988 |
+
+</div>
 
 For XGBoost models the picture is the same (one row: lignum 7-166 µs, XGBoost 104-31,669 µs); for
 CatBoost models lignum takes 4-98 µs and CatBoost 245-31,577 µs. With a million rows lignum is as fast
@@ -342,11 +378,15 @@ in the reports.
 **Models.** 500 boosting rounds, learning rate 0.1, seed 7, trained once on 80% of each data set
 and copied to every machine: every report lists each model file's SHA-256.
 
+<div class="lg-table">
+
 | Library | Trees | Parameters |
 |---|---|---|
 | LightGBM 4.7 | leaf-wise, up to 63 leaves | `num_leaves=63`, `max_depth=-1` |
 | XGBoost 3.4 | leaf-wise, up to 63 leaves | `tree_method="hist"`, `grow_policy="lossguide"`, `max_leaves=63`, `max_depth=0` |
 | CatBoost 1.2.10 | symmetric, 64 leaves | `depth=6` (the default; lignum reads symmetric trees only) |
+
+</div>
 
 XGBoost's `lossguide` grows trees best-first, as LightGBM does; it is the pairing LightGBM's own
 comparison with XGBoost uses. CatBoost's symmetric trees are the closest match, not an identical one.
