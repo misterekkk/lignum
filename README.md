@@ -60,7 +60,7 @@ The same models everywhere (500 rounds, 63 leaves; CatBoost depth 6), a differen
 AMD EPYC-Milan (Hetzner CCX33, 8 vCPU). **LightGBM** models, 1,000,000 rows on all threads and one
 row on one thread (median / p99):
 
-| | lignum | lleaves | TL2cgen | LightGBM |
+| | &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;lignum | &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;lleaves | &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;TL2cgen | &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;LightGBM |
 |---|---:|---:|---:|---:|
 | California, 1M rows | **0.32 s** | 0.48 s | 1.96 s | 3.56 s |
 | Covertype, 1M rows | **1.57 s** | 2.20 s | 34.5 s | 37.4 s |
