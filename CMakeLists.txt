@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.18...3.31)
 project(lignum LANGUAGES CXX)
 
 option(LIGNUM_BUILD_TESTS "Build the GoogleTest suite" OFF)
+option(LIGNUM_BUILD_FUZZERS "Build the libFuzzer targets (Clang with libFuzzer; tests/fuzz/README.md)" OFF)
+option(LIGNUM_WARNINGS_AS_ERRORS "Compile the library with -Wall -Wextra -Werror (GCC, Clang; CI)" OFF)
 option(LIGNUM_SANITIZE "Build with sanitizers (tests, not releases)" OFF)
 set(LIGNUM_SANITIZERS "address,undefined" CACHE STRING "Sanitizers for LIGNUM_SANITIZE (ASan hangs on some macOS versions: use undefined there)")
 option(LIGNUM_NATIVE "Tune for the build machine (-march/-mcpu=native). Never enable for distributed wheels." OFF)
@@ -78,8 +80,9 @@ set_target_properties(lignum PROPERTIES OUTPUT_NAME lignum_static CXX_VISIBILITY
 target_include_directories(lignum
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
-            ${CMAKE_CURRENT_SOURCE_DIR}/extern/simdjson
 )
+# Vendored: a system include, so warnings and static analysis cover lignum's own code only.
+target_include_directories(lignum SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/extern/simdjson)
 
 # Homebrew's libomp is keg-only, so AppleClang cannot find it without a hint.
 if(APPLE AND NOT OpenMP_ROOT AND NOT DEFINED ENV{OpenMP_ROOT})
@@ -105,6 +108,9 @@ if(MSVC)
     target_compile_options(lignum PRIVATE /fp:precise)
 else()
     target_compile_options(lignum PRIVATE -ffp-contract=off -fno-math-errno -funroll-loops)
+    if(LIGNUM_WARNINGS_AS_ERRORS)
+        target_compile_options(lignum PRIVATE -Wall -Wextra -Werror)
+    endif()
     if(LIGNUM_NATIVE)
         if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
             target_compile_options(lignum PRIVATE -mcpu=native)
@@ -114,9 +120,16 @@ else()
     endif()
 endif()
 
+# Link-time optimisation of the library. Not for sanitizer and fuzzer builds (test builds, slower
+# to link), and with Clang outside Apple only when llvm-ar was found: Clang's LTO objects are LLVM
+# bitcode, and GNU ar makes an archive of them that GNU ld cannot read ("file format not recognized").
 include(CheckIPOSupported)
 check_ipo_supported(RESULT LIGNUM_IPO_SUPPORTED OUTPUT _ipo_msg LANGUAGES CXX)
-if(LIGNUM_IPO_SUPPORTED)
+if(LIGNUM_IPO_SUPPORTED AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND NOT APPLE AND NOT CMAKE_CXX_COMPILER_AR)
+    message(STATUS "lignum: no link-time optimisation (Clang without llvm-ar)")
+    set(LIGNUM_IPO_SUPPORTED OFF)
+endif()
+if(LIGNUM_IPO_SUPPORTED AND NOT LIGNUM_SANITIZE AND NOT LIGNUM_BUILD_FUZZERS)
     set_property(TARGET lignum PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
@@ -187,4 +200,11 @@ if(LIGNUM_BUILD_TESTS)
 
     enable_testing()
     add_subdirectory(tests/cpp)
+endif()
+
+if(LIGNUM_BUILD_FUZZERS)
+    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        message(FATAL_ERROR "LIGNUM_BUILD_FUZZERS needs Clang with libFuzzer (Apple Clang has none: use Homebrew's LLVM).")
+    endif()
+    add_subdirectory(tests/fuzz)
 endif()

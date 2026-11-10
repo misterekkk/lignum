@@ -3,7 +3,8 @@
 lignum reads model files (LightGBM, XGBoost and CatBoost formats, and its own `.bin`) and, in the
 compiled mode, loads native libraries. A model file can come from somewhere you do not fully
 control, so the parsers are written to reject malformed input: every format is fuzzed in CI
-(`tests/cpp/test_fuzz.cpp`, also under AddressSanitizer and UndefinedBehaviorSanitizer) and must fail
+(coverage-guided with libFuzzer in `tests/fuzz/`, and with random mutations in
+`tests/cpp/test_fuzz.cpp`, under AddressSanitizer and UndefinedBehaviorSanitizer) and must fail
 with an error, never crash, including on Windows' 1 MB stack.
 
 ## Supported versions

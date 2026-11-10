@@ -110,3 +110,23 @@ TEST(XGBoost, CategoriesNoInputCanMatchAreDropped) {
     // In the set -> right (1.0); otherwise, invalid codes and NaN (default_left) -> left (-1.0).
     EXPECT_EQ(predict_raw(model, {1.0, 2.0, 0.0, 16777216.0, -3.0, NaN}, 1), (std::vector<double>{1.0, -1.0, -1.0, -1.0, -1.0, -1.0}));
 }
+
+TEST(XGBoost, OneBaseScoreForEveryClass) {
+    // XGBoost before 2.0 stores one base_score for multiclass models. It was copied to every class
+    // with vector::assign(n, base_scores[0]), which reads the element after freeing the vector's
+    // old storage (found by tests/fuzz under AddressSanitizer).
+    const std::string tree = R"({"left_children": [1, -1, -1], "right_children": [2, -1, -1], "split_indices": [0, 0, 0],
+        "split_conditions": [0.5, -1.0, 1.0], "default_left": [0, 0, 0]})";
+    const std::string json = R"({"learner": {
+        "learner_model_param": {"base_score": "[5E-1]", "num_class": "3", "num_target": "1"},
+        "objective": {"name": "multi:softprob"},
+        "gradient_booster": {"name": "gbtree", "model": {"trees": [)" + tree + "," + tree + "," + tree +
+                             R"(], "tree_info": [0, 1, 2]}}}})";
+    const auto model = lignum::load(write_temp("xgb_one_base.json", json), "xgboost");
+    ASSERT_EQ(model.n_outputs, 3u);
+    std::vector<double> out(6);
+    const std::vector<double> X = {0.0, 1.0};
+    model.predict_raw(X.data(), 2, 1, out.data(), 1);
+    // Every class: 0.5 + its tree's leaf, in float32.
+    EXPECT_EQ(out, (std::vector<double>{-0.5, -0.5, -0.5, 1.5, 1.5, 1.5}));
+}

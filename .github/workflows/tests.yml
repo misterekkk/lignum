@@ -9,6 +9,7 @@ on:
       - 'tests/**'
       - 'CMakeLists.txt'
       - 'pyproject.toml'
+      - '.clang-tidy'
       - '.github/workflows/tests.yml'
   pull_request:
 
@@ -40,10 +41,11 @@ jobs:
         run: |
           echo "::notice title=Compiler defaults::$(c++ --version | head -1); $(c++ -Q --help=target | grep -E '^\s+-march=' | tr -s ' \t' ' ')"
 
+      # The library with -Wall -Wextra -Werror on GCC and Clang (MSVC: default warnings).
       - name: Configure
         env:
           CXXFLAGS: ${{ runner.os == 'Linux' && '-march=x86-64 -mtune=generic' || '' }}
-        run: cmake -S . -B build -DLIGNUM_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -DLIGNUM_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release ${{ runner.os != 'Windows' && '-DLIGNUM_WARNINGS_AS_ERRORS=ON' || '' }}
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -74,6 +76,63 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  # The Python tests through an extension built with ASan + UBSan: the bindings, Arrow input and
+  # CatBoost's category hashing are exercised from Python only. libasan must be loaded first; leak
+  # detection is off (the interpreter keeps memory until exit on purpose).
+  python-sanitizers:
+    name: Python tests with ASan + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the package built with sanitizers
+        env:
+          CMAKE_ARGS: -DLIGNUM_SANITIZE=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          CXXFLAGS: -march=x86-64 -mtune=generic
+        run: python -m pip install ".[test]"
+
+      - name: Run tests
+        shell: bash
+        run: |
+          set -o pipefail
+          export LD_PRELOAD="$(gcc -print-file-name=libasan.so):$(gcc -print-file-name=libubsan.so)"
+          export ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1
+          python -m pytest tests/python -q -p no:cacheprovider 2>&1 | tee pytest.log
+
+      - name: Failures as an annotation
+        if: failure()
+        run: python .github/scripts/annotate_log.py "Python tests with ASan + UBSan" pytest.log
+
+  # Python: ruff and mypy (settings in pyproject.toml); C++: clang-tidy (.clang-tidy). Versions are
+  # pinned so that a new release of a tool does not fail an unrelated change.
+  lint:
+    name: Lint and static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: ruff
+        run: pipx run ruff==0.17.4 check .
+
+      - name: mypy
+        run: |
+          python -m pip install mypy==2.4.1 numpy
+          mypy
+
+      - name: clang-tidy
+        run: |
+          python -m pip install clang-tidy==23.1.4
+          cmake -S . -B build -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_BUILD_TYPE=Release
+          ls src/*.cpp src/parsers/*.cpp | xargs -P 4 -n 1 clang-tidy -p build --quiet
 
   python:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}

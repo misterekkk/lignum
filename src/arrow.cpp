@@ -332,6 +332,7 @@ namespace lignum {
             for (size_t j = 0; same && j < expected.size(); j++) same = expected[j] == name_of(j);
             if (!same) {  // a mismatch, or LightGBM names with spaces: build the list to decide and explain
                 std::vector<std::string> names;
+                names.reserve(static_cast<size_t>(std::max<int64_t>(schema.n_children, 0)));
                 for (int64_t j = 0; j < schema.n_children; j++) names.emplace_back(name_of(static_cast<size_t>(j)));
                 check_feature_names(model, names);
             }

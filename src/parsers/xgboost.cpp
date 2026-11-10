@@ -200,7 +200,12 @@ namespace lignum {
             const int n_outputs = std::max(1, read_int_param(params, "num_class", 0));
 
             std::vector<float> base_scores = read_base_scores(params);
-            if (base_scores.size() == 1 && n_outputs > 1) base_scores.assign(static_cast<size_t>(n_outputs), base_scores[0]);
+            // One base_score for every class (XGBoost before 2.0 writes "[5E-1]" for multiclass models).
+            // A copy: assign(n, base_scores[0]) would read the element after freeing the old storage.
+            if (base_scores.size() == 1 && n_outputs > 1) {
+                const float base_score = base_scores[0];
+                base_scores.assign(static_cast<size_t>(n_outputs), base_score);
+            }
             if (base_scores.size() != static_cast<size_t>(n_outputs)) {
                 throw std::runtime_error("base_score has " + std::to_string(base_scores.size()) + " values for " +
                                          std::to_string(n_outputs) + " outputs.");

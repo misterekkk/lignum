@@ -331,6 +331,8 @@ namespace lignum {
             throw std::runtime_error("Endianness mismatch.");
         }
 
+        constexpr uint8_t kKnownFlags = header_flags::Float32 | header_flags::SpecialTrees | header_flags::Binned | header_flags::Oblivious;
+        if (header.flags & ~kKnownFlags) throw std::runtime_error("Binary file is truncated or corrupted.");
         const bool is_oblivious = (header.flags & header_flags::Oblivious) != 0;
         if (header.version_major != 0 || header.version_minor != 8) {
             throw std::runtime_error("Unsupported lignum binary format version " + std::to_string(header.version_major) + "." +

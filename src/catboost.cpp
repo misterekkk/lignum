@@ -903,7 +903,8 @@ namespace lignum {
                 for (simdjson::dom::element v : tree["leaf_values"].get_array()) spec.leaves.push_back(get_number(v));
             }
             simdjson::dom::element loss_type;
-            if (doc.at_pointer("/model_info/params/loss_function/type").get(loss_type) == simdjson::SUCCESS) spec.loss = std::string(loss_type.get_string().value());            return spec;
+            if (doc.at_pointer("/model_info/params/loss_function/type").get(loss_type) == simdjson::SUCCESS) spec.loss = std::string(loss_type.get_string().value());
+            return spec;
         }
 
         // -----------------------------------------------------------------------------------------

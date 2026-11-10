@@ -1,8 +1,8 @@
 """
 lignum: bit-exact, fast inference for LightGBM, XGBoost and CatBoost models.
 
-`lignum.load(path)` reads LightGBM (`model.txt`, JSON), XGBoost (JSON, UBJSON) and CatBoost (JSON)
-models or lignum's own `.bin` file; `Model.predict` takes numpy arrays, pandas DataFrames or Arrow
+`lignum.load(path)` reads LightGBM (`model.txt`, JSON), XGBoost (JSON, UBJSON) and CatBoost
+(`.cbm`, JSON) models or lignum's own `.bin` file; `Model.predict` takes numpy arrays, pandas DataFrames or Arrow
 data. Predictions equal the library's `predict` bit for bit, with the interpreter or with trees
 compiled to native code (`Model.compile`).
 """
@@ -14,6 +14,7 @@ import statistics
 import sys
 import time
 import warnings
+from typing import Any
 
 import numpy as np
 
@@ -89,10 +90,10 @@ class Model:
     def __init__(self, _c_model, validate_features: bool = True):
         self._c_model = _c_model
         self._categorical = frozenset(_c_model.categorical_features)
-        self._category_cache = {}
+        self._category_cache: dict[int, tuple[Any, np.ndarray]] = {}  # id(categories) -> (categories, hashes)
         self._feature_names = list(_c_model.feature_names)
-        self._names_index = None     # pandas Index of the feature names, made on first use
-        self._checked_columns = None  # the last columns object that passed the check
+        self._names_index: Any = None     # pandas Index of the feature names, made on first use
+        self._checked_columns: Any = None  # the last columns object that passed the check
         self.validate_features = validate_features
 
     @property
@@ -172,7 +173,7 @@ class Model:
             out[:, j] = _category_hashes(A[:, j]) if j in self._categorical else A[:, j].astype(np.float64)
         return out
 
-    def predict(self, X: np.ndarray, raw_score: bool = False, n_jobs: int = -1, strategy: str = "auto",
+    def predict(self, X: Any, raw_score: bool = False, n_jobs: int = -1, strategy: str = "auto",
                 validate_features: bool | None = None) -> np.ndarray:
         """
         Predict values for the given input data.
@@ -509,15 +510,14 @@ class Model:
 
     def save(self, filepath: str) -> None:
         """
-        Save the current model to the Lignum binary format.
-        
-        This format is optimized for fast, memory-mapped (mmap) loading in 
-        subsequent sessions.
+        Save the model in lignum's binary format (`.bin`), which loads by memory mapping in well
+        under a millisecond. The compiled trees are not part of it: ship the library written by
+        `compile(library=...)` next to it.
 
         Parameters
         ----------
         filepath : str
-            Destination file path for the compiled `.bin` model.
+            Destination path of the `.bin` file.
 
         Examples
         --------
@@ -531,7 +531,7 @@ class Model:
 def load(filepath: str, format: str = "auto", binned: bool = True,
          compiled: str | os.PathLike | None = None, validate_features: bool = True) -> Model:
     """
-    Load a trained model: LightGBM or XGBoost files, or a lignum `.bin`.
+    Load a trained model: LightGBM, XGBoost or CatBoost files, or a lignum `.bin`.
 
     Parameters
     ----------
@@ -540,8 +540,10 @@ def load(filepath: str, format: str = "auto", binned: bool = True,
     format : {'auto', 'lignum', 'lightgbm', 'xgboost', 'catboost'}, default='auto'
         Library of the model. The file's own bytes tell which of its formats it is, so 'auto'
         loads a lignum `.bin`, a LightGBM `model.txt` (`save_model`) or `dump_model()` JSON,
-        an XGBoost `.json` or `.ubj` (`save_model`) and a CatBoost JSON
-        (`save_model(..., format="json")`). Naming the library only adds a check.
+        an XGBoost `.json` or `.ubj` (`save_model`) and a CatBoost `.cbm` (`save_model`) or JSON
+        (`save_model(..., format="json")`). Naming the library only adds a check. Objectives
+        lignum does not know are rejected (`RuntimeError`), so as not to predict without the
+        library's output transform.
     binned : bool, default=True
         Prepare the binned kernel: inputs are mapped once per row to integer bin codes and
         categorical decisions are precomputed, so the tree walk compares small integers. Results are identical either way; False keeps
