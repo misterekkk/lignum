@@ -62,7 +62,8 @@ read-only and checks every stored index, so a damaged file is rejected instead o
 
 Measured on an Apple M4; parsing only, without building the binned kernel. Convert once and load the
 `.bin` file in production, and keep the original model file: a `.bin` file from an older lignum
-version is rejected, and is written again from the original. Format 0.8 (lignum 0.4) adds the
+version is rejected, and is written again from the original. Format 0.9 (lignum 0.4.2) adds the
+categories of training of pandas `category` columns; lignum reads 0.8 files too. Format 0.8 (lignum 0.4) adds the
 feature names, the library the model came from, its objective and the lignum version that wrote the
 file (`model.info()["written_by"]`); files written by lignum 0.3 (format 0.6 and 0.7) must be saved
 again.
@@ -82,13 +83,23 @@ running models.
   column in [Arrow input](../arrow/) gives. CatBoost models take the category values themselves
   (strings or integers), see [CatBoost](../catboost/#categorical-input).
 
-:::caution[Categories of a pandas DataFrame]
-LightGBM and XGBoost 3 store the categories of training in the model, and their `predict(df)` maps
-a DataFrame's categories onto them. lignum does not yet: it uses the codes as they are, so a column
-whose categories are in another order, or include other values, predicts differently without an
-error. Give such columns the categories of training, in the same order, before predicting:
-`df[col] = df[col].cat.set_categories(training_categories)`.
-:::
+### pandas `category` columns
+
+A model trained on a DataFrame with `category` columns stores their categories (LightGBM's
+`pandas_categorical`, XGBoost 3's `cats`), and the library's `predict(df)` maps a DataFrame's own
+categories onto them: a category gets the code it had in training, whatever the order or subset of
+categories of the input (for instance categories made from the current batch with
+`astype("category")`). lignum does the same, for pandas and for Arrow dictionary columns (pyarrow,
+polars), with the libraries' rules:
+
+| | LightGBM | XGBoost |
+|---|---|---|
+| which column a list belongs to | the k-th `category` column of the input | its column in training |
+| a category not in training | missing (NaN) | `ValueError` |
+| other `category` columns than in training | `ValueError` | `ValueError` |
+
+Columns of numbers are taken as codes, as they are: the codes of training must be in them. The
+categories are part of the `.bin` file.
 - **Multiclass** models predict one column per class (`model.n_outputs`).
 
 ## Not supported

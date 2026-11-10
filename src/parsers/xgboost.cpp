@@ -295,6 +295,43 @@ namespace lignum {
                 forest.push_back(build_tree(arrays, 0, 0, visited));
             }
 
+            // XGBoost 3: the categories of every categorical column of training ("cats"), one entry per
+            // column: integers ("type" names their dtype), or strings as UTF-8 bytes (signed) split
+            // by "offsets"; numeric columns have empty entries.
+            simdjson::dom::array enc;
+            if (model["cats"]["enc"].get_array().get(enc) == simdjson::SUCCESS) {
+                auto categories = std::make_shared<TrainingCategories>();
+                categories->by_position = false;
+                categories->unseen_is_missing = false;  // XGBoost: "Found a category not in the training set"
+                uint32_t feature = 0;
+                for (simdjson::dom::element entry : enc) {
+                    simdjson::dom::array values;
+                    if (entry["values"].get_array().get(values) != simdjson::SUCCESS) throw std::runtime_error("Malformed XGBoost model: cats without values.");
+                    std::vector<CategoryValue> list;
+                    if (entry["type"].error() == simdjson::SUCCESS) {
+                        for (simdjson::dom::element v : values) list.push_back(category_value(v));
+                    } else {
+                        std::vector<int64_t> offsets, bytes;
+                        for (int64_t o : entry["offsets"].get_array()) offsets.push_back(o);
+                        for (int64_t b : values) bytes.push_back(b);
+                        for (size_t k = 0; k + 1 < offsets.size(); k++) {
+                            if (offsets[k] < 0 || offsets[k + 1] < offsets[k] || static_cast<uint64_t>(offsets[k + 1]) > bytes.size()) {
+                                throw std::runtime_error("Malformed XGBoost model: cats offsets out of range.");
+                            }
+                            CategoryValue c;
+                            for (int64_t j = offsets[k]; j < offsets[k + 1]; j++) c.text += static_cast<char>(bytes[static_cast<size_t>(j)] & 0xFF);
+                            list.push_back(std::move(c));
+                        }
+                    }
+                    if (!list.empty()) {
+                        categories->features.push_back(feature);
+                        categories->lists.push_back(std::move(list));
+                    }
+                    feature++;
+                }
+                if (!categories->lists.empty()) info.categories = std::move(categories);
+            }
+
             if (n_outputs > 1) {
                 for (int64_t output : model["tree_info"].get_array()) {
                     if (output < 0 || output >= n_outputs) throw std::runtime_error("tree_info refers to an unknown class.");

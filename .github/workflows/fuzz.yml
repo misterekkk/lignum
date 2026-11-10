@@ -91,6 +91,27 @@ jobs:
         if: failure() && steps.build.outcome == 'success'
         run: python .github/scripts/annotate_log.py "Fuzzing ${{ matrix.target }}" fuzz.log
 
+      # The start of the report (the kind of error and where), which the annotation above cuts off
+      # for long stacks: the first crashing input run once more.
+      - name: Crash report as an annotation
+        if: failure() && steps.build.outcome == 'success'
+        shell: bash
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: print_stacktrace=1
+        run: |
+          crash=$(ls crashes/* 2>/dev/null | head -1)
+          [ -n "$crash" ] || exit 0
+          ./build-fuzz/tests/fuzz/fuzz_${{ matrix.target }} -timeout=10 -rss_limit_mb=2048 "$crash" > report.txt 2>&1 || true
+          python - "$crash" <<'PY'
+          import re, sys
+          text = open("report.txt", errors="replace").read()
+          m = re.search(r"ERROR:|runtime error|deadly signal|lignum fuzz:", text)
+          start = text.rfind("\n", 0, m.start()) + 1 if m else 0
+          body = f"input {sys.argv[1]}\n" + text[start:start + 3500]
+          print("::error title=Fuzzing crash report::" + body.replace("%", "%25").replace("\r", "").replace("\n", "%0A"))
+          PY
+
       - name: Upload crashing inputs
         if: failure()
         uses: actions/upload-artifact@v4

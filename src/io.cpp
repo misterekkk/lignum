@@ -1,6 +1,7 @@
 #include <lignum/model.hpp>
 #include "io.hpp"
 #include "binned.hpp"
+#include "categories.hpp"
 #include "catboost.hpp"
 #include "validate.hpp"
 
@@ -53,7 +54,7 @@ namespace lignum {
         struct alignas(64) FileHeader {
             char magic[6] = {'L', 'I', 'G', 'N', 'U', 'M'}; 
             uint8_t version_major = 0;
-            uint8_t version_minor = 8;
+            uint8_t version_minor = 9;  // 0.9: categories of training; 0.8 files are read too
 
             uint8_t os_id = LIGNUM_OS_ID;
             uint8_t arch_id = LIGNUM_ARCH_ID;
@@ -73,9 +74,10 @@ namespace lignum {
         };
         static_assert(sizeof(FileHeader) == 64, "FileHeader must stay 64 bytes");
 
-        // Follows the FileHeader (format 0.8): who wrote the file, the model's feature names, which
-        // follow it as n_names x (uint32 length, UTF-8 bytes), then the objective's name (UTF-8),
-        // both together padded to 64 bytes.
+        // Follows the FileHeader: who wrote the file, the model's feature names, which follow it as
+        // n_names x (uint32 length, UTF-8 bytes), then the objective's name (UTF-8), then (format
+        // 0.9) the categories of training (write_categories), all together padded to 64 bytes.
+        // Format 0.8 had no categories: categories_bytes was padding, so it reads as 0.
         struct alignas(64) InfoHeader {
             char writer[24] = {};      // lignum version that wrote the file, NUL-padded
             uint64_t names_bytes = 0;
@@ -83,7 +85,8 @@ namespace lignum {
             uint8_t source = model_source::Unknown;
             uint8_t padding0[3] = {0};
             uint32_t objective_bytes = 0;
-            uint8_t padding[20] = {0};
+            uint32_t categories_bytes = 0;
+            uint8_t padding[16] = {0};
         };
         static_assert(sizeof(InfoHeader) == 64, "InfoHeader must stay 64 bytes");
 
@@ -144,6 +147,94 @@ namespace lignum {
             }
         }
 
+        // Categories of training: uint8 by_position, uint8 unseen_is_missing, uint16 0, uint32 lists;
+        // per list uint32 feature (0 when by position), uint32 values; per value uint8 kind, then
+        // Text: uint32 length + UTF-8; Integer, Boolean: int64; Number: double.
+        template <typename T>
+        void append(std::string& out, T v) { out.append(reinterpret_cast<const char*>(&v), sizeof(v)); }
+
+        std::string write_categories(const TrainingCategories* c) {
+            std::string out;
+            if (!c) return out;
+            append<uint8_t>(out, c->by_position);
+            append<uint8_t>(out, c->unseen_is_missing);
+            append<uint16_t>(out, 0);
+            append<uint32_t>(out, static_cast<uint32_t>(c->lists.size()));
+            for (size_t k = 0; k < c->lists.size(); k++) {
+                append<uint32_t>(out, c->by_position ? 0 : c->features[k]);
+                append<uint32_t>(out, static_cast<uint32_t>(c->lists[k].size()));
+                for (const CategoryValue& v : c->lists[k]) {
+                    append<uint8_t>(out, static_cast<uint8_t>(v.kind));
+                    if (v.kind == CategoryValue::Kind::Text) {
+                        append<uint32_t>(out, static_cast<uint32_t>(v.text.size()));
+                        out += v.text;
+                    } else if (v.kind == CategoryValue::Kind::Number) {
+                        append<double>(out, v.number);
+                    } else {
+                        append<int64_t>(out, v.integer);
+                    }
+                }
+            }
+            return out;
+        }
+
+        // Reads write_categories' bytes; every length is checked against the bytes left.
+        class CategoryReader {
+            public:
+                CategoryReader(const char* p, size_t n) : p_(p), end_(p + n) {}
+                template <typename T>
+                T get() {
+                    if (static_cast<size_t>(end_ - p_) < sizeof(T)) bad();
+                    T v;
+                    std::memcpy(&v, p_, sizeof(T));
+                    p_ += sizeof(T);
+                    return v;
+                }
+                std::string text(uint32_t n) {
+                    if (static_cast<size_t>(end_ - p_) < n) bad();
+                    std::string s(p_, n);
+                    p_ += n;
+                    return s;
+                }
+                size_t left() const { return static_cast<size_t>(end_ - p_); }
+                [[noreturn]] static void bad() { throw std::runtime_error("Binary file is truncated or corrupted."); }
+            private:
+                const char* p_;
+                const char* end_;
+        };
+
+        std::shared_ptr<const TrainingCategories> read_categories(const char* p, size_t n, uint32_t n_features) {
+            if (n == 0) return nullptr;
+            CategoryReader r(p, n);
+            auto c = std::make_shared<TrainingCategories>();
+            const uint8_t by_position = r.get<uint8_t>(), unseen_is_missing = r.get<uint8_t>();
+            if (by_position > 1 || unseen_is_missing > 1 || r.get<uint16_t>() != 0) CategoryReader::bad();
+            c->by_position = by_position != 0;
+            c->unseen_is_missing = unseen_is_missing != 0;
+            const uint32_t n_lists = r.get<uint32_t>();
+            if (n_lists == 0 || n_lists > r.left() / 8) CategoryReader::bad();  // every list takes 8 bytes at least
+            c->lists.resize(n_lists);
+            for (uint32_t k = 0; k < n_lists; k++) {
+                const uint32_t feature = r.get<uint32_t>(), n_values = r.get<uint32_t>();
+                if (c->by_position ? feature != 0 : feature >= n_features) CategoryReader::bad();
+                if (!c->by_position) c->features.push_back(feature);
+                if (n_values > r.left()) CategoryReader::bad();  // every value takes a byte at least
+                c->lists[k].resize(n_values);
+                for (CategoryValue& v : c->lists[k]) {
+                    const uint8_t kind = r.get<uint8_t>();
+                    if (kind > static_cast<uint8_t>(CategoryValue::Kind::Boolean)) CategoryReader::bad();
+                    v.kind = static_cast<CategoryValue::Kind>(kind);
+                    if (v.kind == CategoryValue::Kind::Text) v.text = r.text(r.get<uint32_t>());
+                    else if (v.kind == CategoryValue::Kind::Number) v.number = r.get<double>();
+                    else v.integer = r.get<int64_t>();
+                    if (v.kind == CategoryValue::Kind::Boolean && v.integer != 0 && v.integer != 1) CategoryReader::bad();
+                }
+            }
+            if (r.left() != 0) CategoryReader::bad();
+            index_categories(*c);
+            return c;
+        }
+
         void write_info(std::ofstream& out, const Model& model) {
             InfoHeader info;
             std::strncpy(info.writer, LIGNUM_VERSION, sizeof(info.writer) - 1);
@@ -158,18 +249,24 @@ namespace lignum {
             info.names_bytes = names.size();
             info.objective_bytes = static_cast<uint32_t>(model.objective.size());
             names += model.objective;
+            const std::string categories = write_categories(model.categories.get());
+            if (categories.size() > UINT32_MAX) throw std::length_error("The model's categories are too large for the binary format.");
+            info.categories_bytes = static_cast<uint32_t>(categories.size());
+            names += categories;
             out.write(reinterpret_cast<const char*>(&info), sizeof(info));
             padded_write(out, names.data(), names.size());
         }
 
-        // Reads the InfoHeader and the names into `model`; returns the offset of the first section.
-        size_t read_info(const char* data, size_t size, Model& model) {
+        // Reads the InfoHeader, the names and the categories into `model`; returns the offset of the
+        // first section.
+        size_t read_info(const char* data, size_t size, uint32_t n_features, Model& model) {
             const size_t start = 64 + sizeof(InfoHeader);
             if (size < start) throw std::runtime_error("Binary file is truncated or corrupted.");
             InfoHeader info;
             std::memcpy(&info, data + 64, sizeof(info));
             if (info.source > model_source::CatBoost || info.names_bytes > size - start ||
-                info.objective_bytes > size - start - info.names_bytes || info.n_names > info.names_bytes / sizeof(uint32_t)) {
+                info.objective_bytes > size - start - info.names_bytes || info.n_names > info.names_bytes / sizeof(uint32_t) ||
+                info.categories_bytes > size - start - info.names_bytes - info.objective_bytes) {
                 throw std::runtime_error("Binary file is truncated or corrupted.");
             }
             const char* p = data + start;
@@ -188,7 +285,8 @@ namespace lignum {
             }
             if (p != end) throw std::runtime_error("Binary file is truncated or corrupted.");
             model.objective.assign(end, info.objective_bytes);
-            return start + align(info.names_bytes + info.objective_bytes);
+            model.categories = read_categories(end + info.objective_bytes, info.categories_bytes, n_features);
+            return start + align(info.names_bytes + info.objective_bytes + info.categories_bytes);
         }
 
     } // namespace
@@ -334,19 +432,21 @@ namespace lignum {
         constexpr uint8_t kKnownFlags = header_flags::Float32 | header_flags::SpecialTrees | header_flags::Binned | header_flags::Oblivious;
         if (header.flags & ~kKnownFlags) throw std::runtime_error("Binary file is truncated or corrupted.");
         const bool is_oblivious = (header.flags & header_flags::Oblivious) != 0;
-        if (header.version_major != 0 || header.version_minor != 8) {
+        // 0.9 adds the categories of training in what was padding in 0.8, so both read the same way.
+        if (header.version_major != 0 || (header.version_minor != 8 && header.version_minor != 9)) {
             throw std::runtime_error("Unsupported lignum binary format version " + std::to_string(header.version_major) + "." +
-                                     std::to_string(header.version_minor) + " (this lignum reads 0.8); save the model again from " +
-                                     "its LightGBM, XGBoost or CatBoost file.");
+                                     std::to_string(header.version_minor) + " (this lignum reads 0.8 and 0.9); save the model again " +
+                                     "from its LightGBM, XGBoost or CatBoost file.");
         }
 
-        Model info;  // source, feature names, objective and writer
-        const size_t base = read_info(binary_data->data, binary_data->size, info);
+        Model info;  // source, feature names, objective, categories and writer
+        const size_t base = read_info(binary_data->data, binary_data->size, header.n_features, info);
         auto adopt_info = [&](Model& model) {
             model.source = info.source;
             model.feature_names = std::move(info.feature_names);
             model.objective = std::move(info.objective);
             model.written_by = std::move(info.written_by);
+            model.categories = std::move(info.categories);
             if (!model.feature_names.empty() && model.feature_names.size() < model.n_features) {
                 throw std::runtime_error("Binary file is truncated or corrupted.");
             }

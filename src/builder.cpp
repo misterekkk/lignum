@@ -1,4 +1,5 @@
 #include "builder.hpp"
+#include "categories.hpp"
 #include "parsers/parsers.hpp"
 #include "validate.hpp"
 
@@ -59,6 +60,23 @@ namespace lignum {
         model.source = (source == ModelSource::LightGBMJson || source == ModelSource::LightGBMText) ? model_source::LightGBM : model_source::XGBoost;
         model.feature_names = model_feature_names(std::move(info.feature_names), model.n_features, model.source);
         model.objective = std::move(info.objective);
+        if (info.categories) {
+            // XGBoost keeps a list for every categorical column of training; the input needs only
+            // the first n_features columns, so lists beyond them never apply.
+            TrainingCategories& c = *info.categories;
+            if (!c.by_position) {
+                for (size_t k = c.lists.size(); k-- > 0;) {
+                    if (c.features[k] >= model.n_features) {
+                        c.lists.erase(c.lists.begin() + static_cast<ptrdiff_t>(k));
+                        c.features.erase(c.features.begin() + static_cast<ptrdiff_t>(k));
+                    }
+                }
+            }
+            if (!c.lists.empty()) {
+                index_categories(c);
+                model.categories = std::move(info.categories);
+            }
+        }
 
         return model;
     }

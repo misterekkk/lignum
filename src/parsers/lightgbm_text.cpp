@@ -1,6 +1,7 @@
 #include "parsers.hpp"
 #include "simdjson.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <fstream>
@@ -299,6 +300,21 @@ namespace lignum {
             info.base_scores.assign(static_cast<size_t>(n_outputs), 0.0);
             if (n_outputs > 1) {
                 for (size_t t = 0; t < forest.size(); t++) info.tree_outputs.push_back(static_cast<uint16_t>(t % static_cast<size_t>(n_outputs)));
+            }
+
+            // The last line of the file (after the trees and the parameters): a JSON list of the
+            // categories of every pandas category column of training, or "pandas_categorical:null".
+            constexpr std::string_view kCategorical = "pandas_categorical:";
+            const size_t at = text.rfind(kCategorical);
+            if (at != std::string_view::npos && (at == 0 || text[at - 1] == '\n')) {
+                const size_t start = at + kCategorical.size();
+                const size_t end = std::min(text.find('\n', start), text.size());
+                std::string_view json = text.substr(start, end - start);
+                while (!json.empty() && (json.back() == '\r' || json.back() == ' ')) json.remove_suffix(1);
+                simdjson::dom::parser parser;
+                simdjson::dom::element value;
+                if (parser.parse(json.data(), json.size()).get(value) != simdjson::SUCCESS) fail("pandas_categorical is not valid JSON");
+                info.categories = lightgbm_categories(value);
             }
             return forest;
         }

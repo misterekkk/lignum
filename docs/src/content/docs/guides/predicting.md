@@ -14,8 +14,9 @@ margins = model.predict(X, raw_score=True)  # raw scores
   else numpy can convert (other dtypes, Fortran order, lists) is copied to that form first.
 - **Arrow**: pyarrow tables and batches, polars data frames and other Arrow data are read without
   copying the table. See [Arrow input](../arrow/).
-- **pandas**: data frames go through numpy. For categorical columns, pass
-  `pyarrow.Table.from_pandas(df)` instead, which keeps them as category codes.
+- **pandas**: data frames go through numpy. `category` columns give the codes their categories had
+  in training, as LightGBM's and XGBoost's `predict(df)` do (see
+  [pandas category columns](../models/#pandas-category-columns)).
 
 NaN is a missing value, with the same direction rules as the library (including LightGBM's
 `zero_as_missing` and `use_missing=False`).

@@ -35,6 +35,7 @@ add_library(lignum STATIC
     src/arrow.cpp
     src/binned.cpp
     src/builder.cpp
+    src/categories.cpp
     src/catboost.cpp
     src/c_api.cpp
     src/compiled.cpp
