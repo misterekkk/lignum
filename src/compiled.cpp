@@ -33,7 +33,9 @@
     #include <cerrno>
     #include <dlfcn.h>
     #include <spawn.h>
+    #include <sys/stat.h>
     #include <sys/wait.h>
+    #include <unistd.h>
     #if defined(__APPLE__)
         #include <crt_externs.h>  // a dylib has no `environ`: _NSGetEnviron()
     #else
@@ -610,6 +612,45 @@ namespace lignum {
     }
 
     namespace {
+        namespace fs = std::filesystem;
+
+        // The per-user cache folder the environment names, or empty when there is none.
+        std::string user_cache_dir() {
+            const auto env = [](const char* name) {
+                const char* value = std::getenv(name);
+                return value ? std::string(value) : std::string();
+            };
+            if (const std::string dir = env("LIGNUM_CACHE_DIR"); !dir.empty()) return dir;
+        #if defined(_WIN32)
+            if (const std::string base = env("LOCALAPPDATA"); !base.empty()) return (fs::path(base) / "lignum" / "Cache").string();
+        #elif defined(__APPLE__)
+            if (const std::string home = env("HOME"); !home.empty()) return (fs::path(home) / "Library" / "Caches" / "lignum").string();
+        #else
+            if (const std::string base = env("XDG_CACHE_HOME"); fs::path(base).is_absolute()) return (fs::path(base) / "lignum").string();
+            if (const std::string home = env("HOME"); !home.empty()) return (fs::path(home) / ".cache" / "lignum").string();
+        #endif
+            return "";
+        }
+
+        // The fallback cache lives in the temporary folder, which other users can write to: a
+        // library someone else put there under the expected name would be loaded and run. So it is
+        // used only when it is a real folder owned by this user that nobody else can write.
+        void require_private(const fs::path& dir) {
+        #if !defined(_WIN32)  // %TEMP% is per user on Windows
+            struct stat st;
+            if (lstat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == geteuid()) {
+                std::error_code ec;
+                fs::permissions(dir, fs::perms::owner_all, fs::perm_options::replace, ec);
+                if (!ec && lstat(dir.c_str(), &st) == 0 && (st.st_mode & (S_IWGRP | S_IWOTH)) == 0) return;
+            }
+            throw std::runtime_error("The compiled-library cache " + dir.string() + " is in the shared temporary folder (HOME and "
+                                     "LIGNUM_CACHE_DIR are not set) and is not a folder only this user can write; set "
+                                     "LIGNUM_CACHE_DIR, or pass library= to write the library to a chosen path.");
+        #else
+            (void)dir;
+        #endif
+        }
+
         // CatBoost models have no compiled mode; other models need the binned kernel the code is made from.
         void require_compilable(const Model& model) {
             if (model.oblivious) throw std::runtime_error("CatBoost models have no compiled mode: their symmetric trees are branch-free already.");
@@ -736,6 +777,7 @@ namespace lignum {
         } else {
             const fs::path dir = options.cache_dir.empty() ? fs::path(default_cache_dir()) : fs::path(options.cache_dir);
             fs::create_directories(dir);
+            if (options.cache_dir.empty() && user_cache_dir().empty()) require_private(dir);
             target = dir / ("lignum_" + hex16(key.get()) + "_" + compiled_platform() + kLibraryExtension);
         }
         st.library = target.string();
@@ -778,21 +820,14 @@ namespace lignum {
     }
 
     std::string default_cache_dir() {
-        namespace fs = std::filesystem;
-        const auto env = [](const char* name) {
-            const char* value = std::getenv(name);
-            return value ? std::string(value) : std::string();
-        };
-        if (const std::string dir = env("LIGNUM_CACHE_DIR"); !dir.empty()) return dir;
+        if (std::string dir = user_cache_dir(); !dir.empty()) return dir;
+        // No folder of the user's own (e.g. a container without HOME): one per user in the
+        // temporary folder, used only while it is private (require_private).
     #if defined(_WIN32)
-        if (const std::string base = env("LOCALAPPDATA"); !base.empty()) return (fs::path(base) / "lignum" / "Cache").string();
-    #elif defined(__APPLE__)
-        if (const std::string home = env("HOME"); !home.empty()) return (fs::path(home) / "Library" / "Caches" / "lignum").string();
-    #else
-        if (const std::string base = env("XDG_CACHE_HOME"); fs::path(base).is_absolute()) return (fs::path(base) / "lignum").string();
-        if (const std::string home = env("HOME"); !home.empty()) return (fs::path(home) / ".cache" / "lignum").string();
-    #endif
         return (fs::temp_directory_path() / "lignum-cache").string();
+    #else
+        return (fs::temp_directory_path() / ("lignum-cache-" + std::to_string(geteuid()))).string();
+    #endif
     }
 
     size_t clear_compiled_cache(const std::string& cache_dir) {

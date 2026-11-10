@@ -4,6 +4,42 @@ All notable changes to lignum (`pip install pylignum`). The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/) (before 1.0, minor versions may change the API).
 
+## [Unreleased]
+
+### Security
+
+- **Damaged `.bin` files could make prediction read outside the file.** An element count in the
+  header with high bits set (e.g. the number of leaves plus 2^61) wrapped around when multiplied by
+  the element size, so every size check passed and every stored index looked in range. Every count
+  is now checked against the file size before it is used, also in the binned sections and for the
+  categorical tables' offsets.
+- **Crafted XGBoost JSON / UBJSON files could crash or exhaust memory.** A tree deeper than about
+  20,000 levels overflowed the stack, and a node shared by two parents was unfolded into every
+  path (29 nodes, 2 KB of JSON: 2^28 leaves). Trees are now limited to 1024 levels, like the
+  LightGBM parsers, and a node may have only one parent.
+- **Large categories in a small file allocated gigabytes.** A LightGBM split on category
+  4294967295 allocated a 512 MB bitset, and every further split as much again. Categories that no
+  input can match (LightGBM: from 2^31 on; XGBoost: outside [0, 2^24) or negative) are dropped,
+  which changes no prediction, and the category sets of a model may take at most about 256 MB.
+- **The fallback cache of compiled libraries was shared.** Without `HOME` (and without
+  `LIGNUM_CACHE_DIR`), `compile()` cached libraries in the temporary folder, where another user of
+  the machine could place a library under the expected name. The fallback is now a folder per user,
+  `lignum-cache-<uid>`, used only when it is owned by this user and nobody else can write to it.
+
+### Fixed
+
+- **CatBoost models with more than 65,535 float and one-hot features read the wrong column.** Their
+  index was cut to 16 bits, so a split on feature 65,541 used feature 5. Such models are now
+  rejected; up to 65,535 load as before (and their `.bin` files load too).
+- **XGBoost categories of 2^32 and more were wrapped** to small categories by a 32-bit cast (2^32 + 2
+  became category 2). They can never be matched and are dropped.
+- **A model without splits crashed Arrow prediction with `binned=False` on x86-64** (an integer
+  division by zero).
+- **A LightGBM `dump_model()` JSON with a feature named `learner` was read as XGBoost** and failed.
+  JSON files are recognised by their first key. Malformed LightGBM and XGBoost JSON files now give
+  errors that name the library and the file, instead of only simdjson's error code; a category that
+  is not an integer is an error instead of an exception from `std::stoul`.
+
 ## [0.4.1] — 2026-10-30
 
 ### Changed

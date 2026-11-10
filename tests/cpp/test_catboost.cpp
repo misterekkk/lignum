@@ -234,3 +234,38 @@ TEST(CatBoost, BinaryFormatRoundTripAndCorruption) {
     }
     EXPECT_GT(ok, 0);
 }
+
+namespace {
+
+    // `n` float features with one border (0.5) each; one tree of depth 1 splitting on the last one.
+    std::string wide_catboost_json(size_t n) {
+        std::string floats;
+        for (size_t i = 0; i < n; i++) {
+            floats += (i ? "," : "") + std::string(R"({"feature_index": )") + std::to_string(i) + R"(, "flat_feature_index": )" +
+                      std::to_string(i) + R"(, "borders": [0.5], "nan_value_treatment": "AsIs"})";
+        }
+        return R"({"features_info": {"float_features": [)" + floats + R"(]}, "oblivious_trees": [{"splits": [{"split_index": )" +
+               std::to_string(n - 1) + R"(}], "leaf_values": [10.0, 20.0]}], "scale_and_bias": [1.0, [0.0]]})";
+    }
+
+} // namespace
+
+TEST(CatBoost, SixteenBitSourceIndicesAreNotTruncated) {
+    // Sources are 16-bit indices: 65535 still fit (and survive the .bin format), more are
+    // rejected. Before, source 65541 was stored as 5 and the split read the wrong column.
+    const size_t n = 65535;
+    const auto model = lignum::load(write_temp("catboost_wide.json", wide_catboost_json(n)));
+    std::vector<double> X(2 * n, 0.0);
+    X[n - 1] = 1.0;      // row 0: the split's feature above its border
+    X[n + 5] = 1.0;      // row 1: another feature
+    const std::vector<double> expected = {20.0, 10.0};
+    EXPECT_EQ(lignum::test::predict_raw(model, X, n), expected);
+
+    const auto bin = (std::filesystem::temp_directory_path() / "lignum_test_catboost_wide.bin").string();
+    model.save(bin);
+    EXPECT_EQ(lignum::test::predict_raw(lignum::load(bin), X, n), expected);
+
+    for (size_t wider : {size_t{65536}, size_t{70000}}) {
+        EXPECT_THROW(lignum::load(write_temp("catboost_wider.json", wide_catboost_json(wider))), std::runtime_error) << wider;
+    }
+}

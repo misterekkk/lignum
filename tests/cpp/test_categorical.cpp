@@ -69,3 +69,28 @@ TEST(Categorical, BinaryRoundTripKeepsBitsets) {
     auto restored = lignum::load(bin, "auto");
     EXPECT_EQ(predict_raw(restored, kProbes, 1), predict_raw(model, kProbes, 1));
 }
+
+TEST(Categorical, CategoriesNoInputCanMatchAreDropped) {
+    // LightGBM inputs are categories only below 2^31: larger set members can never be matched, so
+    // dropping them changes nothing, and the set stays small enough for the binned kernel
+    // (4294967295 used to allocate a 512 MB bitset and disable it).
+    check("cat_huge.json", "1||4294967295||3000000000||2147483648", {1, 4294967295, 3000000000, 2147483648});
+    EXPECT_THROW(categorical_stump("cat_garbage.json", "1||abc"), std::runtime_error);
+    EXPECT_THROW(categorical_stump("cat_garbage2.json", "1||2x"), std::runtime_error);
+}
+
+TEST(Categorical, CategorySetsHaveAMemoryBudget) {
+    // One split with the largest category LightGBM accepts fits (a 256 MB bitset); a second one
+    // would not, and the model is rejected before anything that large is allocated.
+    // (Categories above 65534 do not fit the binned kernel's 16-bit codes: the direct one predicts.)
+    std::vector<double> want;
+    for (double x : kProbes) want.push_back(expected(x, {3, 2147483646}));
+    const auto largest = categorical_stump("cat_largest.json", "3||2147483646");
+    EXPECT_EQ(predict_raw(largest, kProbes, 1), want);
+    // Two categories far apart need a bitset (one category, or a run of them, is a range).
+    const std::string split = R"({"split_feature": 0, "threshold": "3||2147483646", "decision_type": "==", "default_left": false,
+        "missing_type": "None", "left_child": {"leaf_value": 1.0}, "right_child": {"leaf_value": 2.0}})";
+    const std::string json = R"({"objective": "regression", "tree_info": [{"tree_structure": )" + split +
+                             R"(}, {"tree_structure": )" + split + "}]}";
+    EXPECT_THROW(lignum::load(write_temp("cat_budget.json", json), "lightgbm"), std::length_error);
+}

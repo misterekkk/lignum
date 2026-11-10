@@ -60,7 +60,8 @@ namespace lignum {
 
     // Per-user cache of compiled libraries: LIGNUM_CACHE_DIR if set, otherwise
     // %LOCALAPPDATA%\lignum\Cache (Windows), ~/Library/Caches/lignum (macOS) or
-    // $XDG_CACHE_HOME/lignum, ~/.cache/lignum (Linux).
+    // $XDG_CACHE_HOME/lignum, ~/.cache/lignum (Linux). Without any of them, <temp>/lignum-cache-<uid>
+    // (POSIX), which compile_forest uses only while it is a folder of this user that others cannot write.
     std::string default_cache_dir();
 
     // Removes the compiled libraries in `cache_dir` (empty: default_cache_dir()) and returns how

@@ -35,6 +35,7 @@ lignum.clear_cache()             # remove the cached libraries; returns how many
 | macOS | `~/Library/Caches/lignum` |
 | Windows | `%LOCALAPPDATA%\lignum\Cache` |
 | any | `LIGNUM_CACHE_DIR`, when set |
+| Linux, macOS without `HOME` | `lignum-cache-<uid>` in the temporary folder, only while no other user can write to it |
 
 Libraries are keyed by the generated code, the compiler, the flags and the platform, so x86-64 and
 arm64 builds (e.g. under Rosetta) never mix. Processes that compile the same model at once (e.g.

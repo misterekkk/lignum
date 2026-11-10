@@ -28,6 +28,9 @@ namespace lignum {
             if (m.n_outputs == 0) fail("no outputs");
             if (m.transform > transform::Argmax) fail("unknown transform");
             if (m.n_nodes > 0 && m.n_features == 0) fail("splits without features");
+            // Word 0 of the bitsets is the zero target of branch-free categorical lookups (the
+            // builder always writes it), so the kernel may read it for any categorical slot.
+            if (m.n_cat_words == 0) fail("no categorical bitset words");
 
             for (size_t i = 0; i < m.n_nodes; i++) {
                 const KNode& kn = m.k_nodes[i];
@@ -68,7 +71,10 @@ namespace lignum {
                 if (cf.dense >= f.n_features || f.feature_kind[cf.dense] == feature_kind::Numeric) fail("categorical feature out of range");
                 if (cf.n_categories > kInvalidCat) fail("too many categories");
                 if (uint64_t{cf.row_offset} + cf.words > f.decision_words) fail("categorical decision row out of range");
-                if (cf.table_offset + uint64_t{cf.n_categories} * cf.words > f.n_table_words) fail("categorical table out of range");
+                // Written so that a huge table_offset cannot wrap the sum around.
+                if (cf.table_offset > f.n_table_words || uint64_t{cf.n_categories} * cf.words > f.n_table_words - cf.table_offset) {
+                    fail("categorical table out of range");
+                }
             }
             for (size_t i = 0; i < f.n_nodes; i++) {
                 const BNode& b = f.nodes[i];

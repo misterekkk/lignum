@@ -572,6 +572,9 @@ namespace lignum {
         };
 
         constexpr size_t kMaxColumns = 1 << 24;
+        // Sources (float features, one-hot features, CTRs) are 16-bit indices; the .bin loader
+        // accepts at most this many (validate below).
+        constexpr uint32_t kMaxSources = 65535;
 
         void check_borders(const std::vector<float>& borders, const char* what) {
             if (borders.size() > 65534) malformed(std::string("too many ") + what);
@@ -594,6 +597,7 @@ namespace lignum {
                 if (sf.borders.empty()) continue;
                 check_borders(sf.borders, "float feature borders");
                 const uint32_t s = static_cast<uint32_t>(f.floats.size());
+                if (s >= kMaxSources) malformed("more than 65535 float, one-hot and CTR features");
                 if (!float_source.emplace(sf.index, s).second) malformed("duplicate float feature");
                 for (size_t k = 0; k < sf.borders.size(); k++) {
                     binary.emplace_back(static_cast<uint16_t>(s), static_cast<uint16_t>(k + 1));
@@ -619,6 +623,7 @@ namespace lignum {
                 if (it == cat_index.end()) malformed("one-hot feature of an unknown categorical feature");
                 if (so.values.size() > 65534) malformed("too many one-hot values");
                 const uint32_t h = static_cast<uint32_t>(f.one_hots.size());
+                if (n_floats + h >= kMaxSources) malformed("more than 65535 float, one-hot and CTR features");
                 if (!one_hot_source.emplace(so.cat, h).second) malformed("duplicate one-hot feature");
                 for (size_t k = 0; k < so.values.size(); k++) {
                     binary.emplace_back(static_cast<uint16_t>(n_floats + h), static_cast<uint16_t>(k + 1));
@@ -696,7 +701,7 @@ namespace lignum {
                     ctr.entry_buckets[entry + 1] = bucket_of(sc.borders, ctr_value(sc.kind, sc.calc, raw, static_cast<int64_t>(entry), target_border));
                 }
                 const uint32_t s = first_ctr_source + static_cast<uint32_t>(f.ctrs.size());
-                if (s > 65535) malformed("too many features");
+                if (s >= kMaxSources) malformed("more than 65535 float, one-hot and CTR features");
                 for (size_t k = 0; k < sc.borders.size(); k++) {
                     binary.emplace_back(static_cast<uint16_t>(s), static_cast<uint16_t>(k + 1));
                     binary_equal.push_back(0);
