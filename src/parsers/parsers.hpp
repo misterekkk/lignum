@@ -1,12 +1,15 @@
 #pragma once
 
 #include "ir.hpp"
-#include "simdjson.h"
 
 #include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
+
+namespace simdjson::dom {
+    class element;  // simdjson.h, included by the parsers' sources
+}
 
 namespace lignum {
 

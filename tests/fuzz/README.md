@@ -26,5 +26,13 @@ it by passing the file instead of the corpus folder, e.g. `./build-fuzz/tests/fu
 crash-<hash>`, then add a regression test with the smallest input that still fails to
 `tests/cpp` (libFuzzer's `-minimize_crash=1` shrinks it).
 
-Found so far: a use after free when one XGBoost `base_score` is copied to every class
-(`tests/cpp/test_xgboost.cpp`, `OneBaseScoreForEveryClass`).
+Inputs that crashed once are kept in `regressions/<target>/`; CI adds them to the corpus, which
+libFuzzer runs before fuzzing, so they are checked on every run (and on Linux: some checks, such as
+glibc's nonnull `memcpy` under UBSan, do not fire on macOS).
+
+Found so far:
+- a use after free when one XGBoost `base_score` is copied to every class
+  (`tests/cpp/test_xgboost.cpp`, `OneBaseScoreForEveryClass`);
+- a `.bin` node referenced twice, which made the binned walk loop forever
+  (`tests/cpp/test_binary_io.cpp`, `NodesReferencedTwiceAreRejected`);
+- an empty `params` entry in a `.cbm`, parsed from a null pointer (`regressions/catboost/`).
