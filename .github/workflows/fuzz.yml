@@ -51,7 +51,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          { cmake -S . -B build-fuzz -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+          { cmake -S . -B build-fuzz -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=RelWithDebInfo \
                   -DLIGNUM_SANITIZE=ON "-DLIGNUM_SANITIZERS=address,undefined,fuzzer-no-link" -DLIGNUM_BUILD_FUZZERS=ON \
                   -DLIGNUM_BUILD_C_LIBRARY=OFF &&
             cmake --build build-fuzz --parallel --target fuzz_${{ matrix.target }}; } 2>&1 | tee build.log

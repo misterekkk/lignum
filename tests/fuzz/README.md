@@ -11,7 +11,7 @@ the same with the binned and the direct kernel, and the same after a round trip 
 ```bash
 # Clang with libFuzzer: on Linux the distribution's clang (+ libclang-rt-dev), on macOS Homebrew's
 # LLVM (Apple Clang has no libFuzzer).
-cmake -S . -B build-fuzz -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+cmake -S . -B build-fuzz -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=RelWithDebInfo \
       -DLIGNUM_SANITIZE=ON "-DLIGNUM_SANITIZERS=address,undefined,fuzzer-no-link" -DLIGNUM_BUILD_FUZZERS=ON \
       -DLIGNUM_BUILD_C_LIBRARY=OFF
 cmake --build build-fuzz --parallel

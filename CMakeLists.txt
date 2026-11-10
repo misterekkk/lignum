@@ -120,9 +120,16 @@ else()
     endif()
 endif()
 
+# Link-time optimisation of the library. Not for sanitizer and fuzzer builds (test builds, slower
+# to link), and with Clang outside Apple only when llvm-ar was found: Clang's LTO objects are LLVM
+# bitcode, and GNU ar makes an archive of them that GNU ld cannot read ("file format not recognized").
 include(CheckIPOSupported)
 check_ipo_supported(RESULT LIGNUM_IPO_SUPPORTED OUTPUT _ipo_msg LANGUAGES CXX)
-if(LIGNUM_IPO_SUPPORTED)
+if(LIGNUM_IPO_SUPPORTED AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND NOT APPLE AND NOT CMAKE_CXX_COMPILER_AR)
+    message(STATUS "lignum: no link-time optimisation (Clang without llvm-ar)")
+    set(LIGNUM_IPO_SUPPORTED OFF)
+endif()
+if(LIGNUM_IPO_SUPPORTED AND NOT LIGNUM_SANITIZE AND NOT LIGNUM_BUILD_FUZZERS)
     set_property(TARGET lignum PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
