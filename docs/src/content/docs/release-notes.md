@@ -8,6 +8,77 @@ description: What changed in each lignum version.
 Versions follow [Semantic Versioning](https://semver.org/); before 1.0, minor versions may
 change the API. Install a specific version with `pip install pylignum==<version>`.
 
+## [0.4.2] — 2026-11-10
+
+### Security
+
+- **Damaged `.bin` files could make prediction read outside the file.** An element count in the
+  header with high bits set (e.g. the number of leaves plus 2^61) wrapped around when multiplied by
+  the element size, so every size check passed and every stored index looked in range. Every count
+  is now checked against the file size before it is used, also in the binned sections and for the
+  categorical tables' offsets.
+- **Crafted XGBoost JSON / UBJSON files could crash or exhaust memory.** A tree deeper than about
+  20,000 levels overflowed the stack, and a node shared by two parents was unfolded into every
+  path (29 nodes, 2 KB of JSON: 2^28 leaves). Trees are now limited to 1024 levels, like the
+  LightGBM parsers, and a node may have only one parent.
+- **Large categories in a small file allocated gigabytes.** A LightGBM split on category
+  4294967295 allocated a 512 MB bitset, and every further split as much again. Categories that no
+  input can match (LightGBM: from 2^31 on; XGBoost: outside [0, 2^24) or negative) are dropped,
+  which changes no prediction, and the category sets of a model may take at most about 256 MB.
+- **The fallback cache of compiled libraries was shared.** Without `HOME` (and without
+  `LIGNUM_CACHE_DIR`), `compile()` cached libraries in the temporary folder, where another user of
+  the machine could place a library under the expected name. The fallback is now a folder per user,
+  `lignum-cache-<uid>`, used only when it is owned by this user and nobody else can write to it.
+- **Further memory errors on crafted files, found by the new fuzzers.** An XGBoost multi-class
+  model with a single `base_score` read freed memory; a `.bin` file with a node shared by two parents
+  made `predict` hang (every node now has one parent, and unknown header flags are rejected); a UBJSON
+  object key was read after the output buffer moved; a `.cbm` file with empty parameters passed a
+  null pointer to `memcpy`. All are rejected or handled, with regression tests.
+
+### Added
+
+- **More objectives, bit-exact:** LightGBM models trained with `reg_sqrt=True` (`regression`,
+  `regression_l1`, `fair`, `quantile`, `mape`: predict squares the score back, `transform`
+  `"signed_square"`), XGBoost `binary:hinge` (`"hinge"`: 0 or 1), and CatBoost's `Focal`,
+  `MultiLogloss` and `MultiCrossEntropy` (sigmoid per output, as `predict_proba`).
+  `tests/python/test_objectives.py` trains every objective lignum accepts and compares.
+
+### Changed
+
+- **Unknown objectives are rejected at load time.** Before, an objective lignum did not know got
+  no output transform, so `predict` silently differed from the library's (`reg_sqrt`,
+  `binary:hinge`, `RMSEWithUncertainty`, `MultiLogloss`, `Focal` did). Every objective in the
+  documentation of LightGBM 4, XGBoost 3 and CatBoost is now known and tested, except CatBoost's
+  `RMSEWithUncertainty`, `QueryCrossEntropy` (GPU only) and CatBoost models trained with a Python
+  objective, which are rejected with a message. LightGBM and XGBoost
+  models trained with a Python objective predict raw scores, as before and as the libraries do.
+- **`.bin` format 0.9.** It adds the categories of training; files of format 0.8 (lignum 0.4.0,
+  0.4.1) still load. Files written by 0.4.2 cannot be read by lignum 0.4.1 or older.
+
+### Fixed
+
+- **pandas `category` columns get the codes of training.** LightGBM (`pandas_categorical`) and
+  XGBoost 3 (`cats`) store the categories of training, and their `predict(df)` maps a DataFrame's
+  categories onto them. lignum used the codes as they came, so a frame whose categories were in
+  another order or a subset (e.g. made from the current batch with `astype("category")`) predicted
+  differently without an error (80% of the rows in a test), string categories failed to convert,
+  and integer categories gave their values instead of codes. lignum now reads the categories and
+  maps pandas `category` columns and Arrow dictionary columns (pyarrow, polars) the way the library
+  does, bit for bit: a category not in training is missing (LightGBM) or a `ValueError` (XGBoost),
+  and other `category` columns than in training are a `ValueError`, as in the libraries. One lookup
+  per category and an array read per row; the table is cached per categories object.
+- **CatBoost models with more than 65,535 float and one-hot features read the wrong column.** Their
+  index was cut to 16 bits, so a split on feature 65,541 used feature 5. Such models are now
+  rejected; up to 65,535 load as before (and their `.bin` files load too).
+- **XGBoost categories of 2^32 and more were wrapped** to small categories by a 32-bit cast (2^32 + 2
+  became category 2). They can never be matched and are dropped.
+- **A model without splits crashed Arrow prediction with `binned=False` on x86-64** (an integer
+  division by zero).
+- **A LightGBM `dump_model()` JSON with a feature named `learner` was read as XGBoost** and failed.
+  JSON files are recognised by their first key. Malformed LightGBM and XGBoost JSON files now give
+  errors that name the library and the file, instead of only simdjson's error code; a category that
+  is not an integer is an error instead of an exception from `std::stoul`.
+
 ## [0.4.1] — 2026-10-30
 
 ### Changed
@@ -163,7 +234,8 @@ First release on PyPI (`pip install pylignum`, `import lignum`).
 
 Initial release of the package (GitHub only).
 
-[Unreleased]: https://github.com/misterekkk/lignum/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/misterekkk/lignum/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/misterekkk/lignum/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/misterekkk/lignum/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/misterekkk/lignum/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/misterekkk/lignum/compare/v0.3.0...v0.3.1

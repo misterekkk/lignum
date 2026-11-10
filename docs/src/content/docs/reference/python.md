@@ -3,7 +3,7 @@ title: Python API
 description: Every public function and method of the lignum package.
 ---
 
-Generated from the docstrings of lignum 0.4.1 by `docs/scripts/api_reference.py`.
+Generated from the docstrings of lignum 0.4.2 by `docs/scripts/api_reference.py`.
 
 ## `lignum.load`
 
@@ -11,12 +11,12 @@ Generated from the docstrings of lignum 0.4.1 by `docs/scripts/api_reference.py`
 lignum.load(filepath: str, format: str = 'auto', binned: bool = True, compiled: str | os.PathLike | None = None, validate_features: bool = True) -> Model
 ```
 
-Load a trained model: LightGBM or XGBoost files, or a lignum `.bin`.
+Load a trained model: LightGBM, XGBoost or CatBoost files, or a lignum `.bin`.
 
 **Parameters**
 
 - `filepath` *(str)* Path to the model file on disk.
-- `format` *({'auto', 'lignum', 'lightgbm', 'xgboost', 'catboost'}, default='auto')* Library of the model. The file's own bytes tell which of its formats it is, so 'auto' loads a lignum `.bin`, a LightGBM `model.txt` (`save_model`) or `dump_model()` JSON, an XGBoost `.json` or `.ubj` (`save_model`) and a CatBoost JSON (`save_model(..., format="json")`). Naming the library only adds a check.
+- `format` *({'auto', 'lignum', 'lightgbm', 'xgboost', 'catboost'}, default='auto')* Library of the model. The file's own bytes tell which of its formats it is, so 'auto' loads a lignum `.bin`, a LightGBM `model.txt` (`save_model`) or `dump_model()` JSON, an XGBoost `.json` or `.ubj` (`save_model`) and a CatBoost `.cbm` (`save_model`) or JSON (`save_model(..., format="json")`). Naming the library only adds a check. Objectives lignum does not know are rejected (`RuntimeError`), so as not to predict without the library's output transform.
 - `binned` *(bool, default=True)* Prepare the binned kernel: inputs are mapped once per row to integer bin codes and categorical decisions are precomputed, so the tree walk compares small integers. Results are identical either way; False keeps only the direct traversal (lower memory use).
 - `compiled` *(path, optional)* Library written by `Model.compile(library=...)` for this model, or the folder it was written to (the file for this model and platform is picked); predictions then use the compiled trees without compiling again. Needs `binned=True`. A library for another model or lignum version raises `RuntimeError`. Only load libraries you trust.
 - `validate_features` *(bool, default=True)* Default of `Model.predict(..., validate_features=...)`: check the column names of pandas and Arrow inputs against the model's feature names. Also settable later as `model.validate_features`.
@@ -179,7 +179,7 @@ Summary of the model, for logs and checks before serving it.
 
 **Returns**
 
-- `dict` `source`, `objective`, `transform` (from raw scores to predictions: "identity", "sigmoid", "exp", "log1p_exp", "softmax" or "argmax"), `n_trees`, `n_leaves`, `n_features`, `n_outputs`, `feature_names`, `categorical_features`, `kernel` ("catboost", "compiled", "binned" or "direct"), `compiled_library` and `written_by` (lignum version that wrote a `.bin` file, otherwise None).
+- `dict` `source`, `objective`, `transform` (from raw scores to predictions: "identity", "sigmoid", "exp", "log1p_exp", "softmax", "argmax", "signed_square" for LightGBM's `reg_sqrt` or "hinge" for XGBoost's `binary:hinge`), `n_trees`, `n_leaves`, `n_features`, `n_outputs`, `feature_names`, `categorical_features`, `kernel` ("catboost", "compiled", "binned" or "direct"), `compiled_library` and `written_by` (lignum version that wrote a `.bin` file, otherwise None).
 
 **Examples**
 
@@ -220,7 +220,7 @@ when the file does not say.
 ### `Model.predict`
 
 ```python
-Model.predict(X: np.ndarray, raw_score: bool = False, n_jobs: int = -1, strategy: str = 'auto', validate_features: bool | None = None) -> np.ndarray
+Model.predict(X: Any, raw_score: bool = False, n_jobs: int = -1, strategy: str = 'auto', validate_features: bool | None = None) -> np.ndarray
 ```
 
 Predict values for the given input data.
@@ -230,7 +230,7 @@ Otherwise, an internal copy will be triggered, which may degrade performance.
 
 **Parameters**
 
-- `X` *(array-like or Arrow data, shape (n_samples, n_features))* The input samples to predict: anything numpy converts to a float64 matrix, or Arrow data through the PyCapsule interface (`pyarrow.RecordBatch` / `Table` / `RecordBatchReader`, polars `DataFrame`, ...). Arrow columns are used by position; float64, float32, integer, boolean and null columns are read without copying the table, nulls are NaN and dictionary (categorical) columns give their category codes. Predictions equal those for the same float64 matrix. pandas DataFrames are converted with numpy; pass `pyarrow.Table.from_pandas(df)` for categorical columns. A 1-D array or a flat list is one row. CatBoost models predict pandas frames of 50,000 rows or more through pyarrow when it is installed (faster, same results). CatBoost models with categorical features take their categories as strings or integers: a pandas DataFrame, a numpy object array, or a list (one row) or list of rows; see `categorical_features` and `catboost_hash`.
+- `X` *(array-like or Arrow data, shape (n_samples, n_features))* The input samples to predict: anything numpy converts to a float64 matrix, or Arrow data through the PyCapsule interface (`pyarrow.RecordBatch` / `Table` / `RecordBatchReader`, polars `DataFrame`, ...). Arrow columns are used by position; float64, float32, integer, boolean and null columns are read without copying the table, nulls are NaN and dictionary (categorical) columns give their category codes. Predictions equal those for the same float64 matrix. pandas DataFrames are converted with numpy. pandas `category` columns and Arrow dictionary columns give the codes their categories had in training, as the library's `predict(df)` does (LightGBM: a category not seen in training is missing; XGBoost: `ValueError`). A 1-D array or a flat list is one row. CatBoost models predict pandas frames of 50,000 rows or more through pyarrow when it is installed (faster, same results). CatBoost models with categorical features take their categories as strings or integers: a pandas DataFrame, a numpy object array, or a list (one row) or list of rows; see `categorical_features` and `catboost_hash`.
 - `raw_score` *(bool, default=False)* Whether to output raw scores (leaf values) instead of transformed predictions.
 - `n_jobs` *(int, default=-1)* Number of OpenMP threads to use. `-1` means using all available logical cores.
 - `strategy` *({'auto', 'serial', 'rows'}, default='auto')* How the work is spread across threads. All strategies return identical results; only speed differs. `'serial'` runs on the calling thread (lowest latency for a few rows), `'rows'` splits rows between threads. `'auto'` uses `'serial'` below 8 rows or with one thread, `'rows'` otherwise.
@@ -258,14 +258,13 @@ model.predict(X, n_jobs=2)
 Model.save(filepath: str) -> None
 ```
 
-Save the current model to the Lignum binary format.
-
-This format is optimized for fast, memory-mapped (mmap) loading in 
-subsequent sessions.
+Save the model in lignum's binary format (`.bin`), which loads by memory mapping in well
+under a millisecond. The compiled trees are not part of it: ship the library written by
+`compile(library=...)` next to it.
 
 **Parameters**
 
-- `filepath` *(str)* Destination file path for the compiled `.bin` model.
+- `filepath` *(str)* Destination path of the `.bin` file.
 
 **Examples**
 
