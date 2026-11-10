@@ -96,7 +96,7 @@ namespace lignum {
             constexpr uint8_t Float32 = 1 << 0;
             constexpr uint8_t SpecialTrees = 1 << 1;
             constexpr uint8_t Binned = 1 << 2;  // a BinnedFileHeader and its sections follow
-            constexpr uint8_t Oblivious = 1 << 3;  // CatBoost: no KNodes, the ObliviousForest arrays follow (version 0.7)
+            constexpr uint8_t Oblivious = 1 << 3;  // CatBoost: no KNodes, the ObliviousForest arrays follow (since format 0.7)
         } // namespace header_flags
 
         // Binned sections, in file order: (pointer, element size, element count).
