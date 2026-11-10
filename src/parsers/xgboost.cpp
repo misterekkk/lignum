@@ -209,28 +209,48 @@ namespace lignum {
             auto objective_elem = doc["learner"]["objective"]["name"];
             const std::string_view objective = objective_elem.error() == simdjson::SUCCESS ? objective_elem.get_string().value() : "";
 
-            // XGBoost converts base_score to margin space in float32 arithmetic.
-            // binary:logitraw keeps base_score as is (no logit) and applies no transform;
-            // multi:softprob / multi:softmax store it in margin space already.
-            info.transform = transform::Identity;
+            // Every XGBoost objective with predict()'s transform and the conversion of base_score to
+            // margin space (ProbToMargin), both in float32. An unknown objective is rejected: its
+            // transform is not known, so predictions could differ from XGBoost's.
+            enum class Link { Identity, Logit, Log };
+            Link link = Link::Identity;
+            if (objective.empty()) throw std::runtime_error("Malformed XGBoost model: no objective (learner.objective.name).");
+            if (objective == "reg:squarederror" || objective == "reg:linear" || objective == "reg:squaredlogerror" ||
+                objective == "reg:pseudohubererror" || objective == "reg:absoluteerror" || objective == "reg:quantileerror" ||
+                objective == "reg:expectileerror" ||
+                objective == "binary:logitraw" || objective == "rank:ndcg" || objective == "rank:map" || objective == "rank:pairwise") {
+                info.transform = transform::Identity;
+            } else if (objective == "binary:logistic" || objective == "reg:logistic") {
+                info.transform = transform::Sigmoid;
+                link = Link::Logit;
+            } else if (objective == "count:poisson" || objective == "reg:gamma" || objective == "reg:tweedie" ||
+                       objective == "survival:cox" || objective == "survival:aft") {
+                info.transform = transform::Exp;
+                link = Link::Log;
+            } else if (objective == "binary:hinge") {
+                info.transform = transform::Hinge;  // base_score is a margin already
+            } else if (objective == "multi:softprob") {
+                info.transform = transform::Softmax;  // base scores are stored in margin space
+            } else if (objective == "multi:softmax") {
+                info.transform = transform::Argmax;
+            } else {
+                throw std::runtime_error("Unsupported XGBoost objective '" + std::string(objective) +
+                                         "': lignum does not know how XGBoost transforms its raw scores, so predictions "
+                                         "could differ. Please report it at https://github.com/misterekkk/lignum/issues.");
+            }
             for (float& base_score : base_scores) {
-                if (objective == "binary:logistic" || objective == "reg:logistic") {
+                if (link == Link::Logit) {
                     if (!(base_score > 0.0f && base_score < 1.0f)) {
                         throw std::runtime_error("base_score must be in (0, 1) for logistic objectives.");
                     }
                     base_score = -std::log(1.0f / base_score - 1.0f);
-                    info.transform = transform::Sigmoid;
-                } else if (objective == "count:poisson" || objective == "reg:gamma" || objective == "reg:tweedie" ||
-                           objective == "survival:cox" || objective == "survival:aft") {
+                } else if (link == Link::Log) {
                     if (!(base_score > 0.0f)) {
                         throw std::runtime_error("base_score must be positive for log-link objectives.");
                     }
                     base_score = std::log(base_score);
-                    info.transform = transform::Exp;
                 }
             }
-            if (objective == "multi:softprob") info.transform = transform::Softmax;
-            if (objective == "multi:softmax") info.transform = transform::Argmax;
             info.base_scores.assign(base_scores.begin(), base_scores.end());
             info.objective = std::string(objective);
 

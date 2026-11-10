@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <initializer_list>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -439,12 +440,41 @@ namespace lignum {
             return values;
         }
 
-        // The output transform of CatBoost's default predict() for the loss.
+        bool one_of(std::string_view name, std::initializer_list<std::string_view> names) {
+            for (std::string_view n : names) if (name == n) return true;
+            return false;
+        }
+
+        // The output transform of what CatBoost's predict gives for the loss: predict_proba for
+        // classifiers, predict for regressors and rankers. An unknown loss is rejected: its transform
+        // is not known, so predictions could differ from CatBoost's. Without a loss in the file
+        // (hand-made models), raw scores.
         uint8_t transform_of(std::string_view loss, uint32_t dim) {
-            if (loss == "Logloss" || loss == "CrossEntropy" || loss == "MultiClassOneVsAll") return transform::Sigmoid;
+            if (loss.empty()) return transform::Identity;
+            if (one_of(loss, {"RMSE", "MAE", "Quantile", "MultiQuantile", "Expectile", "LogLinQuantile", "Lq", "Huber", "MAPE", "LogCosh",
+                              "Cox", "SurvivalAft", "MultiRMSE", "MultiRMSEWithMissingValues", "YetiRank", "YetiRankPairwise",
+                              "PairLogit", "PairLogitPairwise", "QueryRMSE", "QuerySoftMax", "LambdaMart", "StochasticRank",
+                              "StochasticFilter", "GroupQuantile"})) {
+                return transform::Identity;
+            }
+            if (one_of(loss, {"Logloss", "CrossEntropy", "Focal", "MultiClassOneVsAll", "MultiLogloss", "MultiCrossEntropy"})) {
+                return transform::Sigmoid;  // per output
+            }
             if (loss == "MultiClass") return dim > 1 ? transform::Softmax : transform::Identity;
             if (loss == "Poisson" || loss == "Tweedie") return transform::Exp;
-            return transform::Identity;
+            if (loss == "RMSEWithUncertainty") {
+                throw std::runtime_error("CatBoost models with loss RMSEWithUncertainty are not supported yet (predict() gives "
+                                         "exp(2 x) for the variance, with CatBoost's own exp).");
+            }
+            if (loss.substr(0, 17) == "PythonUserDefined") {
+                // The file does not say: a regressor's predict gives raw scores, a classifier's
+                // predict_proba the sigmoid, and a custom classifier stores no class parameters.
+                throw std::runtime_error("CatBoost models trained with a Python objective are not supported: the file does not "
+                                         "record whether predict gives raw scores (regressor) or probabilities (classifier).");
+            }
+            throw std::runtime_error("Unsupported CatBoost loss '" + std::string(loss) +
+                                     "': lignum does not know how CatBoost transforms its raw scores, so predictions could differ. "
+                                     "Please report it at https://github.com/misterekkk/lignum/issues.");
         }
 
         enum class CtrKind { Borders, Buckets, Counter, Mean };
@@ -873,8 +903,7 @@ namespace lignum {
                 for (simdjson::dom::element v : tree["leaf_values"].get_array()) spec.leaves.push_back(get_number(v));
             }
             simdjson::dom::element loss_type;
-            if (doc.at_pointer("/model_info/params/loss_function/type").get(loss_type) == simdjson::SUCCESS) spec.loss = std::string(loss_type.get_string().value());
-            return spec;
+            if (doc.at_pointer("/model_info/params/loss_function/type").get(loss_type) == simdjson::SUCCESS) spec.loss = std::string(loss_type.get_string().value());            return spec;
         }
 
         // -----------------------------------------------------------------------------------------

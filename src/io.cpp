@@ -369,7 +369,10 @@ namespace lignum {
                 throw std::runtime_error("Binary file is truncated or corrupted.");
             }
             auto forest = load_oblivious(binary_data->data, binary_data->size, start);
-            if (forest->dim != header.n_outputs || forest->n_columns != header.n_features || header.transform > transform::Argmax) {
+            // CatBoost models use these transforms only (see transform_of in catboost.cpp).
+            const bool catboost_transform = header.transform == transform::Identity || header.transform == transform::Sigmoid ||
+                                            header.transform == transform::Exp || header.transform == transform::Softmax;
+            if (forest->dim != header.n_outputs || forest->n_columns != header.n_features || !catboost_transform) {
                 throw std::runtime_error("Binary file is truncated or corrupted.");
             }
             Model model;

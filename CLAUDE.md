@@ -15,7 +15,11 @@ Published on PyPI as `pylignum`, imported as `lignum`.
      not in the kernel. XGBoost uses float32 for comparisons, accumulation and transforms.
 2. **No performance regressions.** Any kernel change needs a before/after benchmark against the
    previous commit (see "Benchmarking"). Put the numbers in the commit message.
-3. **No hand-written SIMD** unless a benchmark shows a clear win on both x86-64 and arm64.
+3. **No hand-written SIMD** unless a benchmark shows a clear win on both x86-64 and arm64. Intrinsics
+   may be limited to one compiler or architecture where its compiler fails to vectorise a loop the
+   others vectorise: the CatBoost leaf index uses SSE2/AVX2 intrinsics only with MSVC, which
+   vectorises innermost loops only (there the loop over levels, leaving the row loop scalar), while
+   GCC and Clang vectorise the row loop as well as the intrinsics do (`src/catboost_kernel.hpp`).
 4. `KNode` is exactly 64 bytes (`static_assert`). Every union member must be naturally aligned per slot.
 5. The core is a library: no Kafka/network code, no dependencies beyond vendored simdjson and OpenMP.
 6. C++20. Code, comments, commit messages and repo docs in English.

@@ -6,6 +6,24 @@ All notable changes to lignum (`pip install pylignum`). The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **More objectives, bit-exact:** LightGBM models trained with `reg_sqrt=True` (`regression`,
+  `regression_l1`, `fair`, `quantile`, `mape`: predict squares the score back, `transform`
+  `"signed_square"`), XGBoost `binary:hinge` (`"hinge"`: 0 or 1), and CatBoost's `Focal`,
+  `MultiLogloss` and `MultiCrossEntropy` (sigmoid per output, as `predict_proba`).
+  `tests/python/test_objectives.py` trains every objective lignum accepts and compares.
+
+### Changed
+
+- **Unknown objectives are rejected at load time.** Before, an objective lignum did not know got
+  no output transform, so `predict` silently differed from the library's (`reg_sqrt`,
+  `binary:hinge`, `RMSEWithUncertainty`, `MultiLogloss`, `Focal` did). Every objective in the
+  documentation of LightGBM 4, XGBoost 3 and CatBoost is now known and tested, except CatBoost's
+  `RMSEWithUncertainty`, `QueryCrossEntropy` (GPU only) and CatBoost models trained with a Python
+  objective, which are rejected with a message. LightGBM and XGBoost
+  models trained with a Python objective predict raw scores, as before and as the libraries do.
+
 ### Security
 
 - **Damaged `.bin` files could make prediction read outside the file.** An element count in the

@@ -54,7 +54,8 @@ The package is installed as `pylignum` and imported as `lignum`.
 
 Models lignum cannot predict exactly (LightGBM linear trees and random forests, XGBoost
 multi-target models, linear boosters and DART models that dropped trees, CatBoost non-symmetric
-trees and text features) are rejected at load time.
+trees and text features, objectives whose output transform lignum does not know) are rejected at
+load time.
 
 ## Requirements
 
