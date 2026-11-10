@@ -2,12 +2,13 @@
 
 Uses the cached models from bench.py (run `python benchmarks/bench.py --quick` or the full run first).
 
-    python benchmarks/batch_sweep.py [--cache benchmarks/.cache/<key>] [--strategies auto,rows,trees,serial]
+    python benchmarks/batch_sweep.py [--cache benchmarks/.cache/<key>] [--strategies auto,rows,serial]
 """
 
 import argparse
 import inspect
 import os
+import sys
 import statistics
 import time
 from pathlib import Path
@@ -39,16 +40,20 @@ def main():
     parser.add_argument("--threads", default=f"1,{os.cpu_count()}")
     args = parser.parse_args()
 
-    cache = Path(args.cache) if args.cache else max((HERE / ".cache").iterdir(), key=lambda p: p.stat().st_size if p.is_dir() else 0)
-    if not args.cache:
-        cache = sorted((HERE / ".cache").iterdir(), key=lambda p: (p / "data.npz").stat().st_size)[-1]
+    if args.cache:
+        cache = Path(args.cache)
+    else:  # the largest data set bench.py has cached (folders with a data.npz)
+        cached = [p for p in (HERE / ".cache").iterdir() if (p / "data.npz").is_file()]
+        if not cached:
+            sys.exit("No data set cached by benchmarks/bench.py in benchmarks/.cache: run bench.py first or pass --cache.")
+        cache = max(cached, key=lambda p: (p / "data.npz").stat().st_size)
     X = np.load(cache / "data.npz")["X"]
     fmt = "lightgbm" if args.model.startswith("lgb") else "xgboost"
     model = lignum.load(str(cache / args.model), format=fmt)
     model.validate_features = False  # benchmarks measure prediction alone: no column-name check
 
     has_strategy = "strategy" in inspect.signature(model.predict).parameters
-    strategies = args.strategies.split(",") if args.strategies else (["auto", "rows", "trees", "serial"] if has_strategy else [None])
+    strategies = args.strategies.split(",") if args.strategies else (["auto", "rows", "serial"] if has_strategy else [None])
     threads = [int(t) for t in args.threads.split(",")]
 
     print(f"model {cache.name}/{args.model}; µs per call (median); per-row µs in brackets")

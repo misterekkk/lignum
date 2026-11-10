@@ -64,8 +64,12 @@ Measured on an Apple M4; parsing only, without building the binned kernel. Conve
 `.bin` file in production, and keep the original model file: a `.bin` file from an older lignum
 version is rejected, and is written again from the original. Format 0.8 (lignum 0.4) adds the
 feature names, the library the model came from, its objective and the lignum version that wrote the
-file (`model.info()["written_by"]`); files
-written by lignum 0.3 (format 0.6 and 0.7) must be saved again.
+file (`model.info()["written_by"]`); files written by lignum 0.3 (format 0.6 and 0.7) must be saved
+again.
+
+The file is memory-mapped while a model uses it. Replace it with a new file (write it under another
+name, then rename it) rather than overwriting it in place, which would change or cut off the data of
+running models.
 
 ## What a model must look like
 
@@ -77,6 +81,14 @@ written by lignum 0.3 (format 0.6 and 0.7) must be saved again.
   `category` columns these are `series.cat.codes` (NaN for missing), which is also what a dictionary
   column in [Arrow input](../arrow/) gives. CatBoost models take the category values themselves
   (strings or integers), see [CatBoost](../catboost/#categorical-input).
+
+:::caution[Categories of a pandas DataFrame]
+LightGBM and XGBoost 3 store the categories of training in the model, and their `predict(df)` maps
+a DataFrame's categories onto them. lignum does not yet: it uses the codes as they are, so a column
+whose categories are in another order, or include other values, predicts differently without an
+error. Give such columns the categories of training, in the same order, before predicting:
+`df[col] = df[col].cat.set_categories(training_categories)`.
+:::
 - **Multiclass** models predict one column per class (`model.n_outputs`).
 
 ## Not supported
@@ -113,3 +125,27 @@ XGBoost, `predict_proba` for CatBoost classifiers and `predict` for CatBoost reg
 | `hinge` | XGBoost `binary:hinge` (0 or 1) |
 
 `predict(X, raw_score=True)` skips the transform.
+
+## Early stopping
+
+lignum predicts with every tree in the file, like the library's `Booster.predict`:
+
+- **LightGBM** `save_model` writes the trees up to the best iteration by default, so the file and
+  `predict` agree.
+- **XGBoost** keeps every tree in the file. `Booster.predict` uses all of them, but the scikit-learn
+  wrappers (`XGBClassifier.predict_proba`, `XGBRegressor.predict`) stop at `best_iteration`. To
+  serve what the wrapper predicts, save the trees up to it:
+
+```python
+clf.get_booster()[: clf.best_iteration + 1].save_model("model.json")
+lignum.load("model.json").predict(X)   # == clf.predict_proba(X)[:, 1], bit for bit
+```
+
+## Limits
+
+- At most 65,536 input columns for LightGBM and XGBoost models, and 65,535 float, one-hot and CTR
+  features for CatBoost models.
+- Trees at most 1,024 levels deep, and category sets of a model at most about 256 MB (categories
+  below 2^31).
+- The binned kernel needs fewer than 65,534 thresholds per feature and categories below 65,535;
+  other models use the direct kernel, with the same results (`model.uses_binned`).

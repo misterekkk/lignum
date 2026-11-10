@@ -17,6 +17,12 @@ library-neutral binary trees. All library-specific semantics are resolved here (
 [Bit-exact predictions](../exactness/)), so nothing downstream knows where a model came from. JSON is
 parsed with [simdjson](https://github.com/simdjson/simdjson).
 
+CatBoost models take their own path: their trees are symmetric (one split per level), so the
+`.cbm` and JSON readers build an oblivious forest with its own kernel. Per block of rows it first
+computes every feature's bucket (float borders, one-hot values, and CTRs: CatBoost's hash of the
+category combination looked up in the model's tables), then each tree's leaf index from one bit per
+level. See [CatBoost](../../guides/catboost/).
+
 ## Interpreter: two kernels
 
 **Direct kernel.** Two tree levels per 64-byte node (`KNode`, one cache line), leaves in a separate

@@ -891,7 +891,8 @@ namespace lignum {
                 return;
             }
 
-            // Batches use the binned kernel when available; a few rows keep the direct traversal.
+            // The binned kernel when the model has one (from LIGNUM_BINNED_MIN_ROWS rows on, by default
+            // one), otherwise the direct traversal.
             const bool binned = model.binned && n_samples >= kMinRowsForBinned;
             with_outputs(model, n_samples, out, raw_score, [&](double* dst, bool raw) {
                 if (binned) run_binned_any(model, X, n_samples, n_features, dst, n_jobs, strategy, raw);

@@ -115,7 +115,7 @@ All options after `flags` are keyword-only.
 | Option | Default | Meaning |
 |---|---|---|
 | `compiler` | `"auto"` | C compiler (see above) |
-| `flags` | `""` | optimisation flags; empty means `-O2` or `/O2` |
+| `flags` | `""` | optimisation flags; empty means `-O2` or `/O2`. Never `-ffast-math`, `-Ofast`, `-ffp-contract=fast` or `/fp:fast`: they let the compiler reorder the leaf sums, and predictions would no longer be exact |
 | `jobs` | all cores | source files compiled in parallel |
 | `block_trees` | 16 | trees per generated function; larger blocks compile slower and run about the same |
 | `library` | none | write the library here (a file or a folder) instead of the cache |

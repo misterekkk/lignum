@@ -87,7 +87,9 @@ model.predict(X, n_jobs=1)    # the calling thread only
 with one thread. Every strategy gives the same result; only the time differs.
 
 `predict` releases the GIL, and a model can be used from several threads at once. `compile`,
-`load_compiled` and `decompile` change the model: call them before sharing it.
+`load_compiled`, `decompile` and `autotune` change the model (`autotune` switches between the
+interpreter and the compiled trees while it measures): call them before sharing it, not while
+other threads predict with it.
 
 ## Two interpreter kernels
 
@@ -100,6 +102,7 @@ For the largest batches, [compiled mode](../compiled/) turns the trees into nati
 
 ## Latency
 
-A single row of a 500-tree model takes about 5-13 µs with the interpreter and 2-9 µs with compiled trees in the [benchmarks](../../benchmarks/). Keep the model
-loaded, pass one contiguous `float64` row, and leave `strategy="auto"`: small batches stay on the
-calling thread, without waking the thread pool.
+A single row of a 500-tree LightGBM or XGBoost model takes 10-30 µs on one x86 core and 6-21 µs on
+an Apple M4 in the [benchmarks](../../benchmarks/), with a different row on every call. Keep the model loaded,
+pass one contiguous `float64` row, and leave `strategy="auto"`: small batches stay on the calling
+thread, without waking the thread pool.
