@@ -93,6 +93,89 @@ TEST(Fuzz, XGBoostTreeCyclesAreRejected) {
 
 namespace {
 
+    // One XGBoost tree from its arrays (leaves keep their value in split_conditions).
+    std::string xgboost_tree(const std::vector<int>& left, const std::vector<int>& right, const std::vector<double>& conditions) {
+        auto list = [](const auto& v) {
+            std::string s = "[";
+            for (size_t i = 0; i < v.size(); i++) s += (i ? "," : "") + std::to_string(v[i]);
+            return s + "]";
+        };
+        const std::vector<int> zeros(left.size(), 0);
+        return R"({"learner": {
+            "learner_model_param": {"base_score": "[0E0]", "num_class": "0", "num_target": "1"},
+            "objective": {"name": "reg:squarederror"},
+            "gradient_booster": {"name": "gbtree", "model": {"trees": [{"left_children": )" + list(left) +
+               R"(, "right_children": )" + list(right) + R"(, "split_indices": )" + list(zeros) +
+               R"(, "split_conditions": )" + list(conditions) + R"(, "default_left": )" + list(zeros) + "}]}}}}";
+    }
+
+    // A chain of `depth` splits: node 2i splits (left: the next split, right: leaf 2i + 1 with
+    // value i), node 2 depth is the last leaf. Split i sends x < 0.5 - i left.
+    struct Chain {
+        std::vector<int> left, right;
+        std::vector<double> conditions;
+        explicit Chain(int depth) {
+            for (int i = 0; i < depth; i++) {
+                left.insert(left.end(), {2 * i + 2, -1});
+                right.insert(right.end(), {2 * i + 1, -1});
+                conditions.insert(conditions.end(), {0.5 - i, static_cast<double>(i)});
+            }
+            left.push_back(-1);
+            right.push_back(-1);
+            conditions.push_back(depth);
+        }
+        // XGBoost's walk: left iff float(x) < float(condition); NaN goes right (default_left = 0).
+        double predict(double x) const {
+            size_t n = 0;
+            while (left[n] != -1) n = static_cast<float>(x) < static_cast<float>(conditions[n]) ? left[n] : right[n];
+            return conditions[n];
+        }
+    };
+
+} // namespace
+
+TEST(Fuzz, XGBoostTreesAsDeepAsTheLimitLoadAndDeeperOnesAreRejected) {
+    // 1024 levels load and predict, on every platform's stack (1 MB on Windows): parser, builder,
+    // binned packer and the trees' destructors all recurse once per level.
+    const Chain chain(1024);
+    const std::vector<double> X = {0.0, -1.0, -5.0, -1000.0, -1022.0, -1023.0, -5000.0, 3.0, std::numeric_limits<double>::quiet_NaN()};
+    std::vector<double> expected;
+    for (double x : X) expected.push_back(chain.predict(x));
+    const auto path = write_temp("xgb_deep.json", xgboost_tree(chain.left, chain.right, chain.conditions));
+    for (bool binned : {true, false}) {
+        const auto model = lignum::load(path, "xgboost", binned);
+        std::vector<double> out(X.size());
+        model.predict_raw(X.data(), X.size(), 1, out.data(), 1);
+        EXPECT_EQ(out, expected) << "binned=" << binned;
+    }
+    EXPECT_EQ(expected[6], 1024.0);  // the deepest leaf is reached
+
+    // One level more, and a chain far too deep for any stack (it crashed by stack overflow).
+    for (int depth : {1025, 200000}) {
+        const Chain deeper(depth);
+        EXPECT_THROW(lignum::load(write_temp("xgb_deeper.json", xgboost_tree(deeper.left, deeper.right, deeper.conditions)), "xgboost"),
+                     std::runtime_error) << depth;
+    }
+}
+
+TEST(Fuzz, XGBoostNodesWithTwoParentsAreRejected) {
+    // Node i has node i + 1 as both children: 29 nodes describe 2^28 paths (the builder ran out of
+    // time and memory unfolding them). Children still follow their parents, so it is not a cycle.
+    std::vector<int> left, right;
+    std::vector<double> conditions;
+    for (int i = 0; i < 28; i++) {
+        left.push_back(i + 1);
+        right.push_back(i + 1);
+        conditions.push_back(0.5);
+    }
+    left.push_back(-1);
+    right.push_back(-1);
+    conditions.push_back(1.0);
+    EXPECT_THROW(lignum::load(write_temp("xgb_dag.json", xgboost_tree(left, right, conditions)), "xgboost"), std::runtime_error);
+}
+
+namespace {
+
     // LightGBM model.txt: a categorical split (categories 1 and 5) above a numeric one.
     const char* kTextModel =
         "tree\nversion=v4\nnum_class=1\nnum_tree_per_iteration=1\nobjective=binary sigmoid:1\nfeature_names=a b\n\n"

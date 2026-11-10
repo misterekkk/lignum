@@ -374,7 +374,8 @@ namespace lignum {
 
         // Direct traversal: rows are converted to a row-major matrix block by block.
         const size_t width = model.output_width(raw_score);
-        const int64_t tile_rows = std::max<int64_t>(8, static_cast<int64_t>(kTileBytes / (nf * sizeof(double))));
+        // max(nf, 1): a model without splits has no features (an integer division by zero on x86).
+        const int64_t tile_rows = std::max<int64_t>(8, static_cast<int64_t>(kTileBytes / (std::max<size_t>(nf, 1) * sizeof(double))));
         // Converts rows [start, start + count) and predicts them with `jobs` threads.
         auto block = [&](int64_t start, int64_t count, std::vector<double>& X, int jobs, Strategy s) {
             X.resize(static_cast<size_t>(count) * nf);

@@ -125,6 +125,13 @@ namespace lignum {
             return (size + 63) & ~size_t(63); // aligns data to 64B
         }
 
+        // An element count read from the file: no section can be larger than the file, so a count
+        // above size / element_size is corrupt. Checked before any count is multiplied, so that
+        // count * element_size cannot wrap around (and pass the size checks with a tiny value).
+        void check_count(uint64_t count, size_t element_size, size_t file_size) {
+            if (count > file_size / element_size) throw std::runtime_error("Binary file is truncated or corrupted.");
+        }
+
         void padded_write(std::ofstream& out, const char* data, size_t size_bytes) {
             if (size_bytes == 0) return;
             
@@ -343,6 +350,10 @@ namespace lignum {
             }
         };
 
+        check_count(header.n_nodes, sizeof(KNode), binary_data->size);
+        check_count(header.n_offsets, sizeof(int32_t), binary_data->size);
+        check_count(header.n_leaves, sizeof(double), binary_data->size);
+        check_count(header.n_cat_words, sizeof(uint32_t), binary_data->size);
         const size_t expected_size = base + align(header.n_nodes * sizeof(KNode)) +
                                      align(header.n_offsets * sizeof(int32_t)) + align(header.n_leaves * sizeof(double)) +
                                      align(header.n_offsets * sizeof(uint8_t)) + align(header.n_outputs * sizeof(double)) +
@@ -426,6 +437,12 @@ namespace lignum {
             BinnedFileHeader bh;
             std::memcpy(&bh, binary_data->data + offset, sizeof(bh));
             offset += sizeof(bh);
+            check_count(bh.n_nodes, sizeof(BNode), binary_data->size);
+            check_count(bh.n_trees, sizeof(int32_t), binary_data->size);
+            check_count(bh.n_features, sizeof(uint32_t), binary_data->size);
+            check_count(bh.n_cuts, sizeof(double), binary_data->size);
+            check_count(bh.n_cat_features, sizeof(BinnedCatFeature), binary_data->size);
+            check_count(bh.n_table_words, sizeof(uint64_t), binary_data->size);
 
             auto f = std::make_shared<BinnedForest>();
             f->n_nodes = bh.n_nodes;

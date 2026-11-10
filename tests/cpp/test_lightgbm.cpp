@@ -162,3 +162,33 @@ TEST(LightGBM, MulticlassSoftmaxPerRow) {
         EXPECT_EQ(prob[i * 3 + 2], e2 / sum);
     }
 }
+
+TEST(LightGBM, JsonIsRecognisedByItsFirstKeyAndErrorsNameTheLibrary) {
+    // A feature named "learner" made a LightGBM dump_model() JSON look like XGBoost.
+    const std::string json = R"({"name": "tree", "version": "v4", "objective": "regression", "feature_names": ["learner", "b"],
+        "tree_info": [{"tree_structure": {"split_feature": 0, "threshold": 0.5, "decision_type": "<=", "default_left": true,
+            "missing_type": "NaN", "left_child": {"leaf_value": 1.0}, "right_child": {"leaf_value": 2.0}}}]})";
+    const auto model = lignum::load(write_temp("lgb_learner.json", json));
+    EXPECT_EQ(model.source, lignum::model_source::LightGBM);
+    EXPECT_EQ(predict_raw(model, {0.0, 0.0, 1.0, 0.0}, 2), (std::vector<double>{1.0, 2.0}));
+
+    // Re-saved with sorted keys: "average_output" comes first.
+    const std::string sorted = R"({"average_output": false, "feature_names": ["learner", "b"], "objective": "regression",
+        "tree_info": [{"tree_structure": {"leaf_value": 3.0}}]})";
+    EXPECT_EQ(lignum::load(write_temp("lgb_sorted.json", sorted)).source, lignum::model_source::LightGBM);
+
+    // Errors say which library's file was malformed instead of only simdjson's code.
+    auto message = [](const std::string& name, const std::string& text) {
+        try {
+            lignum::load(write_temp(name, text));
+        } catch (const std::runtime_error& e) {
+            return std::string(e.what());
+        }
+        return std::string("no error");
+    };
+    EXPECT_NE(message("lgb_empty.json", "{}").find("LightGBM"), std::string::npos);
+    EXPECT_NE(message("lgb_other.json", R"({"a": 1})").find("tree_info"), std::string::npos);
+    EXPECT_NE(message("xgb_empty.json", R"({"learner": {}})").find("XGBoost"), std::string::npos);
+    const std::string bad_tree = R"({"name": "tree", "tree_info": [{"tree_structure": {"split_feature": "x"}}]})";
+    EXPECT_NE(message("lgb_bad_tree.json", bad_tree).find("Malformed LightGBM model file"), std::string::npos);
+}

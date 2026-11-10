@@ -36,6 +36,14 @@ namespace lignum {
                 const size_t j = head.find_first_not_of(" \t\r\n", i + 1);
                 if (j != std::string::npos && (head[j] == '"' || head[j] == '}')) {
                     if (head.compare(j, 10, "\"ctr_data\"") == 0 || head.compare(j, 15, "\"features_info\"") == 0) return FileKind::CatBoostJson;
+                    // XGBoost writes "learner" first (its keys are sorted); LightGBM's dump_model()
+                    // starts with "name", or with "average_output" when re-saved with sorted keys.
+                    // Only then the first 4 KB decide: a feature named "learner" is not XGBoost.
+                    if (head.compare(j, 9, "\"learner\"") == 0) return FileKind::XGBoostJson;
+                    if (head.compare(j, 6, "\"name\"") == 0 || head.find("\"average_output\"") != std::string::npos ||
+                        head.find("\"tree_info\"") != std::string::npos) {
+                        return FileKind::LightGBMJson;
+                    }
                     return head.find("\"learner\"") != std::string::npos ? FileKind::XGBoostJson : FileKind::LightGBMJson;
                 }
                 if (j != std::string::npos && std::string_view("iUIlL$#").find(head[j]) != std::string_view::npos) return FileKind::Ubjson;

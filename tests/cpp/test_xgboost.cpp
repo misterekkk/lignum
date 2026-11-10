@@ -94,3 +94,19 @@ TEST(XGBoost, UnsupportedBoostersAreRejected) {
             << booster;
     }
 }
+
+TEST(XGBoost, CategoriesNoInputCanMatchAreDropped) {
+    // Category 4294967298 (2^32 + 2) was cast to uint32 and became category 2. XGBoost inputs are
+    // categories only when 0 <= float(x) < 2^24, so such members (and negative ones) are dropped.
+    const std::string json = R"({"learner": {
+        "learner_model_param": {"base_score": "[0E0]", "num_class": "0", "num_target": "1"},
+        "objective": {"name": "reg:squarederror"},
+        "gradient_booster": {"name": "gbtree", "model": {"trees": [{
+            "left_children": [1, -1, -1], "right_children": [2, -1, -1], "split_indices": [0, 0, 0],
+            "split_conditions": [0.0, -1.0, 1.0], "default_left": [1, 0, 0], "split_type": [1, 0, 0],
+            "categories_nodes": [0], "categories_segments": [0], "categories_sizes": [4],
+            "categories": [1, 4294967298, -3, 16777216]}]}}}})";
+    const auto model = lignum::load(write_temp("xgb_cat_range.json", json), "xgboost");
+    // In the set -> right (1.0); otherwise, invalid codes and NaN (default_left) -> left (-1.0).
+    EXPECT_EQ(predict_raw(model, {1.0, 2.0, 0.0, 16777216.0, -3.0, NaN}, 1), (std::vector<double>{1.0, -1.0, -1.0, -1.0, -1.0, -1.0}));
+}

@@ -54,26 +54,45 @@ namespace lignum {
                 }
                 auto cat_nodes = tree_obj["categories_nodes"];
                 if (cat_nodes.error() == simdjson::SUCCESS && cat_nodes.get_array().size() > 0) {
-                    std::vector<int64_t> nodes, segments, sizes;
-                    std::vector<uint32_t> values;
+                    std::vector<int64_t> nodes, segments, sizes, values;
                     for (int64_t v : cat_nodes.get_array()) nodes.push_back(v);
                     for (int64_t v : tree_obj["categories_segments"].get_array()) segments.push_back(v);
                     for (int64_t v : tree_obj["categories_sizes"].get_array()) sizes.push_back(v);
-                    for (int64_t v : tree_obj["categories"].get_array()) values.push_back(static_cast<uint32_t>(v));
+                    for (int64_t v : tree_obj["categories"].get_array()) values.push_back(v);
                     if (segments.size() != nodes.size() || sizes.size() != nodes.size()) {
                         throw std::runtime_error("Malformed categorical split arrays.");
                     }
                     for (size_t k = 0; k < nodes.size(); k++) {
-                        if (segments[k] < 0 || sizes[k] < 0 || static_cast<size_t>(segments[k] + sizes[k]) > values.size()) {
+                        if (segments[k] < 0 || sizes[k] < 0 || static_cast<uint64_t>(segments[k]) > values.size() ||
+                            static_cast<uint64_t>(sizes[k]) > values.size() - static_cast<uint64_t>(segments[k])) {
                             throw std::runtime_error("Malformed categorical split arrays.");
                         }
-                        arrays.categories[nodes[k]].assign(values.begin() + segments[k], values.begin() + segments[k] + sizes[k]);
+                        // An input is a category only when 0 <= float(x) < 2^24, so other members can
+                        // never be matched: dropped, which changes no prediction (and keeps a value
+                        // like 2^32 + 1 from wrapping to category 1 in a 32-bit cast).
+                        std::vector<uint32_t>& set = arrays.categories[nodes[k]];
+                        for (int64_t j = segments[k]; j < segments[k] + sizes[k]; j++) {
+                            if (values[static_cast<size_t>(j)] >= 0 && values[static_cast<size_t>(j)] < (int64_t{1} << 24)) {
+                                set.push_back(static_cast<uint32_t>(values[static_cast<size_t>(j)]));
+                            }
+                        }
                     }
                 }
                 return arrays;
             }
 
-            std::unique_ptr<TempBinNode> build_tree(const TreeArrays& t, size_t node_id) {
+            // As deep as the LightGBM parsers allow: deeper recursion here and in the builder could
+            // overflow the stack (1 MB on Windows) on a crafted file.
+            constexpr int kMaxDepth = 1024;
+
+            // Every node is reached once: children shared between parents would multiply the tree
+            // (a file of a few dozen nodes can describe 2^28 paths).
+            std::unique_ptr<TempBinNode> build_tree(const TreeArrays& t, size_t node_id, int depth, std::vector<char>& visited) {
+                if (depth > kMaxDepth) {
+                    throw std::runtime_error("Malformed XGBoost tree: deeper than " + std::to_string(kMaxDepth) + " levels.");
+                }
+                if (visited.at(node_id)) throw std::runtime_error("Malformed XGBoost tree: a node has two parents.");
+                visited[node_id] = 1;
                 auto node = std::make_unique<TempBinNode>();
 
                 if (t.left.at(node_id) == -1) {
@@ -100,8 +119,8 @@ namespace lignum {
                 if (left <= static_cast<int64_t>(node_id) || right <= static_cast<int64_t>(node_id)) {
                     throw std::runtime_error("Malformed XGBoost tree: child index does not follow its parent.");
                 }
-                node->left = build_tree(t, static_cast<size_t>(left));
-                node->right = build_tree(t, static_cast<size_t>(right));
+                node->left = build_tree(t, static_cast<size_t>(left), depth + 1, visited);
+                node->right = build_tree(t, static_cast<size_t>(right), depth + 1, visited);
                 return node;
             }
 
@@ -148,13 +167,22 @@ namespace lignum {
 
         std::vector<std::unique_ptr<TempBinNode>> load_xgboost_json(const std::string& filepath, ModelInfo& info) {
             simdjson::dom::parser parser;
-            return load_document(parser.load(filepath), info);
+            try {
+                return load_document(parser.load(filepath), info);
+            } catch (const simdjson::simdjson_error& e) {
+                // A missing or mistyped field: name the library, not only simdjson's error code.
+                throw std::runtime_error("Malformed XGBoost model file " + filepath + ": " + e.what());
+            }
         }
 
         std::vector<std::unique_ptr<TempBinNode>> load_xgboost_ubj(const std::string& filepath, ModelInfo& info) {
             const std::string json = ubjson_to_json(read_file(filepath));
             simdjson::dom::parser parser;
-            return load_document(parser.parse(json), info);
+            try {
+                return load_document(parser.parse(json), info);
+            } catch (const simdjson::simdjson_error& e) {
+                throw std::runtime_error("Malformed XGBoost model file " + filepath + ": " + e.what());
+            }
         }
 
         namespace {
@@ -237,9 +265,9 @@ namespace lignum {
                 throw std::runtime_error("Malformed XGBoost model: no trees in gradient_booster.");
             }
             for (simdjson::dom::element tree_elem : trees) {
-                simdjson::dom::object tree_obj = tree_elem.get_object();
-
-                forest.push_back(build_tree(read_tree_arrays(tree_obj), 0));
+                const TreeArrays arrays = read_tree_arrays(tree_elem.get_object());
+                std::vector<char> visited(arrays.left.size(), 0);
+                forest.push_back(build_tree(arrays, 0, 0, visited));
             }
 
             if (n_outputs > 1) {

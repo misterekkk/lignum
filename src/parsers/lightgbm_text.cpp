@@ -181,9 +181,13 @@ namespace lignum {
                     if (begin < 0 || end < begin || static_cast<size_t>(end) > t.cat_threshold.size()) fail("invalid cat_boundaries");
                     node->categorical = true;
                     node->default_dir = 1;
+                    // Categories from 2^31 on can never be matched (see the JSON parser): dropped.
                     for (int32_t w = begin; w < end; w++) {
                         for (uint32_t bit = 0; bit < 32; bit++) {
-                            if ((t.cat_threshold[static_cast<size_t>(w)] >> bit) & 1) node->categories.push_back(static_cast<uint32_t>(w - begin) * 32 + bit);
+                            const uint64_t c = uint64_t(static_cast<uint32_t>(w - begin)) * 32 + bit;
+                            if (((t.cat_threshold[static_cast<size_t>(w)] >> bit) & 1) && c <= 2147483647u) {
+                                node->categories.push_back(static_cast<uint32_t>(c));
+                            }
                         }
                     }
                 } else {

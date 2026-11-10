@@ -114,6 +114,21 @@ TEST(Arrow, NullRowsBooleansAndDictionaries) {
     EXPECT_EQ(predict(model, batch), predict_raw(model, X, 2));
 }
 
+TEST(Arrow, ModelWithoutSplits) {
+    // No splits, so no features: the direct path's tile size divided by zero (SIGFPE on x86-64).
+    const auto path = write_temp("arrow_stump.json", R"({"objective": "regression", "tree_info": [{"tree_structure": {"leaf_value": 1.5}}]})");
+    const double d[] = {1.0, 2.0, 3.0};
+    Col c0("g", d, 3);
+    Batch batch({&c0}, 3);
+    for (bool binned : {true, false}) {
+        const auto model = lignum::load(path, "lightgbm", binned);
+        ASSERT_EQ(model.n_features, 0u);
+        EXPECT_EQ(predict(model, batch), (std::vector<double>{1.5, 1.5, 1.5})) << "binned=" << binned;
+        Batch empty({}, 3);
+        EXPECT_EQ(predict(model, empty), (std::vector<double>{1.5, 1.5, 1.5})) << "no columns, binned=" << binned;
+    }
+}
+
 TEST(Arrow, RejectsUnsupportedInput) {
     auto model = lignum::load(write_temp("arrow3.json", kModel), "lightgbm");
     const double d[] = {1.0};

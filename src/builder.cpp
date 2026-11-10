@@ -105,7 +105,14 @@ namespace lignum {
             kn.kinds[slot] = slot_kind::CatBitset;
             const uint64_t n_words = uint64_t{cats.back()} / 32 + 1;
             const uint64_t offset = data.cat_bitsets.size();
-            if (offset + n_words > UINT32_MAX) throw std::length_error("Categorical bitsets are too large.");
+            // The bitsets grow with the largest category of each split, not with the file: a small
+            // file naming large categories would otherwise allocate gigabytes.
+            // About 256 MB: one split with any category LightGBM accepts (below 2^31) fits.
+            constexpr uint64_t kMaxWords = (uint64_t{1} << 26) + (uint64_t{1} << 16);
+            if (offset + n_words > kMaxWords) {
+                throw std::length_error("The categorical splits need more than 256 MB of category sets; use consecutive "
+                                        "category codes from 0 (as LightGBM recommends).");
+            }
             data.cat_bitsets.resize(offset + n_words, 0);
             for (uint32_t c : cats) data.cat_bitsets[offset + c / 32] |= uint32_t{1} << (c % 32);
             payload = offset | (n_words << 32);

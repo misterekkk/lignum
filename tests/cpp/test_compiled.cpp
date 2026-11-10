@@ -2,6 +2,7 @@
 #include "compiled.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
 #include <fstream>
@@ -9,6 +10,11 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#if !defined(_WIN32)
+    #include <sys/stat.h>
+    #include <unistd.h>
+#endif
 
 using lignum::test::predict_raw;
 using lignum::test::write_temp;
@@ -259,3 +265,61 @@ TEST(Compiled, FailedBuildKeepsOnlyTheLog) {
     EXPECT_TRUE(files_in(o.cache_dir).empty());
 #endif
 }
+
+#if !defined(_WIN32)
+namespace {
+
+    // Sets (or with nullptr unsets) an environment variable for the scope, then restores it.
+    class EnvVar {
+        public:
+            EnvVar(const char* name, const char* value) : name_(name) {
+                if (const char* old = std::getenv(name)) old_ = old, had_ = true;
+                if (value) setenv(name, value, 1);
+                else unsetenv(name);
+            }
+            ~EnvVar() {
+                if (had_) setenv(name_, old_.c_str(), 1);
+                else unsetenv(name_);
+            }
+        private:
+            const char* name_;
+            std::string old_;
+            bool had_ = false;
+    };
+
+} // namespace
+
+TEST(Compiled, FallbackCacheInTheTempFolderMustBePrivate) {
+    // Without HOME or LIGNUM_CACHE_DIR the cache goes to the temporary folder, which others can
+    // write: a library planted there under the expected name would be loaded and run.
+    const auto tmp = std::filesystem::path(temp_path("private_tmp"));
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+    const EnvVar no_cache("LIGNUM_CACHE_DIR", nullptr), no_home("HOME", nullptr), no_xdg("XDG_CACHE_HOME", nullptr);
+    const EnvVar temp("TMPDIR", tmp.c_str());
+    const auto dir = tmp / ("lignum-cache-" + std::to_string(geteuid()));
+    ASSERT_EQ(std::filesystem::path(lignum::default_cache_dir()), dir);
+
+    auto o = options();
+    o.cache_dir.clear();  // the default cache
+    const auto model = load_model("private_src.json");
+
+    // Someone else's folder (here: a symbolic link to another folder) is not used.
+    std::filesystem::create_directories(tmp / "elsewhere");
+    std::filesystem::create_directory_symlink(tmp / "elsewhere", dir);
+    EXPECT_THROW(lignum::compile_forest(model, o, nullptr), std::runtime_error);
+    EXPECT_TRUE(std::filesystem::is_empty(tmp / "elsewhere"));
+    std::filesystem::remove(dir);
+
+    // A folder of this user is made private and used.
+    std::filesystem::create_directories(dir);
+    std::filesystem::permissions(dir, std::filesystem::perms::all);
+    lignum::CompileStats stats;
+    ASSERT_NO_THROW(lignum::compile_forest(model, o, &stats));
+    EXPECT_EQ(std::filesystem::path(stats.library).parent_path(), dir);
+    struct stat st;
+    ASSERT_EQ(stat(dir.c_str(), &st), 0);
+    EXPECT_EQ(st.st_mode & 0777, 0700u);
+    std::filesystem::remove_all(tmp);
+}
+#endif

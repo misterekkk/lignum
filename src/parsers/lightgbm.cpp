@@ -3,6 +3,7 @@
 
 #include <lignum/model.hpp>
 
+#include <charconv>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -46,6 +47,14 @@ namespace lignum {
                 }
             }
 
+            // Adds category c to a LightGBM set if an input can match it: inputs are categories only
+            // when -1 < x < 2^31 (int(x) truncates), so c is in [0, 2^31). Other members can never
+            // be matched and are dropped, which changes no prediction (and keeps a crafted category
+            // such as 4294967295 from allocating a bitset of 512 MB).
+            void add_category(int64_t c, std::vector<uint32_t>& categories) {
+                if (c >= 0 && c <= int64_t{2147483647}) categories.push_back(static_cast<uint32_t>(c));
+            }
+
             // Categorical thresholds are strings such as "1||3||5".
             std::vector<uint32_t> parse_categories(simdjson::dom::element threshold) {
                 std::vector<uint32_t> categories;
@@ -55,11 +64,19 @@ namespace lignum {
                     while (start <= text.size()) {
                         size_t end = text.find("||", start);
                         if (end == std::string_view::npos) end = text.size();
-                        if (end > start) categories.push_back(static_cast<uint32_t>(std::stoul(std::string(text.substr(start, end - start)))));
+                        if (end > start) {
+                            const std::string_view token = text.substr(start, end - start);
+                            int64_t c = 0;
+                            const auto r = std::from_chars(token.data(), token.data() + token.size(), c);
+                            if (r.ec != std::errc() || r.ptr != token.data() + token.size()) {
+                                throw std::runtime_error("Malformed LightGBM model file: invalid category '" + std::string(token) + "'.");
+                            }
+                            add_category(c, categories);
+                        }
                         start = end + 2;
                     }
                 } else {
-                    categories.push_back(static_cast<uint32_t>(threshold.get_int64().value()));
+                    add_category(threshold.get_int64().value(), categories);
                 }
                 return categories;
             }
@@ -144,10 +161,24 @@ namespace lignum {
             parse_objective(objective, info);
         }
 
+        namespace {
+            std::vector<std::unique_ptr<TempBinNode>> load_json_document(simdjson::dom::element doc, ModelInfo& info);
+        }
+
         std::vector<std::unique_ptr<TempBinNode>> load_lightgbm_json(const std::string& filepath, ModelInfo& info) {
             simdjson::dom::parser parser;
+            try {
+                return load_json_document(parser.load(filepath), info);
+            } catch (const simdjson::simdjson_error& e) {
+                // A missing or mistyped field: name the library, not only simdjson's error code.
+                throw std::runtime_error("Malformed LightGBM model file " + filepath + ": " + e.what());
+            }
+        }
+
+        namespace {
+
+        std::vector<std::unique_ptr<TempBinNode>> load_json_document(simdjson::dom::element doc, ModelInfo& info) {
             std::vector<std::unique_ptr<TempBinNode>> forest;
-            simdjson::dom::element doc = parser.load(filepath);
 
             info = ModelInfo{};
             info.precision = Precision::Float64;
@@ -178,7 +209,11 @@ namespace lignum {
                 for (simdjson::dom::element name : names) info.feature_names.emplace_back(name.get_string().value());
             }
 
-            for (simdjson::dom::element tree_obj : doc["tree_info"]) {
+            simdjson::dom::array trees;
+            if (doc["tree_info"].get_array().get(trees) != simdjson::SUCCESS) {
+                throw std::runtime_error("Malformed LightGBM model file: no \"tree_info\" (is it the JSON of LightGBM's dump_model()?).");
+            }
+            for (simdjson::dom::element tree_obj : trees) {
                 simdjson::dom::object tree_structure = tree_obj["tree_structure"].get_object();
                 forest.push_back(parse_lgbm_node(tree_structure));
             }
@@ -193,6 +228,8 @@ namespace lignum {
 
             return forest;
         }
+
+        } // namespace
 
     } // namespace parsers
 
