@@ -474,7 +474,8 @@ class Model:
         -------
         dict
             `source`, `objective`, `transform` (from raw scores to predictions: "identity",
-            "sigmoid", "exp", "log1p_exp", "softmax" or "argmax"), `n_trees`, `n_leaves`,
+            "sigmoid", "exp", "log1p_exp", "softmax", "argmax", "signed_square" for LightGBM's
+            `reg_sqrt` or "hinge" for XGBoost's `binary:hinge`), `n_trees`, `n_leaves`,
             `n_features`, `n_outputs`, `feature_names`, `categorical_features`,
             `kernel` ("catboost", "compiled", "binned" or "direct"), `compiled_library` and
             `written_by` (lignum version that wrote a `.bin` file, otherwise None).

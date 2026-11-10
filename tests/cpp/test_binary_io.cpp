@@ -133,3 +133,22 @@ TEST(BinaryIO, CountsThatWrapAroundAreRejected) {
     put<uint64_t>(bytes, layout.cat_features + 16, ~uint64_t{0} - 3);  // table_offset + size wraps around
     expect_rejected(bytes, "categorical table offset near 2^64", true);
 }
+
+TEST(BinaryIO, TransformMustMatchTheModel) {
+    // Hinge is XGBoost's (float32) and SignedSquare LightGBM's (double): another pairing, or an
+    // unknown value, would predict without the transform the library applies.
+    const auto path = (std::filesystem::temp_directory_path() / "lignum_test_io_transform.bin").string();
+    lignum::load(write_temp("io_transform.json", kSectionsModel), "lightgbm").save(path);
+    const std::vector<char> original = read_bytes(path);
+    ASSERT_EQ(original[10], static_cast<char>(lignum::transform::Identity));  // FileHeader::transform
+    for (uint8_t transform : {lignum::transform::Hinge, static_cast<uint8_t>(lignum::transform::Last + 1), uint8_t{255}}) {
+        std::vector<char> bytes = original;
+        bytes[10] = static_cast<char>(transform);
+        expect_rejected(bytes, "transform " + std::to_string(transform));
+    }
+    std::vector<char> bytes = original;
+    bytes[10] = static_cast<char>(lignum::transform::SignedSquare);
+    const auto ok = (std::filesystem::temp_directory_path() / "lignum_test_io_transform_ok.bin").string();
+    std::ofstream(ok, std::ios::binary).write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    EXPECT_EQ(lignum::load(ok).transform, lignum::transform::SignedSquare);
+}

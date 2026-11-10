@@ -221,6 +221,8 @@ NB_MODULE(_core, m) {
                 case transform::Log1pExp: return "log1p_exp";
                 case transform::Softmax: return "softmax";
                 case transform::Argmax: return "argmax";
+                case transform::SignedSquare: return "signed_square";
+                case transform::Hinge: return "hinge";
                 default: return "identity";
             }
         }, "Transform from raw scores to predictions.");

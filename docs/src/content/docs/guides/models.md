@@ -88,3 +88,28 @@ These are rejected with an error rather than predicted wrongly:
   models that dropped trees (`rate_drop > 0`). DART models that kept every tree are supported, and
   so are all LightGBM DART models.
 - CatBoost `Depthwise` and `Lossguide` trees, and text or embedding features.
+- Objectives lignum does not know, so that it cannot apply the library's output transform. Every
+  objective in the documentation of LightGBM 4, XGBoost 3 and CatBoost is known and tested except
+  CatBoost's `RMSEWithUncertainty`, `QueryCrossEntropy` (trained on GPU only, not tested yet) and
+  Python objectives (a CatBoost file does not record whether such a model predicts raw scores or
+  probabilities). LightGBM and XGBoost models trained with a Python objective predict raw scores, as
+  the libraries do.
+
+## Objectives
+
+`predict` gives what the library's own prediction gives: `booster.predict` for LightGBM and
+XGBoost, `predict_proba` for CatBoost classifiers and `predict` for CatBoost regressors and rankers.
+`model.info()["transform"]` names the transform from raw scores:
+
+| Transform | Objectives |
+|---|---|
+| `identity` | regression, ranking and quantile objectives (LightGBM `regression`, `huber`, `lambdarank`...; XGBoost `reg:squarederror`, `rank:ndcg`...; CatBoost `RMSE`, `Quantile`, `YetiRank`...), XGBoost `binary:logitraw` |
+| `sigmoid` | LightGBM `binary`, `multiclassova`, `cross_entropy`; XGBoost `binary:logistic`, `reg:logistic`; CatBoost `Logloss`, `CrossEntropy`, `Focal`, `MultiClassOneVsAll`, `MultiLogloss`, `MultiCrossEntropy` |
+| `softmax` | LightGBM `multiclass`, XGBoost `multi:softprob`, CatBoost `MultiClass` |
+| `exp` | `poisson`, `gamma`, `tweedie` (all three libraries), XGBoost `survival:cox`, `survival:aft` |
+| `log1p_exp` | LightGBM `cross_entropy_lambda` |
+| `argmax` | XGBoost `multi:softmax` (the class index) |
+| `signed_square` | LightGBM with `reg_sqrt=True` (`regression`, `regression_l1`, `fair`, `quantile`, `mape`) |
+| `hinge` | XGBoost `binary:hinge` (0 or 1) |
+
+`predict(X, raw_score=True)` skips the transform.

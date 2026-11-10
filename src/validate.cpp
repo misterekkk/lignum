@@ -26,7 +26,12 @@ namespace lignum {
 
         void validate_knodes(const Model& m) {
             if (m.n_outputs == 0) fail("no outputs");
-            if (m.transform > transform::Argmax) fail("unknown transform");
+            if (m.transform > transform::Last) fail("unknown transform");
+            // Each transform is implemented for its library's arithmetic only (Hinge: XGBoost,
+            // float32; SignedSquare: LightGBM, double).
+            if ((m.transform == transform::Hinge && !m.float32) || (m.transform == transform::SignedSquare && m.float32)) {
+                fail("transform does not match the model's precision");
+            }
             if (m.n_nodes > 0 && m.n_features == 0) fail("splits without features");
             // Word 0 of the bitsets is the zero target of branch-free categorical lookups (the
             // builder always writes it), so the kernel may read it for any categorical slot.

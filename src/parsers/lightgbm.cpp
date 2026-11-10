@@ -5,6 +5,7 @@
 
 #include <charconv>
 #include <cmath>
+#include <initializer_list>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -125,29 +126,68 @@ namespace lignum {
                 return node;
             }
 
-            double parse_sigmoid(std::string_view objective) {
-                const auto pos = objective.find("sigmoid:");
-                if (pos == std::string_view::npos) return 1.0;
-                return std::stod(std::string(objective.substr(pos + 8)));
+            // The value of a "key:value" token of the objective string (e.g. "sigmoid:0.7").
+            double objective_number(const std::vector<std::string_view>& tokens, std::string_view key, double fallback) {
+                for (std::string_view t : tokens) {
+                    if (t.size() > key.size() && t.substr(0, key.size()) == key && t[key.size()] == ':') {
+                        return std::stod(std::string(t.substr(key.size() + 1)));
+                    }
+                }
+                return fallback;
             }
 
-            void parse_objective(std::string_view objective, ModelInfo& info) {
-                const std::string_view name = objective.substr(0, objective.find(' '));
-                info.objective = std::string(name);
+            bool one_of(std::string_view name, std::initializer_list<std::string_view> names) {
+                for (std::string_view n : names) if (name == n) return true;
+                return false;
+            }
 
-                if (name == "binary" || name == "multiclassova" || name == "ovr" || name == "multiclass_ova" || name == "ova") {
+            // Every LightGBM objective (as model files name it, and its aliases) with the output
+            // transform of booster.predict. An unknown objective is rejected: its transform is not
+            // known, so predictions could differ from LightGBM's. Without an objective (custom
+            // objectives), LightGBM predicts raw scores; see load_json_document and the text parser.
+            void parse_objective(std::string_view objective, ModelInfo& info) {
+                std::vector<std::string_view> tokens;
+                for (size_t start = 0; start < objective.size();) {
+                    size_t end = objective.find(' ', start);
+                    if (end == std::string_view::npos) end = objective.size();
+                    if (end > start) tokens.push_back(objective.substr(start, end - start));
+                    start = end + 1;
+                }
+                const std::string_view name = tokens.empty() ? std::string_view() : tokens[0];
+                info.objective = std::string(name);
+                // reg_sqrt=True: trained on sign(y) sqrt|y|, predict() squares back. LightGBM writes
+                // "sqrt" only for objectives that apply it (huber and poisson ignore reg_sqrt).
+                bool sqrt = false;
+                for (size_t i = 1; i < tokens.size(); i++) sqrt |= tokens[i] == "sqrt";
+
+                if (one_of(name, {"regression", "regression_l2", "l2", "mean_squared_error", "mse", "l2_root", "root_mean_squared_error",
+                                  "rmse", "regression_l1", "l1", "mean_absolute_error", "mae", "fair", "quantile", "mape",
+                                  "mean_absolute_percentage_error"})) {
+                    info.transform = sqrt ? transform::SignedSquare : transform::Identity;
+                    return;
+                }
+                if (sqrt) {
+                    throw std::runtime_error("Unsupported LightGBM objective '" + std::string(objective) +
+                                             "': LightGBM does not write 'sqrt' for this objective.");
+                }
+                if (one_of(name, {"huber", "lambdarank", "rank_xendcg", "xendcg", "xe_ndcg", "xe_ndcg_mart", "xendcg_mart", "custom",
+                                  "none", "null", "na"})) {
+                    info.transform = transform::Identity;
+                } else if (one_of(name, {"binary", "multiclassova", "multiclass_ova", "ova", "ovr"})) {
                     info.transform = transform::Sigmoid;  // per class for one-vs-all
-                    info.sigmoid = parse_sigmoid(objective);
-                } else if (name == "multiclass" || name == "softmax") {
+                    info.sigmoid = objective_number(tokens, "sigmoid", 1.0);
+                } else if (one_of(name, {"multiclass", "softmax"})) {
                     info.transform = transform::Softmax;
-                } else if (name == "cross_entropy" || name == "xentropy") {
+                } else if (one_of(name, {"cross_entropy", "xentropy"})) {
                     info.transform = transform::Sigmoid;
-                } else if (name == "cross_entropy_lambda" || name == "xentlambda") {
+                } else if (one_of(name, {"cross_entropy_lambda", "xentlambda"})) {
                     info.transform = transform::Log1pExp;
-                } else if (name == "poisson" || name == "gamma" || name == "tweedie") {
+                } else if (one_of(name, {"poisson", "gamma", "tweedie"})) {
                     info.transform = transform::Exp;
                 } else {
-                    info.transform = transform::Identity;
+                    throw std::runtime_error("Unsupported LightGBM objective '" + std::string(name) +
+                                             "': lignum does not know how LightGBM transforms its raw scores, so predictions "
+                                             "could differ. Please report it at https://github.com/misterekkk/lignum/issues.");
                 }
             }
 

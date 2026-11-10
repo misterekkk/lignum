@@ -20,6 +20,9 @@ namespace lignum {
         constexpr uint8_t Log1pExp = 3;
         constexpr uint8_t Softmax = 4;  // across outputs
         constexpr uint8_t Argmax = 5;   // index of the largest margin (XGBoost multi:softmax); one output column
+        constexpr uint8_t SignedSquare = 6;  // sign(x) * x * x (LightGBM reg_sqrt: trained on sqrt of the target)
+        constexpr uint8_t Hinge = 7;         // 1 if x > 0, else 0 (XGBoost binary:hinge)
+        constexpr uint8_t Last = Hinge;      // files with a larger value are rejected
     } // namespace transform
 
     // Library a model was trained with; the values are part of the binary format.

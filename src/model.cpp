@@ -66,6 +66,8 @@ namespace lignum {
                 case transform::Sigmoid:  return 1.0 / (1.0 + std::exp(-sigmoid * x));
                 case transform::Exp:      return std::exp(x);
                 case transform::Log1pExp: return std::log1p(std::exp(x));
+                // LightGBM: Common::Sign(x) * x * x, an int sign times x, then times x (NaN gives NaN).
+                case transform::SignedSquare: return static_cast<double>((x > 0.0) - (x < 0.0)) * x * x;
                 default:                  return x;
             }
         }
@@ -74,6 +76,7 @@ namespace lignum {
             switch (transform) {
                 case transform::Sigmoid: return 1.0f / (1.0f + std::exp(-x));
                 case transform::Exp:     return std::exp(x);
+                case transform::Hinge:   return x > 0.0f ? 1.0f : 0.0f;  // XGBoost: NaN gives 0
                 default:                 return x;
             }
         }

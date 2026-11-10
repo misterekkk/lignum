@@ -25,10 +25,16 @@ lm.predict(["a", 1.5, 7])       # one row as a list
   - categorical features, as one-hot or CTRs (`Borders`, `Buckets`, `Counter`,
     `BinarizedTargetMeanValue`), including combinations of categories with each other and with
     binarised float features (`max_ctr_complexity`).
-- **Losses**: for the classifier, `predict` gives the probability of class 1 (`Logloss`,
-  `CrossEntropy`), or one probability per class for `MultiClass` (softmax) and
-  `MultiClassOneVsAll` (sigmoid per class). For regression it gives what CatBoost's `predict` gives: `exp` of the raw score
-  for `Poisson` and `Tweedie`, the raw score otherwise.
+- **Losses**: for classifiers, `predict` gives what `predict_proba` gives: the probability of class
+  1 (`Logloss`, `CrossEntropy`, `Focal`), or one probability per class or label for `MultiClass`
+  (softmax), `MultiClassOneVsAll`, `MultiLogloss` and `MultiCrossEntropy` (sigmoid per output). For
+  regressors and rankers it gives what CatBoost's `predict` gives: `exp` of the raw score for
+  `Poisson` and `Tweedie`, the raw score for every other loss (`RMSE`, `MAE`, `Quantile`,
+  `MultiQuantile`, `Expectile`, `LogLinQuantile`, `Lq`, `Huber`, `MAPE`, `LogCosh`, `Cox`,
+  `SurvivalAft`, `MultiRMSE`, `MultiRMSEWithMissingValues`, `YetiRank`, `PairLogit`, `QueryRMSE`,
+  `QuerySoftMax`, `LambdaMart`, `StochasticRank`, `StochasticFilter`, `GroupQuantile` and the
+  pairwise variants). Models loaded into CatBoost's base `CatBoost` class predict
+  raw scores by default: compare those with `predict(X, raw_score=True)`.
 - **Files**: CatBoost's `.cbm` (`save_model("model.cbm")`, read directly, without the flatbuffers
   library) and JSON (`format="json"`, which cannot hold multiclass models). `model.save("model.bin")`
   writes lignum's format, which loads in about 0.2 ms.
@@ -36,7 +42,10 @@ lm.predict(["a", 1.5, 7])       # one row as a list
 Not yet supported:
 
 - `Depthwise` and `Lossguide` trees;
-- text and embedding features.
+- text and embedding features;
+- the `RMSEWithUncertainty` and `QueryCrossEntropy` (GPU only, not tested yet) losses, and Python
+  objectives (the file does not record whether such a model predicts raw scores or probabilities).
+  They are rejected at load time.
 
 `compile()` is not needed: symmetric trees have no branches, so the interpreter is already the fast
 path. Unsupported models are rejected at load time with a message that says why.
