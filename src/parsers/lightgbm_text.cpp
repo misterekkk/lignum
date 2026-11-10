@@ -159,7 +159,8 @@ namespace lignum {
                 if (depth > kMaxDepth) fail("tree deeper than " + std::to_string(kMaxDepth) + " levels");
                 auto node = std::make_unique<TempBinNode>();
                 if (child < 0) {
-                    const size_t leaf = static_cast<size_t>(~child);
+                    const int32_t leaf_index = ~child;  // >= 0 for a negative child
+                    const size_t leaf = static_cast<size_t>(leaf_index);
                     if (leaf >= t.leaf_value.size()) fail("leaf index out of range");
                     node->is_leaf = true;
                     node->threshold_or_value = t.leaf_value[leaf];

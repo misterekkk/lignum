@@ -24,6 +24,23 @@ namespace lignum {
             }
         }
 
+        // Every node is referenced once, by one slot of one parent or as a tree's root: the writers
+        // lay out trees, never shared subtrees. The binned packer, the unpacking into the binned
+        // form and the code generator recurse per reference, so a node referenced twice is
+        // expanded twice (and a chain of them exponentially often), and the unpacking takes two
+        // equal grandchild pointers for a leaf (a node index taken for a leaf index loops).
+        class SingleReferences {
+            public:
+                explicit SingleReferences(size_t n_nodes, const char* what) : seen_(n_nodes, 0), what_(what) {}
+                void add(int32_t child) {
+                    if (child < 0) return;  // leaves may repeat: a leaf child fills both grandchildren
+                    if (seen_[static_cast<size_t>(child)]++) fail(std::string(what_) + " referenced more than once");
+                }
+            private:
+                std::vector<uint8_t> seen_;
+                const char* what_;
+        };
+
         void validate_knodes(const Model& m) {
             if (m.n_outputs == 0) fail("no outputs");
             if (m.transform > transform::Last) fail("unknown transform");
@@ -54,6 +71,12 @@ namespace lignum {
             for (size_t t = 0; t < m.n_offsets; t++) {
                 check_child(-1, m.tree_offsets[t], m.n_nodes, m.n_leaves, "tree root");
                 if (m.n_outputs > 1 && m.tree_outputs[t] >= m.n_outputs) fail("tree output out of range");
+            }
+            // In range now (checked above).
+            SingleReferences refs(m.n_nodes, "a node");
+            for (size_t t = 0; t < m.n_offsets; t++) refs.add(m.tree_offsets[t]);
+            for (size_t i = 0; i < m.n_nodes; i++) {
+                for (int c = 0; c < 4; c++) refs.add(m.k_nodes[i].children[c]);
             }
         }
 
@@ -90,6 +113,11 @@ namespace lignum {
                 }
             }
             for (size_t t = 0; t < f.n_trees; t++) check_child(-1, f.roots[t], f.n_nodes, m.n_leaves, "binned tree root");
+            SingleReferences refs(f.n_nodes, "a binned node");
+            for (size_t t = 0; t < f.n_trees; t++) refs.add(f.roots[t]);
+            for (size_t i = 0; i < f.n_nodes; i++) {
+                for (int c = 0; c < 8; c++) refs.add(f.nodes[i].children[c]);
+            }
         }
 
     } // namespace

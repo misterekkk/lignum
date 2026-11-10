@@ -241,6 +241,7 @@ namespace lignum {
     std::shared_ptr<const BinnedForest> build_binned(const Model& model) {
         Unpacker unpacker(model);
         std::vector<int32_t> bt_roots;
+        bt_roots.reserve(model.n_offsets);
         for (size_t t = 0; t < model.n_offsets; t++) bt_roots.push_back(unpacker.from_ref(model.tree_offsets[t]));
         const auto& bt = unpacker.nodes;
 

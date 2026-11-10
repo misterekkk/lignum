@@ -449,15 +449,24 @@ namespace lignum {
         #else
             const std::string pic = " -fPIC";
         #endif
-            std::vector<std::string> objects(c_files.size());
+            std::vector<std::string> objects(c_files.size()), commands(c_files.size());
             std::vector<int> status(c_files.size(), 0);
-            std::vector<std::thread> workers;
             for (size_t p = 0; p < c_files.size(); p++) {
                 objects[p] = (dir / (c_files[p].stem().string() + ".o")).string();
-                const std::string command = t.prefix + t.compiler + " " + (flags.empty() ? "-O2" : flags) + pic + " -c " +
-                                            quote(c_files[p].string()) + " -o " + quote(objects[p]) + " > " +
-                                            quote(objects[p] + ".log") + " 2>&1";
-                workers.emplace_back([&status, p, command] { status[p] = run(command); });
+                commands[p] = t.prefix + t.compiler + " " + (flags.empty() ? "-O2" : flags) + pic + " -c " + quote(c_files[p].string()) +
+                              " -o " + quote(objects[p]) + " > " + quote(objects[p] + ".log") + " 2>&1";
+            }
+            std::vector<std::thread> workers;
+            workers.reserve(c_files.size());
+            for (size_t p = 0; p < c_files.size(); p++) {
+                // An exception escaping a thread would end the process (std::terminate): a failure.
+                workers.emplace_back([&status, &commands, p] {
+                    try {
+                        status[p] = run(commands[p]);
+                    } catch (...) {
+                        status[p] = -1;
+                    }
+                });
             }
             for (auto& w : workers) w.join();
             if (std::any_of(status.begin(), status.end(), [](int s) { return s != 0; })) {

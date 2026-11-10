@@ -24,7 +24,7 @@ def base_data():
 @pytest.mark.parametrize("objective, model_type, positive_y", OBJECTIVES)
 def test_lightgbm_objectives(tmp_path, base_data, objective, model_type, positive_y):
     X, y_reg, y_clf = base_data
-    
+
     if model_type == "classifier":
         y = y_clf
         model = lgb.LGBMClassifier(n_estimators=10, max_depth=3, objective=objective, random_state=42)
@@ -34,7 +34,7 @@ def test_lightgbm_objectives(tmp_path, base_data, objective, model_type, positiv
 
     model_path = str(tmp_path / f"lgb_{objective}.json")
     model.fit(X, y)
-    
+
     model_dict = model.booster_.dump_model()
     with open(model_path, "w") as f:
         json.dump(model_dict, f)
@@ -49,7 +49,7 @@ def test_lightgbm_objectives(tmp_path, base_data, objective, model_type, positiv
         expected_out = model.predict_proba(X)[:, 1]
     else:
         expected_out = model.predict(X)
-        
+
     actual_out = lg_model.predict(X, raw_score=False)
     np.testing.assert_array_equal(actual_out, expected_out)
 

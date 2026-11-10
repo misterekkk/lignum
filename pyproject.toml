@@ -61,6 +61,24 @@ sdist.exclude = ["benchmarks", "docs", ".github", "tests", "*.npy"]
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
 
+# The Lint job (.github/workflows/tests.yml) runs `ruff check` and `mypy` with these settings.
+[tool.ruff]
+target-version = "py310"
+extend-exclude = ["extern", "docs/node_modules"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+ignore = ["E501", "E731", "E741", "B905"]  # long lines, named lambdas, short names, zip(strict=)
+
+[tool.ruff.lint.per-file-ignores]
+"benchmarks/*" = ["B023"]                  # lambdas timed inside the loop that defines them
+"tests/python/test_formats.py" = ["F811"]  # pytest fixture `data` imported from test_parity
+
+[tool.mypy]
+files = ["python/lignum"]
+python_version = "3.10"
+ignore_missing_imports = true
+
 [tool.cibuildwheel]
 # cp312 builds the abi3 wheel used by every later Python.
 build = "cp310-* cp311-* cp312-*"

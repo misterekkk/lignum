@@ -152,3 +152,68 @@ TEST(BinaryIO, TransformMustMatchTheModel) {
     std::ofstream(ok, std::ios::binary).write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
     EXPECT_EQ(lignum::load(ok).transform, lignum::transform::SignedSquare);
 }
+
+namespace {
+
+    // One tree whose leftmost path is four splits deep (two KNodes, two BNodes on that path), and a
+    // second tree of one split.
+    std::string deep_model() {
+        auto split = [](int feature, double threshold, const std::string& left, const std::string& right) {
+            return R"({"split_feature": )" + std::to_string(feature) + R"(, "threshold": )" + std::to_string(threshold) +
+                   R"(, "decision_type": "<=", "default_left": true, "missing_type": "NaN", "left_child": )" + left +
+                   R"(, "right_child": )" + right + "}";
+        };
+        auto leaf = [](double v) { return R"({"leaf_value": )" + std::to_string(v) + "}"; };
+        const std::string chain = split(0, 0.5, split(1, 0.25, split(0, -0.5, split(1, -1.0, leaf(1), leaf(2)), leaf(3)), leaf(4)), leaf(5));
+        return R"({"objective": "regression", "tree_info": [{"tree_structure": )" + chain + R"(}, {"tree_structure": )" +
+               split(1, 0.0, leaf(6), leaf(7)) + "}]}";
+    }
+
+} // namespace
+
+TEST(BinaryIO, NodesReferencedTwiceAreRejected) {
+    // Writers lay out trees: every node has one parent. A shared node was unfolded once per path,
+    // and KNode children {2, 2} (a node twice) were taken for a leaf, which made the binned walk
+    // loop forever (found by tests/fuzz).
+    const auto path = (std::filesystem::temp_directory_path() / "lignum_test_io_refs.bin").string();
+    lignum::load(write_temp("io_refs.json", deep_model()), "lightgbm").save(path);
+    const std::vector<char> original = read_bytes(path);
+    ASSERT_NO_THROW(lignum::load(path, "auto"));
+    const Layout layout(original);
+    const uint64_t n_nodes = get<uint64_t>(original, Layout::kNodes);
+    ASSERT_EQ(n_nodes, 3u);  // two on the chain, one for the second tree
+    const size_t knodes = 128 + align64(get<uint64_t>(original, 64 + 24) + get<uint32_t>(original, 64 + 40));
+    const size_t roots = knodes + align64(n_nodes * 64);
+    auto knode_child = [&](size_t node, int c) { return knodes + node * 64 + 32 + 4 * static_cast<size_t>(c); };
+    ASSERT_EQ(get<int32_t>(original, knode_child(0, 0)), 1);  // the chain continues in KNode 1
+
+    std::vector<char> bytes = original;
+    put<int32_t>(bytes, knode_child(0, 1), 1);  // KNode 1 for both grandchildren
+    expect_rejected(bytes, "a KNode twice in one node");
+    bytes = original;
+    put<int32_t>(bytes, knode_child(0, 3), 1);  // KNode 1 under both children of the root
+    expect_rejected(bytes, "a KNode in two slots");
+    bytes = original;
+    put<int32_t>(bytes, roots + 4, 1);  // the second tree's root is KNode 1 as well
+    expect_rejected(bytes, "a KNode as a child and a root");
+
+    // The binned nodes: BNode 0 holds three levels of the chain, BNode 1 the fourth.
+    const size_t bnodes = layout.binned_header + 64;
+    ASSERT_EQ(get<uint64_t>(original, layout.binned_header), 3u);
+    size_t to_bnode1 = 8, leaf_slot = 8;
+    for (size_t c = 0; c < 8; c++) {
+        const int32_t child = get<int32_t>(original, bnodes + 4 * c);
+        if (child == 1 && to_bnode1 == 8) to_bnode1 = c;
+        if (child < 0) leaf_slot = c;
+    }
+    ASSERT_LT(to_bnode1, 8u);
+    ASSERT_LT(leaf_slot, 8u);
+    bytes = original;
+    put<int32_t>(bytes, bnodes + 4 * leaf_slot, 1);  // BNode 1 in a second slot of BNode 0
+    expect_rejected(bytes, "a BNode in two slots", true);
+
+    // Flag bits lignum does not write.
+    bytes = original;
+    bytes[11] = static_cast<char>(static_cast<uint8_t>(bytes[11]) | 0x80);
+    expect_rejected(bytes, "an unknown header flag");
+}

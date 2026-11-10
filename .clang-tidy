@@ -1,0 +1,23 @@
+# Static analysis of lignum's own sources (the Lint job in .github/workflows/tests.yml). Every
+# remaining warning is an error. Left out: checks that flag the deliberate style of the kernels
+# and parsers (bit manipulation on signed values, many parameters of one type, narrowing casts
+# written on purpose, identical branches of switch tables), the analyzer's opt-in checks, and
+# errno after fread: the analyzer reports those inside the vendored simdjson even though it is a
+# system include (CMakeLists.txt).
+Checks: >-
+  -*,
+  clang-analyzer-*,
+  bugprone-*,
+  performance-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -bugprone-branch-clone,
+  -bugprone-reserved-identifier,
+  -bugprone-signed-bitwise,
+  -performance-avoid-endl,
+  -performance-enum-size,
+  -clang-analyzer-optin.*,
+  -clang-analyzer-unix.Errno
+WarningsAsErrors: '*'
+HeaderFilterRegex: '/(src|include)/'

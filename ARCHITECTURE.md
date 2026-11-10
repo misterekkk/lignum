@@ -130,9 +130,12 @@ Feature names are only checked against named inputs (`check_feature_names`: pand
 Arrow schemas in `predict_arrow`); the kernels read columns by position.
 Loading validates the version and the file size, maps the file read-only and then checks every
 stored index (`src/validate.cpp`): children must point strictly forward (so a walk always ends),
-leaves, features, categorical bitsets and decision tables must be in range. This takes 0.15-0.64 ms
-for the benchmark models. `tests/cpp/test_fuzz.cpp` corrupts files at random and runs under
-ASan/UBSan in CI. Older versions are rejected; re-export from JSON.
+every node must have one parent (the binned packer and the code generator recurse per reference, so
+shared nodes would be expanded once per path), and leaves, features, categorical bitsets and
+decision tables must be in range. Element counts are checked against the file size before they are
+multiplied. This takes 0.15-0.64 ms for the benchmark models. `tests/cpp/test_fuzz.cpp` corrupts
+files at random and runs under ASan/UBSan in CI, and `tests/fuzz/` holds libFuzzer targets for
+every format (`.github/workflows/fuzz.yml`). Older versions are rejected; re-export from JSON.
 
 ## Compiled mode (src/compiled.*)
 

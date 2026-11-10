@@ -29,9 +29,12 @@ macOS needs `brew install libomp`. [ARCHITECTURE.md](ARCHITECTURE.md) describes 
    exactly on thresholds. Every LightGBM / XGBoost Python test runs in three kernels (binned,
    KNode walk, compiled); all three must stay exact. CatBoost models have one kernel, so
    `test_catboost.py` runs once and compares with the trained model (not with CatBoost's lossy
-   JSON loader). Parser changes also get fuzz tests in `tests/cpp/test_fuzz.cpp`.
+   JSON loader). Parser changes also get fuzz tests in `tests/cpp/test_fuzz.cpp`, and a few minutes
+   of the format's libFuzzer target (`tests/fuzz/README.md`).
 4. **Portable.** Linux, macOS and Windows (MSVC) are all tested in CI; no POSIX-only code without a
    Windows path. C++20, no new dependencies beyond the vendored simdjson and OpenMP.
+5. **Clean static checks.** `ruff check .` and `mypy` (settings in `pyproject.toml`) for Python;
+   `clang-tidy` (`.clang-tidy`) and `-DLIGNUM_WARNINGS_AS_ERRORS=ON` for C++. CI runs all of them.
 
 Code, comments and commit messages are in English. Commit messages say what changed and why, with
 measurements for performance work.

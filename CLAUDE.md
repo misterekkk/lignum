@@ -30,7 +30,10 @@ Published on PyPI as `pylignum`, imported as `lignum`.
    kernel and code-generator changes must keep all three exact. CatBoost models have one kernel
    (`src/catboost.*`), so `test_catboost.py` runs once and compares with the trained model, not
    with CatBoost's lossy JSON loader. Parser changes also get fuzz tests
-   (`tests/cpp/test_fuzz.cpp`) and must reject corrupted files without crashing on Windows' 1 MB stack.
+   (`tests/cpp/test_fuzz.cpp`) and must reject corrupted files without crashing on Windows' 1 MB stack;
+   run the libFuzzer target of the format for a few minutes (`tests/fuzz/README.md`), and turn every
+   crash it finds into a GoogleTest regression test. CI also runs ruff, mypy, clang-tidy and
+   `-Werror` (Lint job), the Python tests under ASan + UBSan, and the fuzzers (`fuzz.yml`).
 8. Distributed builds never use `-march=native`/`-mcpu=native` (`LIGNUM_NATIVE` is for local benchmarks only).
 9. Kernel ideas are measured on x86-64 and aarch64 before they are kept: put compile flags in
    `EXPERIMENT_CXX_FLAGS` of `.github/workflows/bench-lleaves.yml` and push; M4 alone has misled us
