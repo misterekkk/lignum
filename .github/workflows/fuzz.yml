@@ -47,11 +47,18 @@ jobs:
           clang++ -fsanitize=fuzzer,address probe.cpp -o probe && echo "::notice title=Fuzzer toolchain::$(clang++ --version | head -1)"
 
       - name: Build the fuzzers (ASan + UBSan)
+        id: build
+        shell: bash
         run: |
-          cmake -S . -B build-fuzz -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-                -DLIGNUM_SANITIZE=ON "-DLIGNUM_SANITIZERS=address,undefined,fuzzer-no-link" -DLIGNUM_BUILD_FUZZERS=ON \
-                -DLIGNUM_BUILD_C_LIBRARY=OFF
-          cmake --build build-fuzz --parallel --target fuzz_${{ matrix.target }}
+          set -o pipefail
+          { cmake -S . -B build-fuzz -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+                  -DLIGNUM_SANITIZE=ON "-DLIGNUM_SANITIZERS=address,undefined,fuzzer-no-link" -DLIGNUM_BUILD_FUZZERS=ON \
+                  -DLIGNUM_BUILD_C_LIBRARY=OFF &&
+            cmake --build build-fuzz --parallel --target fuzz_${{ matrix.target }}; } 2>&1 | tee build.log
+
+      - name: Build failure as an annotation
+        if: failure() && steps.build.outcome == 'failure'
+        run: python .github/scripts/annotate_log.py "Building the fuzzers" build.log
 
       - name: Seed corpus (small models of every format)
         run: |
@@ -81,7 +88,7 @@ jobs:
               -timeout=10 -rss_limit_mb=2048 -print_final_stats=1 -artifact_prefix=crashes/ 2>&1 | tail -n 200 | tee fuzz.log
 
       - name: Failure as an annotation
-        if: failure()
+        if: failure() && steps.build.outcome == 'success'
         run: python .github/scripts/annotate_log.py "Fuzzing ${{ matrix.target }}" fuzz.log
 
       - name: Upload crashing inputs
