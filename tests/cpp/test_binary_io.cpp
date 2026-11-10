@@ -217,3 +217,59 @@ TEST(BinaryIO, NodesReferencedTwiceAreRejected) {
     bytes[11] = static_cast<char>(static_cast<uint8_t>(bytes[11]) | 0x80);
     expect_rejected(bytes, "an unknown header flag");
 }
+
+TEST(BinaryIO, CategoriesOfTrainingSurviveAndOldFilesLoad) {
+    // Format 0.9 keeps the categories of training (text, integers, numbers, booleans); 0.8 files,
+    // without them, still load.
+    const std::string text =
+        "tree\nversion=v4\nnum_class=1\nnum_tree_per_iteration=1\nobjective=regression\nfeature_names=s b\n\n"
+        "Tree=0\nnum_leaves=2\nnum_cat=1\nsplit_feature=0\nthreshold=0\ndecision_type=1\nleft_child=-1\nright_child=-2\n"
+        "leaf_value=1 2\ncat_boundaries=0 1\ncat_threshold=2\nis_linear=0\n\nend of trees\n\n"
+        "pandas_categorical:[[\"a\", \"\\u00e9\", \"c\"], [1, 2.5, 7, false, true]]\n";
+    const auto model = lignum::load(write_temp("io_categories.txt", text), "lightgbm");
+    ASSERT_TRUE(model.categories);
+    const auto path = (std::filesystem::temp_directory_path() / "lignum_test_io_categories.bin").string();
+    model.save(path);
+    const auto loaded = lignum::load(path);
+    ASSERT_TRUE(loaded.categories);
+    const auto& lists = loaded.categories->lists;
+    ASSERT_EQ(lists.size(), 2u);
+    EXPECT_TRUE(loaded.categories->by_position);
+    EXPECT_EQ(lists[0][1].text, "\xC3\xA9");
+    using Kind = lignum::CategoryValue::Kind;
+    EXPECT_EQ(lists[1][0].kind, Kind::Integer);
+    EXPECT_EQ(lists[1][1].kind, Kind::Number);
+    EXPECT_EQ(lists[1][1].number, 2.5);
+    EXPECT_EQ(lists[1][3].kind, Kind::Boolean);
+    EXPECT_EQ(lists[1][4].integer, 1);
+
+    // Damaged category bytes are rejected, never read beyond their length.
+    const std::vector<char> original = read_bytes(path);
+    const uint32_t categories_bytes = get<uint32_t>(original, 64 + 44);
+    const size_t start = 128 + get<uint64_t>(original, 64 + 24) + get<uint32_t>(original, 64 + 40);
+    ASSERT_GT(categories_bytes, 8u);
+    for (size_t pos : {start + 4, start + 8, start + 12, start + 16}) {  // list count, feature, value count, first kind
+        for (uint32_t value : {0xFFFFFFFFu, 0x7FFFFFFFu, 9u}) {
+            std::vector<char> bytes = original;
+            put<uint32_t>(bytes, pos, value);
+            const auto damaged = (std::filesystem::temp_directory_path() / "lignum_test_io_categories_bad.bin").string();
+            std::ofstream(damaged, std::ios::binary).write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            try {
+                lignum::load(damaged);
+            } catch (const std::runtime_error&) {
+            }
+        }
+    }
+    std::vector<char> bytes = original;
+    put<uint32_t>(bytes, 64 + 44, categories_bytes + 64);  // longer than the data that follows
+    expect_rejected(bytes, "categories longer than their section");
+
+    // The same model as format 0.8: no categories (the field was padding there).
+    const auto plain = (std::filesystem::temp_directory_path() / "lignum_test_io_08.bin").string();
+    lignum::load(write_temp("io_08.json", kSectionsModel), "lightgbm").save(plain);
+    bytes = read_bytes(plain);
+    ASSERT_EQ(bytes[7], 9);  // version_minor
+    bytes[7] = 8;
+    std::ofstream(plain, std::ios::binary).write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    EXPECT_NO_THROW(lignum::load(plain));
+}

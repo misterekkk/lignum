@@ -1,6 +1,7 @@
 // Corrupted model files must be rejected at load time or predict safely. Meaningful under
 // AddressSanitizer (cmake -DLIGNUM_SANITIZE=ON), which turns any out-of-bounds access into a failure.
 #include "test_util.hpp"
+#include "parsers/parsers.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -274,4 +275,21 @@ TEST(Fuzz, LightGBMTextCyclesAreRejected) {
         "Tree=0\nnum_leaves=3\nnum_cat=0\nsplit_feature=0 1\nthreshold=0.5 0.5\ndecision_type=2 2\n"
         "left_child=1 0\nright_child=-1 -2\nleaf_value=1 2 3\nis_linear=0\n\nend of trees\n";
     EXPECT_THROW(lignum::load(write_temp("cycle_model.txt", text), "lightgbm"), std::runtime_error);
+}
+
+TEST(Fuzz, UbjsonKeysSurviveTheOutputGrowing) {
+    // The converter took a view of each key in its output, appended ':' and only then checked the
+    // key: when that append moved the output, the view pointed into freed memory (found by
+    // tests/fuzz; under AddressSanitizer every growth position below is tried once).
+    for (int n = 0; n < 300; n++) {
+        std::string ubj = "{U\x01" "a[";  // {"a": [-100, ...], "base_weights": [1]}
+        std::string json = "{\"a\":[";
+        for (int k = 0; k < n; k++) {
+            ubj += "i\x9c";
+            json += (k ? ",-100" : "-100");
+        }
+        ubj += "]U\x0c" "base_weights[i\x01]}";
+        json += "],\"base_weights\":null}";  // a training statistic the converter drops
+        EXPECT_EQ(lignum::parsers::ubjson_to_json(ubj), json) << n;
+    }
 }

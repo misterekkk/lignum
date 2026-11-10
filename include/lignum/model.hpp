@@ -79,6 +79,27 @@ namespace lignum {
     };
     static_assert(sizeof(KNode) == 64, "KNode must fill exactly one cache line");
 
+    // A category of training, as the library stored it: text, an integer, a number or a boolean.
+    struct CategoryValue {
+        enum class Kind : uint8_t { Text = 0, Integer = 1, Number = 2, Boolean = 3 };
+        Kind kind = Kind::Text;
+        std::string text;
+        int64_t integer = 0;  // Integer, and Boolean (0 / 1)
+        double number = 0.0;  // Number
+    };
+
+    // The categories of a model trained on pandas `category` columns (LightGBM's pandas_categorical,
+    // XGBoost 3's cats). The library maps the categories of an input DataFrame (or of an Arrow
+    // dictionary column) onto these lists before predicting, so that a category gets the code it had
+    // in training whatever the input's own order; lignum does the same (recode_table).
+    struct TrainingCategories {
+        bool by_position = false;       // LightGBM: list k belongs to the k-th categorical column of the input
+        bool unseen_is_missing = true;  // LightGBM: a category not in the list is missing; XGBoost: an error
+        std::vector<uint32_t> features;  // XGBoost (not by_position): the input column of each list
+        std::vector<std::vector<CategoryValue>> lists;  // training order: a category's position is its code
+        std::shared_ptr<const void> index;  // value -> position lookups (src/categories.hpp)
+    };
+
     struct BinnedForest;    // binned representation (src/binned.hpp)
     struct CompiledForest;  // experimental compiled trees (src/compiled.hpp)
     struct ObliviousForest; // CatBoost symmetric trees (src/catboost.hpp)
@@ -130,6 +151,7 @@ namespace lignum {
             uint8_t source = model_source::Unknown;
             std::string objective;   // as the source library names it; empty when unknown
             std::string written_by;  // lignum version that wrote the .bin file; empty for other formats
+            std::shared_ptr<const TrainingCategories> categories;  // null when the model has none
 
             std::shared_ptr<const Data> data;
             std::shared_ptr<const BinnedForest> binned;  // binned kernel for batches; null when disabled or unsupported

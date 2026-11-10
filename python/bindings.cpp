@@ -153,6 +153,37 @@ NB_MODULE(_core, m) {
             return columns;
         }, "Input columns that hold categories (CatBoost models), in increasing order.")
         .def_prop_ro("is_catboost", [](const Model& self) { return self.oblivious != nullptr; })
+        .def_prop_ro("has_categorical_splits", [](const Model& self) {
+            if (self.oblivious || !self.has_special_trees) return false;
+            for (size_t t = 0; t < self.n_offsets; t++) {
+                if (self.tree_kinds[t] & tree_kind::Categorical) return true;
+            }
+            return false;
+        }, "Whether some tree splits on categories (LightGBM / XGBoost models).")
+        .def_prop_ro("training_categories", [](const Model& self) -> nb::object {
+            if (!self.categories) return nb::none();
+            const TrainingCategories& c = *self.categories;
+            nb::list lists;
+            for (const auto& list : c.lists) {
+                nb::list values;
+                for (const CategoryValue& v : list) {
+                    switch (v.kind) {
+                        case CategoryValue::Kind::Text:    values.append(nb::str(v.text.data(), v.text.size())); break;
+                        case CategoryValue::Kind::Integer: values.append(nb::int_(v.integer)); break;
+                        case CategoryValue::Kind::Number:  values.append(nb::float_(v.number)); break;
+                        case CategoryValue::Kind::Boolean: values.append(nb::bool_(v.integer != 0)); break;
+                    }
+                }
+                lists.append(values);
+            }
+            nb::dict d;
+            d["by_position"] = c.by_position;
+            d["unseen_is_missing"] = c.unseen_is_missing;
+            d["features"] = c.features;
+            d["lists"] = lists;
+            return d;
+        }, "Categories of training (pandas category columns), or None: by_position (LightGBM: list k for the k-th "
+           "categorical column), unseen_is_missing (LightGBM) or an error (XGBoost), features (XGBoost), lists.")
         .def_prop_ro("feature_names", [](const Model& self) { return self.feature_names; },
                      "Names of the training columns, in order; empty when the model has none.")
         .def_prop_ro("source", [](const Model& self) -> std::string {

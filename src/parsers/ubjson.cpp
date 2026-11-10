@@ -193,9 +193,11 @@ namespace lignum {
                             if (i) out_ += ',';
                             const size_t key_start = out_.size() + 1;
                             string(length());  // keys are strings without the 'S' marker
-                            const std::string_view key(out_.data() + key_start, out_.size() - key_start - 1);
+                            // Decided before appending ':', which may move out_ (the view would
+                            // then point into freed memory; found by tests/fuzz).
+                            const bool drop = !skipping_ && unused(std::string_view(out_.data() + key_start, out_.size() - key_start - 1));
                             out_ += ':';
-                            if (!skipping_ && unused(key)) {
+                            if (drop) {
                                 const size_t mark = out_.size();
                                 skipping_ = true;
                                 value(type ? type : next_byte(), depth + 1);

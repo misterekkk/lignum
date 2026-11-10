@@ -201,6 +201,52 @@ namespace lignum {
             parse_objective(objective, info);
         }
 
+        CategoryValue category_value(simdjson::dom::element v) {
+            CategoryValue c;
+            switch (v.type()) {
+                case simdjson::dom::element_type::STRING:
+                    c.kind = CategoryValue::Kind::Text;
+                    c.text = std::string(v.get_string().value());
+                    break;
+                case simdjson::dom::element_type::INT64:
+                    c.kind = CategoryValue::Kind::Integer;
+                    c.integer = v.get_int64().value();
+                    break;
+                case simdjson::dom::element_type::UINT64:  // above 2^63: kept as a number
+                    c.kind = CategoryValue::Kind::Number;
+                    c.number = static_cast<double>(v.get_uint64().value());
+                    break;
+                case simdjson::dom::element_type::DOUBLE:
+                    c.kind = CategoryValue::Kind::Number;
+                    c.number = v.get_double().value();
+                    break;
+                case simdjson::dom::element_type::BOOL:
+                    c.kind = CategoryValue::Kind::Boolean;
+                    c.integer = v.get_bool().value() ? 1 : 0;
+                    break;
+                default:
+                    throw std::runtime_error("Malformed model file: a category must be text, a number or a boolean.");
+            }
+            return c;
+        }
+
+        std::shared_ptr<TrainingCategories> lightgbm_categories(simdjson::dom::element value) {
+            if (value.is_null()) return nullptr;
+            simdjson::dom::array lists;
+            if (value.get_array().get(lists) != simdjson::SUCCESS) throw std::runtime_error("Malformed LightGBM model file: pandas_categorical is not a list.");
+            auto categories = std::make_shared<TrainingCategories>();
+            categories->by_position = true;        // the k-th list: the k-th category column of the frame
+            categories->unseen_is_missing = true;  // set_categories() makes unseen categories NaN
+            for (simdjson::dom::element list : lists) {
+                simdjson::dom::array values;
+                if (list.get_array().get(values) != simdjson::SUCCESS) throw std::runtime_error("Malformed LightGBM model file: pandas_categorical entry is not a list.");
+                std::vector<CategoryValue> out;
+                for (simdjson::dom::element v : values) out.push_back(category_value(v));
+                categories->lists.push_back(std::move(out));
+            }
+            return categories->lists.empty() ? nullptr : categories;
+        }
+
         namespace {
             std::vector<std::unique_ptr<TempBinNode>> load_json_document(simdjson::dom::element doc, ModelInfo& info);
         }
@@ -248,6 +294,8 @@ namespace lignum {
             if (doc["feature_names"].get_array().get(names) == simdjson::SUCCESS) {
                 for (simdjson::dom::element name : names) info.feature_names.emplace_back(name.get_string().value());
             }
+            simdjson::dom::element pandas_categorical;
+            if (doc["pandas_categorical"].get(pandas_categorical) == simdjson::SUCCESS) info.categories = lightgbm_categories(pandas_categorical);
 
             simdjson::dom::array trees;
             if (doc["tree_info"].get_array().get(trees) != simdjson::SUCCESS) {

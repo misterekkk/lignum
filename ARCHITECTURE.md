@@ -116,13 +116,14 @@ sums in double and divides by `float(sum)`; LightGBM's softmax is all double.
 Verified bit-exact by `tests/python/test_parity.py` on inputs with NaNs, zeros, values in the zero
 band and values placed exactly on every split threshold.
 
-## Binary format (version 0.8)
+## Binary format (version 0.9; 0.8 is read too)
 
 64-byte header (`magic "LIGNUM"`, version, transform, flags {float32, special trees}, sigmoid,
 n_features, n_outputs, n_cat_words, section sizes), then a 64-byte `InfoHeader` (the lignum version
 that wrote the file, taken by CMake from `python/lignum/__init__.py`; the source library; the size of
-the feature names, which follow as length-prefixed UTF-8 strings, and of the objective's name, which
-follows them), then 64-byte aligned sections: nodes, tree offsets,
+the feature names, which follow as length-prefixed UTF-8 strings, of the objective's name, which
+follows them, and (0.9) of the categories of training, which follow it; 0.8 had padding there, so
+it reads as no categories), then 64-byte aligned sections: nodes, tree offsets,
 leaves, tree kinds, base scores, tree outputs (multiclass only), categorical bitsets and, when the
 `Binned` flag is set, a `BinnedFileHeader` followed by the binned kernel's sections (nodes, roots,
 tree kinds, dense features, cuts, zero bins, categorical decision tables).
@@ -208,6 +209,20 @@ sends such models to their own kernel.
   Covered: CTR complexity 1-4, every CPU CTR type, NaN modes, more than 255 borders, unseen
   categories and CityHash for every length branch. CatBoost's own JSON loader is lossy, so the
   reference is the trained / `.cbm` model.
+
+## Categories of training (src/categories.*)
+
+LightGBM (`pandas_categorical`) and XGBoost 3 (`cats`) store the categories of every pandas
+`category` column of training, and their `predict(df)` maps a DataFrame's categories onto them.
+The parsers keep them as `TrainingCategories` (LightGBM: list k for the k-th category column of the
+input; XGBoost: a list per column; a category not in a list is missing for LightGBM, an error for
+XGBoost). At load, one hash table per list maps a category to its position (its code in training);
+per input column, a table from the column's own categories to those codes takes one lookup per
+category, and every row then one array read, inside the loop that converts the column anyway:
+O(M) once and O(m + n) per column and call. A table that maps every category to itself is
+skipped. Arrow dictionary columns are recoded in `predict_arrow`; pandas frames in the Python
+package (`Model._frame_with_training_codes`, with pandas' own equality of categories), where the
+table is cached for the categories object.
 
 ## Arrow input (src/arrow.cpp, src/columns.hpp)
 

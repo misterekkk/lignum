@@ -130,3 +130,30 @@ TEST(XGBoost, OneBaseScoreForEveryClass) {
     // Every class: 0.5 + its tree's leaf, in float32.
     EXPECT_EQ(out, (std::vector<double>{-0.5, -0.5, -0.5, 1.5, 1.5, 1.5}));
 }
+
+TEST(XGBoost, CategoriesOfTrainingAreRead) {
+    // XGBoost 3 stores the categories of every categorical column: strings as signed UTF-8 bytes
+    // split by offsets ("", "zł"), integers with their dtype; numeric columns have empty entries.
+    const std::string json = R"({"learner": {
+        "learner_model_param": {"base_score": "[0E0]", "num_class": "0", "num_target": "1"},
+        "objective": {"name": "reg:squarederror"},
+        "gradient_booster": {"name": "gbtree", "model": {"trees": [{
+            "left_children": [1, -1, -1], "right_children": [2, -1, -1], "split_indices": [2, 0, 0],
+            "split_conditions": [0.5, -1.0, 1.0], "default_left": [0, 0, 0]}],
+            "cats": {"enc": [{"offsets": [], "values": []}, {"offsets": [0, 0, 3], "values": [122, -59, -126]},
+                             {"type": 9, "values": [-3, 5]}]}}}}})";
+    const auto model = lignum::load(write_temp("xgb_cats.json", json), "xgboost");
+    ASSERT_TRUE(model.categories);
+    const auto& c = *model.categories;
+    EXPECT_FALSE(c.by_position);
+    EXPECT_FALSE(c.unseen_is_missing);
+    ASSERT_EQ(c.features, (std::vector<uint32_t>{1, 2}));
+    ASSERT_EQ(c.lists[0].size(), 2u);
+    EXPECT_EQ(c.lists[0][0].text, "");
+    EXPECT_EQ(c.lists[0][1].text, "z\xC5\x82");  // "zł"
+    EXPECT_EQ(c.lists[1][0].kind, lignum::CategoryValue::Kind::Integer);
+    EXPECT_EQ(c.lists[1][0].integer, -3);
+
+    const std::string bad = json.substr(0, json.find("[0, 0, 3]")) + "[0, 4, 3]" + json.substr(json.find("[0, 0, 3]") + 9);
+    EXPECT_THROW(lignum::load(write_temp("xgb_cats_bad.json", bad), "xgboost"), std::runtime_error);
+}

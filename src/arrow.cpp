@@ -1,5 +1,6 @@
 #include <lignum/lignum.hpp>
 #include "catboost.hpp"
+#include "categories.hpp"
 #include "columns.hpp"
 #include "validate.hpp"
 
@@ -9,6 +10,7 @@
 #include <cstring>
 #include <exception>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -37,6 +39,10 @@ namespace lignum {
             const uint8_t* validity = nullptr;  // null: no nulls
             const void* data = nullptr;
             int64_t offset = 0;
+            // Dictionary columns of a model with categories of training: dictionary index -> code
+            // of training (NaN: missing), see src/categories.hpp. Null: the index is the code.
+            const double* remap = nullptr;
+            int64_t remap_size = 0;
 
             bool valid(int64_t k) const { return !validity || ((validity[k >> 3] >> (k & 7)) & 1); }
 
@@ -74,9 +80,36 @@ namespace lignum {
             }
         }
 
+        // Dictionary indices through the column's recoding table; an index outside it is NaN.
+        template <typename T>
+        void fill_recoded(const Column& c, int64_t begin, int64_t count, double* dst, size_t stride) {
+            const T* data = static_cast<const T*>(c.data) + c.offset + begin;
+            const double nan = std::numeric_limits<double>::quiet_NaN();
+            for (int64_t i = 0; i < count; i++) {
+                // Signed indices keep their sign; an unsigned index above 2^63 turns negative: NaN.
+                const int64_t index = static_cast<int64_t>(data[i]);  // NOLINT(bugprone-signed-char-misuse)
+                double v = (index >= 0 && index < c.remap_size) ? c.remap[index] : nan;
+                if (c.validity && !c.valid(c.offset + begin + i)) v = nan;
+                dst[static_cast<size_t>(i) * stride] = v;
+            }
+        }
+
         // Rows [begin, begin + count) of column c into dst[i * stride]: one type dispatch per
         // column and block instead of per value.
         void fill(const Column& c, int64_t begin, int64_t count, double* dst, size_t stride) {
+            if (c.remap) {
+                switch (c.kind) {
+                    case Kind::Int8:   return fill_recoded<int8_t>(c, begin, count, dst, stride);
+                    case Kind::UInt8:  return fill_recoded<uint8_t>(c, begin, count, dst, stride);
+                    case Kind::Int16:  return fill_recoded<int16_t>(c, begin, count, dst, stride);
+                    case Kind::UInt16: return fill_recoded<uint16_t>(c, begin, count, dst, stride);
+                    case Kind::Int32:  return fill_recoded<int32_t>(c, begin, count, dst, stride);
+                    case Kind::UInt32: return fill_recoded<uint32_t>(c, begin, count, dst, stride);
+                    case Kind::Int64:  return fill_recoded<int64_t>(c, begin, count, dst, stride);
+                    case Kind::UInt64: return fill_recoded<uint64_t>(c, begin, count, dst, stride);
+                    default: break;  // dictionary indices are integers (checked in column())
+                }
+            }
             switch (c.kind) {
                 case Kind::Int8:    return fill_typed<int8_t>(c, begin, count, dst, stride);
                 case Kind::UInt8:   return fill_typed<uint8_t>(c, begin, count, dst, stride);
@@ -287,6 +320,133 @@ namespace lignum {
             return c;
         }
 
+        // ---- Recoding to the categories of training (src/categories.hpp) ---------------------------
+
+        // Element k of an integer, float or boolean dictionary as a category (exact for 64-bit
+        // integers); nullopt for a null.
+        std::optional<CategoryValue> dictionary_value(const Column& c, int64_t k) {
+            if (!c.valid(c.offset + k)) return std::nullopt;
+            CategoryValue v;
+            const int64_t i = c.offset + k;
+            switch (c.kind) {
+                case Kind::Int8:   v.kind = CategoryValue::Kind::Integer; v.integer = static_cast<const int8_t*>(c.data)[i]; break;  // NOLINT(bugprone-signed-char-misuse): signed values
+                case Kind::UInt8:  v.kind = CategoryValue::Kind::Integer; v.integer = static_cast<const uint8_t*>(c.data)[i]; break;
+                case Kind::Int16:  v.kind = CategoryValue::Kind::Integer; v.integer = static_cast<const int16_t*>(c.data)[i]; break;
+                case Kind::UInt16: v.kind = CategoryValue::Kind::Integer; v.integer = static_cast<const uint16_t*>(c.data)[i]; break;
+                case Kind::Int32:  v.kind = CategoryValue::Kind::Integer; v.integer = static_cast<const int32_t*>(c.data)[i]; break;
+                case Kind::UInt32: v.kind = CategoryValue::Kind::Integer; v.integer = static_cast<const uint32_t*>(c.data)[i]; break;
+                case Kind::Int64:  v.kind = CategoryValue::Kind::Integer; v.integer = static_cast<const int64_t*>(c.data)[i]; break;
+                case Kind::UInt64: {
+                    const uint64_t u = static_cast<const uint64_t*>(c.data)[i];
+                    if (u <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+                        v.kind = CategoryValue::Kind::Integer;
+                        v.integer = static_cast<int64_t>(u);
+                    } else {
+                        v.kind = CategoryValue::Kind::Number;
+                        v.number = static_cast<double>(u);
+                    }
+                    break;
+                }
+                case Kind::Bool: v.kind = CategoryValue::Kind::Boolean; v.integer = c.value(k) != 0.0; break;
+                default:         v.kind = CategoryValue::Kind::Number; v.number = c.value(k); break;  // float32, float64
+            }
+            return v;
+        }
+
+        std::string describe(const CategoryValue& v) {
+            switch (v.kind) {
+                case CategoryValue::Kind::Text:    return "'" + v.text + "'";
+                case CategoryValue::Kind::Integer: return std::to_string(v.integer);
+                case CategoryValue::Kind::Boolean: return v.integer ? "True" : "False";
+                default:                           return std::to_string(v.number);
+            }
+        }
+
+        // Dictionary index -> code of training (NaN: missing) for column j, from list `list`; empty
+        // when every index is its own code (the input has the categories of training, in order).
+        std::vector<double> recode_table(const TrainingCategories& tc, size_t list, const ArrowSchema& schema, const ArrowArray& array, size_t j) {
+            const std::string name = column_name(schema, j);
+            if (!schema.dictionary || !array.dictionary) throw std::invalid_argument("Missing Arrow dictionary in " + name + ".");
+            const ArrowSchema& dict_schema = *schema.dictionary;
+            const ArrowArray& dict = *array.dictionary;
+            const int64_t n = std::max<int64_t>(dict.length, 0);
+            Strings strings;
+            Column values;
+            const bool text = strings_of(dict_schema.format, dict, 0, strings);
+            if (!text) {
+                if (!kind_of(dict_schema.format, values.kind) || values.kind == Kind::Null || dict.n_buffers < 2) {
+                    throw std::invalid_argument("Unsupported dictionary values (Arrow type '" + std::string(dict_schema.format ? dict_schema.format : "") +
+                                                "') in " + name + "; expected strings, integers, numbers or booleans.");
+                }
+                values.offset = dict.offset;
+                values.validity = dict.null_count == 0 ? nullptr : static_cast<const uint8_t*>(dict.buffers[0]);
+                values.data = dict.buffers[1];
+            }
+            std::vector<double> table(static_cast<size_t>(n), std::numeric_limits<double>::quiet_NaN());
+            bool identity = n <= static_cast<int64_t>(tc.lists[list].size());
+            for (int64_t k = 0; k < n; k++) {
+                std::optional<CategoryValue> v;
+                if (text) {
+                    if (strings.valid(k)) {
+                        v.emplace();
+                        v->text = std::string(strings.at(k));
+                    }
+                } else {
+                    v = dictionary_value(values, k);
+                }
+                if (!v) {  // a null category: missing
+                    identity = false;
+                    continue;
+                }
+                const int32_t code = lookup(tc, list, *v);
+                if (code < 0 && !tc.unseen_is_missing) {
+                    throw std::invalid_argument("Category " + describe(*v) + " of " + name + " is not one of the categories the model was " +
+                                                "trained with (XGBoost rejects it too).");
+                }
+                if (code >= 0) table[static_cast<size_t>(k)] = code;
+                identity &= code == k;
+            }
+            if (identity) table.clear();
+            return table;
+        }
+
+        // Points the dictionary columns among the first n_features at their recoding tables (kept in
+        // `tables`), with the libraries' rules: LightGBM's k-th list is the k-th categorical column of
+        // the input; XGBoost's lists belong to columns. A mismatch is an error, as in the libraries.
+        void recode_dictionaries(const TrainingCategories& tc, const ArrowSchema& schema, const ArrowArray& batch, size_t nf,
+                                 std::vector<Column>& columns, std::vector<std::vector<double>>& tables) {
+            std::vector<size_t> categorical;
+            for (size_t j = 0; j < nf; j++) {
+                if (schema.children[j]->dictionary) categorical.push_back(j);
+            }
+            if (categorical.empty()) return;  // codes (numbers) as they are
+            tables.reserve(categorical.size());
+            auto apply = [&](size_t j, size_t list) {
+                std::vector<double> table = recode_table(tc, list, *schema.children[j], *batch.children[j], j);
+                if (table.empty()) return;
+                tables.push_back(std::move(table));
+                columns[j].remap = tables.back().data();
+                columns[j].remap_size = static_cast<int64_t>(tables.back().size());
+            };
+            if (tc.by_position) {
+                if (categorical.size() != tc.lists.size()) {
+                    throw std::invalid_argument("The input has " + std::to_string(categorical.size()) + " categorical (dictionary) columns, but the " +
+                                                "model was trained on " + std::to_string(tc.lists.size()) + " pandas category columns " +
+                                                "(LightGBM rejects this too: \"train and valid dataset categorical_feature do not match\").");
+                }
+                for (size_t k = 0; k < categorical.size(); k++) apply(categorical[k], k);
+                return;
+            }
+            for (size_t j : categorical) {
+                const auto it = std::find(tc.features.begin(), tc.features.end(), static_cast<uint32_t>(j));
+                if (it == tc.features.end()) {
+                    throw std::invalid_argument(column_name(*schema.children[j], j) + " is categorical (a dictionary), but feature " + std::to_string(j) +
+                                                " of the model is numeric (XGBoost rejects this too).");
+                }
+                apply(j, static_cast<size_t>(it - tc.features.begin()));
+            }
+        }
+
         int threads_for(int n_jobs) {
         #ifdef _OPENMP
             return n_jobs > 0 ? n_jobs : omp_get_max_threads();
@@ -360,6 +520,10 @@ namespace lignum {
             if (is_cat[j]) cats[j] = cat_column(*schema.children[j], *batch.children[j], batch.offset, j);
             else           columns[j] = column(*schema.children[j], *batch.children[j], batch.offset, j);
         }
+        // Categories of training: dictionary columns get the codes they had in training.
+        std::vector<std::vector<double>> recode_tables;  // owns the tables the columns point to
+        if (model.categories && !model.oblivious) recode_dictionaries(*model.categories, schema, batch, nf, columns, recode_tables);
+
         // A null row of the batch itself: all its features are missing.
         Column rows;
         rows.kind = Kind::Float64;

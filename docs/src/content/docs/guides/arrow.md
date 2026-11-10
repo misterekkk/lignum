@@ -31,7 +31,7 @@ columns in the model's order.
 | float64, float32 | the value (float32 widened exactly) |
 | int8 ... int64, uint8 ... uint64 | the value as a double, as numpy's `astype(float64)` gives it |
 | boolean | 0 or 1 |
-| dictionary (categorical) | the index, i.e. the category code |
+| dictionary (categorical) | the category code: for a model trained on pandas `category` columns the code the category had in training (see [pandas category columns](../models/#pandas-category-columns)), otherwise the index |
 | null | NaN |
 | a null entry in any column | NaN |
 

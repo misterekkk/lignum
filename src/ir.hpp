@@ -1,5 +1,7 @@
 #pragma once
 
+#include <lignum/model.hpp>
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -45,6 +47,7 @@ namespace lignum {
         Precision precision = Precision::Float64;
         std::vector<std::string> feature_names;  // as stored in the file; may be empty or defaults
         std::string objective;                   // the library's name for it ("binary", "reg:squarederror")
+        std::shared_ptr<TrainingCategories> categories;  // pandas categories of training; null when none
     };
 
 } // namespace lignum

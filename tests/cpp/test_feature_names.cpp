@@ -109,12 +109,12 @@ TEST(FeatureNames, BinaryFormatKeepsNamesSourceAndWriter) {
         const std::vector<double> X = {0.0, 0.4, 0.0, 0.0, 0.6, 0.0};
         EXPECT_EQ(predict_raw(loaded, X, 3), predict_raw(model, X, 3));
 
-        // Format 0.8, and the version of lignum that wrote it after the 64-byte header.
+        // Format 0.9, and the version of lignum that wrote it after the 64-byte header.
         std::ifstream in(path, std::ios::binary);
         const std::vector<char> bytes{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
         ASSERT_GT(bytes.size(), 128u);
         EXPECT_EQ(bytes[6], 0);
-        EXPECT_EQ(bytes[7], 8);
+        EXPECT_EQ(bytes[7], 9);
         const std::string writer(bytes.data() + 64);
         EXPECT_FALSE(writer.empty());
         EXPECT_NE(writer, "unknown");

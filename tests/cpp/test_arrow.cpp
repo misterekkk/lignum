@@ -192,3 +192,69 @@ TEST(Arrow, StreamAndCApi) {
     EXPECT_NE(std::string(LignumGetLastError()).find("Unsupported Arrow type"), std::string::npos);
     EXPECT_EQ(LignumModelFree(handle), 0);
 }
+
+namespace {
+
+    // Split on column 1 (categorical, LightGBM): category 1 ("b" in training) left -> 1.0, others
+    // right -> 2.0; the model was trained on pandas categories ["a", "b", "c"].
+    const char* kCategoryModel =
+        "tree\nversion=v4\nnum_class=1\nnum_tree_per_iteration=1\nobjective=regression\nfeature_names=x s\n\n"
+        "Tree=0\nnum_leaves=2\nnum_cat=1\nsplit_feature=1\nthreshold=0\ndecision_type=1\nleft_child=-1\nright_child=-2\n"
+        "leaf_value=1 2\ncat_boundaries=0 1\ncat_threshold=2\nis_linear=0\n\nend of trees\n\n"
+        "pandas_categorical:[[\"a\", \"b\", \"c\"]]\n";
+
+    // A utf8 dictionary array over `text`, split at `offsets`.
+    struct Dictionary {
+        ArrowSchema schema{};
+        ArrowArray array{};
+        const void* buffers[3] = {nullptr, nullptr, nullptr};
+        Dictionary(const int32_t* offsets, const char* text, int64_t length) {
+            schema.format = "u";
+            buffers[1] = offsets;
+            buffers[2] = text;
+            array.length = length;
+            array.n_buffers = 3;
+            array.buffers = buffers;
+            array.release = no_release;
+        }
+    };
+
+} // namespace
+
+TEST(Arrow, DictionaryColumnsGetTheCodesOfTraining) {
+    // LightGBM maps a DataFrame's categories onto the categories of training: an Arrow dictionary
+    // ["b", "c", "a"] with indices 0, 1, 2 holds b, c, a, which are codes 1, 2, 0 in training.
+    const auto model = lignum::load(write_temp("arrow_categories.txt", kCategoryModel), "lightgbm");
+    ASSERT_TRUE(model.categories);
+    ASSERT_EQ(model.categories->lists.size(), 1u);
+    const double x[] = {0.0, 0.0, 0.0, 0.0};
+    const int8_t indices[] = {0, 1, 2, 3};  // 3: outside the dictionary, missing
+    const int32_t offsets[] = {0, 1, 2, 3};
+    Dictionary dict(offsets, "bca", 3);
+    Col c0("g", x, 4), c1("c", indices, 4);
+    c1.schema.dictionary = &dict.schema;
+    c1.array.dictionary = &dict.array;
+    Batch batch({&c0, &c1}, 4);
+    // b -> left; c, a -> right; missing (NaN) goes right for LightGBM categorical splits.
+    EXPECT_EQ(predict(model, batch), (std::vector<double>{1.0, 2.0, 2.0, 2.0}));
+
+    // An unseen category is missing (LightGBM); a dictionary with the categories of training in
+    // order keeps its indices.
+    const int32_t offsets2[] = {0, 1, 2, 3};
+    Dictionary unseen(offsets2, "zba", 3), same(offsets2, "abc", 3);
+    for (auto* d : {&unseen, &same}) {  // "zba": z missing, b, a; "abc": a, b, c
+        c1.schema.dictionary = &d->schema;
+        c1.array.dictionary = &d->array;
+        Batch b({&c0, &c1}, 3);
+        EXPECT_EQ(predict(model, b), (std::vector<double>{2.0, 1.0, 2.0}));
+    }
+
+    // Two dictionary columns among the model's features: it was trained on one category column
+    // (LightGBM rejects this too).
+    Col c2("c", indices, 4);
+    c2.schema.dictionary = &dict.schema;
+    c2.array.dictionary = &dict.array;
+    Batch two({&c2, &c1}, 3);
+    std::vector<double> out(3);
+    EXPECT_THROW(lignum::predict_arrow(model, two.schema, two.array, out.data()), std::invalid_argument);
+}

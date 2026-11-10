@@ -6,6 +6,24 @@ All notable changes to lignum (`pip install pylignum`). The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **pandas `category` columns get the codes of training.** LightGBM (`pandas_categorical`) and
+  XGBoost 3 (`cats`) store the categories of training, and their `predict(df)` maps a DataFrame's
+  categories onto them. lignum used the codes as they came, so a frame whose categories were in
+  another order or a subset (e.g. made from the current batch with `astype("category")`) predicted
+  differently without an error (80% of the rows in a test), string categories failed to convert,
+  and integer categories gave their values instead of codes. lignum now reads the categories and
+  maps pandas `category` columns and Arrow dictionary columns (pyarrow, polars) the way the library
+  does, bit for bit: a category not in training is missing (LightGBM) or a `ValueError` (XGBoost),
+  and other `category` columns than in training are a `ValueError`, as in the libraries. One lookup
+  per category and an array read per row; the table is cached per categories object.
+
+### Changed
+
+- **`.bin` format 0.9.** It adds the categories of training; files of format 0.8 (lignum 0.4.0,
+  0.4.1) still load. Files written by 0.4.2 cannot be read by lignum 0.4.1 or older.
+
 ### Added
 
 - **More objectives, bit-exact:** LightGBM models trained with `reg_sqrt=True` (`regression`,

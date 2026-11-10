@@ -1089,6 +1089,9 @@ namespace lignum {
                 simdjson::dom::element params;
                 simdjson::dom::element type;
                 const std::string_view text = kv.string(1);
+                // An empty value has no data pointer: simdjson would memcpy from nullptr (undefined,
+                // and an error under UBSan with glibc, which declares memcpy's pointers nonnull).
+                if (text.empty()) continue;
                 if (parser.parse(text.data(), text.size()).get(params) == simdjson::SUCCESS &&
                     params.at_pointer("/loss_function/type").get(type) == simdjson::SUCCESS && type.is_string()) {
                     spec.loss = std::string(type.get_string().value());

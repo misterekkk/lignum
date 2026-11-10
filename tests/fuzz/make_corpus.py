@@ -50,6 +50,9 @@ def main(out: Path) -> None:
     lightgbm("no_missing", {"objective": "regression", "use_missing": False, "reg_sqrt": True}, X, y)
     lightgbm("categorical", {"objective": "binary"}, Xc, yb, categorical=[3])
     lightgbm("multiclass", {"objective": "multiclass", "num_class": 3}, Xc, y3, rounds=2, categorical=[3])
+    pandas_frame = pd.DataFrame({"a": X[:, 0], "s": pd.Categorical([f"v{int(c) % 5}" for c in cat]),
+                                 "k": pd.Categorical((cat % 4).astype(int) * 10)})
+    lightgbm("pandas_categories", {"objective": "binary"}, pandas_frame, yb)  # pandas_categorical
 
     def xgboost(name, params, dmatrix, rounds=3):
         b = xgb.train({"max_depth": 2, **params}, dmatrix, rounds)
@@ -62,6 +65,8 @@ def main(out: Path) -> None:
     xgboost("multiclass", {"objective": "multi:softprob", "num_class": 3}, xgb.DMatrix(X, y3), rounds=2)
     frame = pd.DataFrame({"a": X[:, 0], "c": pd.Categorical(cat.astype(int))})
     xgboost("categorical", {"objective": "binary:logistic", "tree_method": "hist"}, xgb.DMatrix(frame, yb, enable_categorical=True))
+    xgboost("pandas_categories", {"objective": "binary:logistic", "tree_method": "hist"},
+            xgb.DMatrix(pandas_frame, yb, enable_categorical=True))  # cats: strings and integers
 
     kw = {"iterations": 3, "depth": 2, "verbose": False, "allow_writing_files": False, "random_seed": 0}
     df = pd.DataFrame({"a": np.nan_to_num(X[:, 0]), "b": X[:, 1], "c": [f"v{int(c) % 7}" for c in cat],

@@ -74,6 +74,16 @@ def _arrow_table(frame):
         return None
 
 
+def _has_category_columns(frame) -> bool:
+    """Whether a DataFrame has a pandas `category` column: through pandas' blocks (~0.2 µs), as
+    `frame.dtypes` costs ~10 µs per call, which a one-row prediction would feel."""
+    categorical = sys.modules["pandas"].CategoricalDtype  # a frame is here, so pandas is imported
+    try:
+        return any(isinstance(block.dtype, categorical) for block in frame._mgr.blocks)
+    except AttributeError:  # pandas internals changed: the public way
+        return any(isinstance(dtype, categorical) for dtype in frame.dtypes)
+
+
 def _category_hashes(column) -> np.ndarray:
     """Hashes of one categorical column (a 1-D array) as float64."""
     return _core._catboost_hashes(np.asarray(column, dtype=object))
@@ -94,6 +104,13 @@ class Model:
         self._feature_names = list(_c_model.feature_names)
         self._names_index: Any = None     # pandas Index of the feature names, made on first use
         self._checked_columns: Any = None  # the last columns object that passed the check
+        # LightGBM's / XGBoost's categories of training (see _frame_with_training_codes), or None.
+        self._training_categories: dict | None = _c_model.training_categories
+        self._training_index: dict[int, Any] = {}  # list -> pandas Index of its categories, made on first use
+        self._recode_cache: dict[tuple[int, int], tuple[Any, np.ndarray | None]] = {}
+        # Only models that split on categories read pandas category columns as codes: the others
+        # skip the check (~1-3 µs a call) and convert frames with numpy as before.
+        self._codes_from_frames = not _c_model.is_catboost and (self._training_categories is not None or _c_model.has_categorical_splits)
         self.validate_features = validate_features
 
     @property
@@ -151,6 +168,79 @@ class Model:
         cache[id(categories)] = (categories, hashes)
         return hashes
 
+    def _recode_table(self, categories, k: int, name) -> np.ndarray | None:
+        """Codes of training of a column's categories (an Index), as float64 with NaN for missing and
+        one trailing NaN (code -1, a missing value, indexes it); None when every category keeps its
+        code. Cached while the categories object lives (frames sliced from one frame share it)."""
+        cache = self._recode_cache
+        key = (id(categories), k)
+        entry = cache.get(key)
+        if entry is not None and entry[0] is categories:
+            return entry[1]
+        tc = self._training_categories
+        assert tc is not None  # only called for models with categories of training
+        index = self._training_index.get(k)
+        if index is None:
+            import pandas as pd
+
+            index = self._training_index[k] = pd.Index(tc["lists"][k])
+        positions = index.get_indexer_for(categories)  # what Categorical.set_categories(index) does
+        unseen = positions < 0
+        if unseen.any() and not tc["unseen_is_missing"]:
+            raise ValueError(f"Category {categories[int(np.argmax(unseen))]!r} of column {name!r} is not one of the categories the "
+                             "model was trained with (XGBoost rejects it too).")
+        if len(positions) <= len(index) and np.array_equal(positions, np.arange(len(positions))):
+            table = None
+        else:
+            table = np.append(np.where(unseen, np.nan, positions.astype(np.float64)), np.nan)
+        if len(cache) >= 256:
+            cache.clear()
+        cache[key] = (categories, table)
+        return table
+
+    def _frame_with_training_codes(self, X) -> np.ndarray:
+        """float64 matrix of a DataFrame with pandas `category` columns, as LightGBM's and XGBoost's
+        predict see it: each category column gives the code its category had in training (the
+        model's lists of categories: LightGBM's k-th list for the k-th category column, XGBoost's
+        per column), missing (LightGBM) or an error (XGBoost) for a category not in it, NaN for a
+        missing value; without lists of training, the column's own codes."""
+        from pandas import CategoricalDtype
+
+        tc = self._training_categories
+        n = min(X.shape[1], self.n_features)
+        dtypes = X.dtypes
+        categorical = [j for j in range(n) if isinstance(dtypes.iloc[j], CategoricalDtype)]
+        lists: dict[int, int] = {}
+        if tc is not None and categorical:
+            if tc["by_position"]:
+                if len(categorical) != len(tc["lists"]):
+                    raise ValueError(f"The input has {len(categorical)} category columns, but the model was trained on "
+                                     f"{len(tc['lists'])} pandas category columns (LightGBM rejects this too: \"train and "
+                                     "valid dataset categorical_feature do not match\").")
+                lists = dict(zip(categorical, range(len(categorical))))
+            else:
+                where = {feature: k for k, feature in enumerate(tc["features"])}
+                for j in categorical:
+                    if j not in where:
+                        raise ValueError(f"Column {X.columns[j]!r} is categorical, but feature {j} of the model is numeric "
+                                         "(XGBoost rejects this too).")
+                    lists[j] = where[j]
+        out = np.empty(X.shape, dtype=np.float64)
+        iter_arrays = getattr(X, "_iter_column_arrays", None)  # pandas internals: ~1 µs per column
+        arrays = iter_arrays() if iter_arrays is not None else (X.iloc[:, j].array for j in range(X.shape[1]))
+        for j, a in enumerate(arrays):
+            if not isinstance(a.dtype, CategoricalDtype):
+                out[:, j] = a if isinstance(a, np.ndarray) else a.to_numpy(dtype=np.float64, na_value=np.nan)
+                continue
+            codes = np.asarray(a.codes)
+            table = self._recode_table(a.categories, lists[j], X.columns[j]) if j in lists else None
+            if table is None:
+                out[:, j] = codes
+                out[codes < 0, j] = np.nan  # -1: a missing value
+            else:
+                out[:, j] = table[codes]  # -1 takes the trailing NaN
+        return out
+
     def _catboost_matrix(self, X) -> np.ndarray:
         """float64 matrix with category hashes in the categorical columns (CatBoost models)."""
         categorical = self._c_model.categorical_features
@@ -190,7 +280,9 @@ class Model:
             float64, float32, integer, boolean and null columns are read without copying the
             table, nulls are NaN and dictionary (categorical) columns give their category codes.
             Predictions equal those for the same float64 matrix. pandas DataFrames are converted
-            with numpy; pass `pyarrow.Table.from_pandas(df)` for categorical columns. A 1-D
+            with numpy. pandas `category` columns and Arrow dictionary columns give the codes
+            their categories had in training, as the library's `predict(df)` does (LightGBM: a
+            category not seen in training is missing; XGBoost: `ValueError`). A 1-D
             array or a flat list is one row. CatBoost models predict pandas frames of 50,000 rows
             or more through pyarrow when it is installed (faster, same results). CatBoost models with categorical features take their categories as strings or
             integers: a pandas DataFrame, a numpy object array, or a list (one row) or list of
@@ -250,6 +342,8 @@ class Model:
                     except ValueError:
                         pass  # e.g. a column Arrow typed differently: the pandas path decides
             return self._c_model.predict(self._catboost_matrix(X), raw_score, n_jobs, strategy)
+        if self._codes_from_frames and _is_pandas(X) and X.ndim == 2 and _has_category_columns(X):
+            return self._c_model.predict(self._frame_with_training_codes(X), raw_score, n_jobs, strategy)
         X_arr = np.ascontiguousarray(X, dtype=np.float64)
         if X_arr.ndim == 1:  # one row
             X_arr = X_arr.reshape(1, -1)
