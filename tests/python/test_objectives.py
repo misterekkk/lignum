@@ -143,9 +143,15 @@ def xgb_matrix(data, objective, target):
     return d
 
 
+XGB_VERSION = tuple(int(part) for part in xgb.__version__.split(".")[:2])
+XGB_NEWER = {"reg:expectileerror": (3, 3)}  # objectives added after XGBoost 3.0 (Python 3.10 and 3.11 get 3.2)
+
+
 @pytest.mark.parametrize("fmt", ["json", "ubj"])
 @pytest.mark.parametrize("objective, target, extra, expected", XGB_CASES, ids=[f"{c[0]}-{c[2]}" for c in XGB_CASES])
 def test_xgboost_objective(tmp_path, data, objective, target, extra, expected, fmt):
+    if XGB_VERSION < XGB_NEWER.get(objective, (0, 0)):
+        pytest.skip(f"{objective} is new in XGBoost {'.'.join(map(str, XGB_NEWER[objective]))}")
     booster = xgb.train({"objective": objective, "max_depth": 3, **extra}, xgb_matrix(data, objective, target), num_boost_round=15)
     path = tmp_path / f"model.{fmt}"
     booster.save_model(str(path))
