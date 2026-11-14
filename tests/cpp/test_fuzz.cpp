@@ -175,6 +175,20 @@ TEST(Fuzz, XGBoostNodesWithTwoParentsAreRejected) {
     EXPECT_THROW(lignum::load(write_temp("xgb_dag.json", xgboost_tree(left, right, conditions)), "xgboost"), std::runtime_error);
 }
 
+TEST(Fuzz, XGBoostClassCountsAreBounded) {
+    // num_class sized a vector of base scores before anything else was read: 666666666 classes
+    // allocated 2.7 GB (found by tests/fuzz). The class of a tree is 16 bits wide, as in LightGBM.
+    std::string json = xgboost_tree({-1}, {-1}, {1.0});
+    const std::string from = R"("num_class": "0")";
+    json.replace(json.find(from), from.size(), R"("num_class": "666666666")");
+    try {
+        lignum::load(write_temp("xgb_classes.json", json), "xgboost");
+        FAIL() << "loaded";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("number of classes"), std::string::npos) << e.what();
+    }
+}
+
 namespace {
 
     // LightGBM model.txt: a categorical split (categories 1 and 5) above a numeric one.
