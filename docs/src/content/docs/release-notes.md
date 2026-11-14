@@ -8,7 +8,7 @@ description: What changed in each lignum version.
 Versions follow [Semantic Versioning](https://semver.org/); before 1.0, minor versions may
 change the API. Install a specific version with `pip install pylignum==<version>`.
 
-## [Unreleased]
+## [0.4.3] — 2026-11-14
 
 ### Security
 
@@ -244,7 +244,8 @@ First release on PyPI (`pip install pylignum`, `import lignum`).
 
 Initial release of the package (GitHub only).
 
-[Unreleased]: https://github.com/misterekkk/lignum/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/misterekkk/lignum/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/misterekkk/lignum/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/misterekkk/lignum/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/misterekkk/lignum/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/misterekkk/lignum/compare/v0.3.1...v0.4.0
