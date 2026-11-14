@@ -8,6 +8,16 @@ description: What changed in each lignum version.
 Versions follow [Semantic Versioning](https://semver.org/); before 1.0, minor versions may
 change the API. Install a specific version with `pip install pylignum==<version>`.
 
+## [Unreleased]
+
+### Security
+
+- **Two more crafted files found by the nightly fuzzers.** An XGBoost model with a huge `num_class`
+  allocated gigabytes before anything else was checked (666,666,666 classes: 2.7 GB); classes are now
+  limited to 65,535, as for LightGBM. A CatBoost `.bin` file whose trees' leaves did not follow each
+  other passed the checks but made prediction read past the leaves; the leaves must now be laid out as
+  lignum writes them.
+
 ## [0.4.2] — 2026-11-10
 
 ### Security

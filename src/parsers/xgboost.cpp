@@ -198,6 +198,9 @@ namespace lignum {
                 throw std::runtime_error("Multi-target models are not supported yet.");
             }
             const int n_outputs = std::max(1, read_int_param(params, "num_class", 0));
+            // As the LightGBM parsers: the class of a tree is 16 bits wide (.bin), and a count from
+            // the file sizes base_scores below (num_class 666666666 allocated 2.7 GB; found by tests/fuzz).
+            if (n_outputs > 65535) throw std::runtime_error("Unsupported number of classes: " + std::to_string(n_outputs) + ".");
 
             std::vector<float> base_scores = read_base_scores(params);
             // One base_score for every class (XGBoost before 2.0 writes "[5E-1]" for multiclass models).

@@ -269,3 +269,28 @@ TEST(CatBoost, SixteenBitSourceIndicesAreNotTruncated) {
         EXPECT_THROW(lignum::load(write_temp("catboost_wider.json", wide_catboost_json(wider))), std::runtime_error) << wider;
     }
 }
+
+TEST(CatBoost, BinaryFilesWithGapsBetweenTreeLeavesAreRejected) {
+    // Two trees of depth 1: leaves [10, 20] and [30, 40], leaf_begin {0, 2}. The kernel for trees of
+    // one depth steps by the tree size from the first tree's leaves, so leaf_begin {2, 2} (each
+    // tree's leaves inside the array) read past the last leaf (found by tests/fuzz).
+    const std::string json =
+        R"({"features_info": {"float_features": [{"feature_index": 0, "flat_feature_index": 0, "borders": [0.5], "nan_value_treatment": "AsIs"}]},
+            "oblivious_trees": [{"splits": [{"split_index": 0}], "leaf_values": [10.0, 20.0]},
+                                {"splits": [{"split_index": 0}], "leaf_values": [30.0, 40.0]}],
+            "scale_and_bias": [1.0, [0.0]]})";
+    const auto model = lignum::load(write_temp("catboost_two_trees.json", json));
+    const auto saved = (std::filesystem::temp_directory_path() / "lignum_catboost_two_trees.bin").string();
+    model.save(saved);
+    EXPECT_EQ(lignum::test::predict_raw(lignum::load(saved), {1.0}, 1), std::vector<double>{60.0});
+
+    std::ifstream in(saved, std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const uint64_t begins[2] = {0, 2};
+    const std::string pattern(reinterpret_cast<const char*>(begins), sizeof(begins));
+    const size_t at = bytes.rfind(pattern);
+    ASSERT_NE(at, std::string::npos);
+    bytes[at] = 2;  // leaf_begin {2, 2}
+    const auto damaged = write_temp("catboost_leaf_gap.bin", bytes);
+    EXPECT_THROW(lignum::load(damaged), std::runtime_error);
+}

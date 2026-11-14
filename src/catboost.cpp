@@ -1731,11 +1731,17 @@ namespace lignum {
             const size_t N = f.leaf_begin.size();
             if (f.split_begin.size() != N + 1 || f.split_begin[0] != 0 || f.split_begin[N] != f.split_source.size() ||
                 f.split_threshold.size() != f.split_source.size() || f.split_equal.size() != f.split_source.size()) bad();
+            // The leaves of the trees follow each other, as the parser writes them: the kernel for
+            // trees of one depth steps from tree to tree by their size instead of reading leaf_begin
+            // (a gap or an overlap read past the leaves; found by tests/fuzz).
+            size_t leaf = 0;
             for (size_t t = 0; t < N; t++) {
                 if (f.split_begin[t] > f.split_begin[t + 1]) bad();
                 const size_t depth = f.split_begin[t + 1] - f.split_begin[t];
-                if (depth > 16 || f.leaf_begin[t] > f.leaves.size() || ((size_t{1} << depth) * f.dim) > f.leaves.size() - f.leaf_begin[t]) bad();
+                if (depth > 16 || f.leaf_begin[t] != leaf || ((size_t{1} << depth) * f.dim) > f.leaves.size() - leaf) bad();
+                leaf += (size_t{1} << depth) * f.dim;
             }
+            if (leaf != f.leaves.size()) bad();
             for (uint16_t s : f.split_source) if (s >= f.n_sources()) bad();
             for (uint8_t e : f.split_equal) if (e > 1) bad();
         }
