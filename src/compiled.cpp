@@ -117,11 +117,12 @@ namespace lignum {
             return compare;
         }
 
-        constexpr size_t kBinGroupFeatures = 32;
+        constexpr size_t kBinGroupThreshold = 128;
+        constexpr size_t kBinGroupFeatures = 64;
 
         // Emits the numeric feature binning helpers for groups [g_begin, g_end) of `numeric`.
         // Splitting across translation units parallelises compilation on wide models (hundreds of
-        // features), while keeping each 32-feature group small enough for L1 cache.
+        // features), while keeping each 64-feature group small enough for L1 cache.
         void binning_groups(std::ostream& out, const BinnedForest& f, const std::vector<size_t>& numeric,
                             size_t g_begin, size_t g_end) {
             constexpr uint32_t kLinear = 8;
@@ -160,11 +161,11 @@ namespace lignum {
             }
         }
 
-        // Emits lignum_bin: inline loop for <= 32 numeric features, otherwise calls the per-group
+        // Emits lignum_bin: inline loop for <= 128 numeric features, otherwise calls the per-group
         // helpers (distributed across translation units) over 64-row L2-resident strips.
         void binning_entry(std::ostream& out, const BinnedForest& f, const std::vector<size_t>& numeric, size_t n_groups) {
             constexpr uint32_t kLinear = 8;
-            if (numeric.size() <= kBinGroupFeatures) {
+            if (numeric.size() <= kBinGroupThreshold) {
                 for (size_t j : numeric) {
                     const uint32_t len = n_cuts(f, j);
                     if (len <= kLinear) continue;
@@ -767,6 +768,8 @@ namespace lignum {
             return text;
         }
 
+        std::atomic<bool> g_any_compiled{false};
+
         void* open_handle(const std::string& library) {
         #if defined(_WIN32)
             // LoadLibrary appends ".dll" to a name without an extension; a trailing dot prevents it.
@@ -819,6 +822,7 @@ namespace lignum {
             }
             compiled->bin = reinterpret_cast<CompiledForest::BinFn>(
                 const_cast<void*>(static_cast<const void*>(symbol<char>(compiled->handle, "lignum_bin", library))));
+            g_any_compiled.store(true, std::memory_order_release);
             return compiled;
         }
 
@@ -946,7 +950,7 @@ namespace lignum {
         for (size_t j = 0; j < f.n_features; j++) {
             if (f.feature_kind[j] == feature_kind::Numeric) numeric.push_back(j);
         }
-        const size_t n_bin_groups = numeric.size() > kBinGroupFeatures ? (numeric.size() + kBinGroupFeatures - 1) / kBinGroupFeatures : 0;
+        const size_t n_bin_groups = numeric.size() > kBinGroupThreshold ? (numeric.size() + kBinGroupFeatures - 1) / kBinGroupFeatures : 0;
         const size_t parts = std::clamp<size_t>(max_jobs, 1, std::max(n_blocks, n_bin_groups));
         const size_t K = model.n_outputs;
         std::vector<std::string> sources;
@@ -1134,6 +1138,7 @@ namespace lignum {
     } // namespace
 
     std::shared_ptr<const CompiledForest> get_compiled(const Model& model) {
+        if (!g_any_compiled.load(std::memory_order_acquire)) return nullptr;
         std::lock_guard<std::mutex> lock(compiled_lock_for(model));
         return model.compiled;
     }
@@ -1141,6 +1146,7 @@ namespace lignum {
     void set_compiled(Model& model, std::shared_ptr<const CompiledForest> compiled) {
         std::lock_guard<std::mutex> lock(compiled_lock_for(model));
         model.compiled = std::move(compiled);
+        if (model.compiled) g_any_compiled.store(true, std::memory_order_release);
     }
 
 } // namespace lignum

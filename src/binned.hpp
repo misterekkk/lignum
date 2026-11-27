@@ -99,8 +99,17 @@ namespace lignum {
         const uint64_t* cat_tables = nullptr;
         size_t n_table_words = 0;
         uint32_t decision_words = 0;             // 64-bit words of decision bits per row
+        bool fits_u8_codes = false;              // runtime cache: numeric-only with <= 254 cuts per feature
         std::shared_ptr<const void> owner;
     };
+
+    inline bool compute_fits_u8_codes(const BinnedForest& f) {
+        if (f.n_cat_features > 0) return false;
+        for (size_t j = 0; j < f.n_features; j++) {
+            if (f.cut_offsets[j + 1] - f.cut_offsets[j] > 254) return false;
+        }
+        return true;
+    }
 
     // Builds the binned form of a model, or returns nullptr when it does not fit the 16-bit codes
     // (category ids >= kInvalidCat, too many thresholds per feature, more than 65535 categorical

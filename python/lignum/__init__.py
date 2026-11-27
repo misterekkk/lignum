@@ -43,7 +43,8 @@ def clear_cache() -> int:
 
 
 def _is_pandas(X) -> bool:
-    return type(X).__module__.split(".")[0] == "pandas"
+    mod = type(X).__module__
+    return mod == "pandas" or mod.startswith("pandas.")
 
 
 def catboost_hash(category) -> int:
@@ -361,21 +362,32 @@ class Model:
         # array([0.45, 0.89])
         ```
         """
+        if isinstance(X, np.ndarray) and not self._categorical:
+            if X.dtype == np.float64 and X.flags.c_contiguous:
+                if X.ndim == 2:
+                    return self._c_model.predict(X, raw_score, n_jobs, strategy)
+                if X.ndim == 1:
+                    return self._c_model.predict(X.reshape(1, -1), raw_score, n_jobs, strategy)
+            X_arr = np.ascontiguousarray(X, dtype=np.float64)
+            if X_arr.ndim == 1:
+                X_arr = X_arr.reshape(1, -1)
+            return self._c_model.predict(X_arr, raw_score, n_jobs, strategy)
         validate = (self.validate_features if validate_features is None else validate_features) and bool(self._feature_names)
-        if not isinstance(X, np.ndarray) and not _is_pandas(X):
+        is_pandas = _is_pandas(X)
+        if not isinstance(X, np.ndarray) and not is_pandas:
             # Arrow PyCapsule interface: pyarrow, polars, duckdb, nanoarrow... (no pyarrow needed here).
             if hasattr(X, "__arrow_c_array__"):
                 schema, array = X.__arrow_c_array__()
                 return self._c_model.predict_arrow(schema, array, raw_score, n_jobs, strategy, validate)
             if hasattr(X, "__arrow_c_stream__"):
                 return self._c_model.predict_arrow_stream(X.__arrow_c_stream__(), raw_score, n_jobs, strategy, validate)
-        if validate and _is_pandas(X):
+        if validate and is_pandas:
             if X.ndim == 2:
                 self._check_columns(X.columns)
             elif X.ndim == 1 and hasattr(X, "index"):
                 self._check_columns(X.index)
         if self._categorical:
-            if _is_pandas(X) and X.ndim == 2 and len(X) >= _ARROW_MIN_ROWS:
+            if is_pandas and X.ndim == 2 and len(X) >= _ARROW_MIN_ROWS:
                 table = _arrow_table(X)
                 if table is not None:
                     try:
@@ -383,9 +395,9 @@ class Model:
                     except ValueError:
                         pass  # e.g. a column Arrow typed differently: the pandas path decides
             return self._c_model.predict(self._catboost_matrix(X), raw_score, n_jobs, strategy)
-        if self._codes_from_frames and _is_pandas(X) and X.ndim == 2 and _has_category_columns(X):
+        if self._codes_from_frames and is_pandas and X.ndim == 2 and _has_category_columns(X):
             return self._c_model.predict(self._frame_with_training_codes(X), raw_score, n_jobs, strategy)
-        if _is_pandas(X) and X.ndim == 2:
+        if is_pandas and X.ndim == 2:
             mgr = getattr(X, "_mgr", None)
             blocks = getattr(mgr, "blocks", None) if mgr is not None else None
             if blocks is not None:
@@ -393,7 +405,7 @@ class Model:
                 fast = _core._numeric_blocks(blocks, n_rows, n_cols, self.n_features)
                 if fast is not None:
                     return self._c_model.predict(fast, raw_score, n_jobs, strategy)
-        if _is_pandas(X) and X.ndim == 2 and X.shape[1] > self.n_features:
+        if is_pandas and X.ndim == 2 and X.shape[1] > self.n_features:
             X = X.iloc[:, :self.n_features]
         X_arr = np.ascontiguousarray(X, dtype=np.float64)
         if X_arr.ndim == 1:  # one row

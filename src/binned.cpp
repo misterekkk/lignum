@@ -392,6 +392,7 @@ namespace lignum {
         view->decision_words = forest->decision_words;
         forest->cat_slots.clear();
         forest->cat_slots.shrink_to_fit();
+        view->fits_u8_codes = compute_fits_u8_codes(*view);
         view->owner = forest;
         return view;
     }

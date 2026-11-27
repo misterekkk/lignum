@@ -567,6 +567,7 @@ namespace lignum {
         }
         offset += align(model.n_cat_words * sizeof(uint32_t));
 
+        std::shared_ptr<BinnedForest> binned_mut;
         if (binned && (header.flags & header_flags::Binned)) {
             if (binary_data->size < offset + sizeof(BinnedFileHeader)) {
                 throw std::runtime_error("Binary file is truncated or corrupted.");
@@ -611,10 +612,12 @@ namespace lignum {
             f->cat_features = reinterpret_cast<const BinnedCatFeature*>(at(f->n_cat_features * sizeof(BinnedCatFeature)));
             f->cat_tables = reinterpret_cast<const uint64_t*>(at(f->n_table_words * sizeof(uint64_t)));
             f->owner = binary_data;
+            binned_mut = f;
             model.binned = f;
         }
 
         validate_model(model);
+        if (binned_mut) binned_mut->fits_u8_codes = compute_fits_u8_codes(*binned_mut);
         return model;
     }
 
