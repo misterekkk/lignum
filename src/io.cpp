@@ -50,7 +50,7 @@ namespace lignum {
         struct alignas(64) FileHeader {
             char magic[6] = {'L', 'I', 'G', 'N', 'U', 'M'}; 
             uint8_t version_major = 0;
-            uint8_t version_minor = 9;  // 0.9: categories of training; 0.8 files are read too
+            uint8_t version_minor = 10;  // 0.10: ExtensionHeader (miter); 0.8 and 0.9 are read too
 
             uint8_t os_id = LIGNUM_OS_ID;
             uint8_t arch_id = LIGNUM_ARCH_ID;
@@ -86,6 +86,23 @@ namespace lignum {
         };
         static_assert(sizeof(InfoHeader) == 64, "InfoHeader must stay 64 bytes");
 
+        // Format 0.10: follows the categorical bitsets (before the binned part), then its sections in
+        // this order, each 64-byte aligned: leaf widths (uint16 per tree; 1 = one value per leaf, the
+        // only width this version predicts with; reserved for vector leaves), oblique splits
+        // (ObliqueSplit), quantizers (FeatureQuantizer), constant flags (uint8), optional quantile knot
+        // offsets (uint32) + knots (double), and optional native CTR sections (tables, keys, slots, values).
+        struct alignas(64) ExtensionHeader {
+            uint64_t n_leaf_widths = 0;  // = number of trees
+            uint64_t n_oblique = 0;
+            uint64_t n_quantizers = 0;   // = n_features when n_oblique > 0, else 0
+            uint64_t n_quantizer_knots = 0;
+            uint64_t n_ctr_tables = 0;
+            uint64_t n_ctr_keys = 0;
+            uint64_t n_ctr_slots = 0;
+            uint64_t n_ctr_values = 0;
+        };
+        static_assert(sizeof(ExtensionHeader) == 64, "ExtensionHeader must stay 64 bytes");
+
     #ifndef LIGNUM_VERSION
         #define LIGNUM_VERSION "unknown"
     #endif
@@ -117,6 +134,8 @@ namespace lignum {
                 {f.cuts, sizeof(double), f.n_cuts},
                 {f.cat_features, sizeof(BinnedCatFeature), f.n_cat_features},
                 {f.cat_tables, sizeof(uint64_t), f.n_table_words},
+                {f.q16_columns, sizeof(uint32_t), f.n_q16},  // format 0.10
+                {f.onodes, sizeof(ONode), f.n_onodes},       // format 0.10
             };
         }
 
@@ -264,7 +283,7 @@ namespace lignum {
             if (size < start) throw std::runtime_error("Binary file is truncated or corrupted.");
             InfoHeader info;
             std::memcpy(&info, data + 64, sizeof(info));
-            if (info.source > model_source::CatBoost || info.names_bytes > size - start ||
+            if (info.source > model_source::Miter || info.names_bytes > size - start ||
                 info.objective_bytes > size - start - info.names_bytes || info.n_names > info.names_bytes / sizeof(uint32_t) ||
                 info.categories_bytes > size - start - info.names_bytes - info.objective_bytes) {
                 throw std::runtime_error("Binary file is truncated or corrupted.");
@@ -418,6 +437,32 @@ namespace lignum {
                 }
                 padded_write(out, reinterpret_cast<const char*>(cat_bitsets), n_cat_words * sizeof(uint32_t));
 
+                ExtensionHeader ext;
+                ext.n_leaf_widths = n_offsets;
+                ext.n_oblique = n_oblique;
+                ext.n_quantizers = n_oblique > 0 ? n_quantizers : 0;
+                ext.n_quantizer_knots = (ext.n_quantizers > 0 && quantizer_knot_offsets) ? n_quantizer_knots : 0;
+                ext.n_ctr_tables = n_ctr_tables;
+                ext.n_ctr_keys = n_ctr_keys;
+                ext.n_ctr_slots = n_ctr_slots;
+                ext.n_ctr_values = n_ctr_values;
+                out.write(reinterpret_cast<const char*>(&ext), sizeof(ext));
+                const std::vector<uint16_t> widths(n_offsets, 1);
+                padded_write(out, reinterpret_cast<const char*>(widths.data()), widths.size() * sizeof(uint16_t));
+                padded_write(out, reinterpret_cast<const char*>(oblique_splits), ext.n_oblique * sizeof(ObliqueSplit));
+                padded_write(out, reinterpret_cast<const char*>(quantizers), ext.n_quantizers * sizeof(FeatureQuantizer));
+                padded_write(out, reinterpret_cast<const char*>(quantizer_constant), ext.n_quantizers * sizeof(uint8_t));
+                if (ext.n_quantizer_knots > 0) {
+                    padded_write(out, reinterpret_cast<const char*>(quantizer_knot_offsets), (ext.n_quantizers + 1) * sizeof(uint32_t));
+                    padded_write(out, reinterpret_cast<const char*>(quantizer_knots), ext.n_quantizer_knots * sizeof(double));
+                }
+                if (ext.n_ctr_tables > 0) {
+                    padded_write(out, reinterpret_cast<const char*>(ctr_tables), ext.n_ctr_tables * sizeof(CtrTableHeader));
+                    padded_write(out, reinterpret_cast<const char*>(ctr_keys), ext.n_ctr_keys * sizeof(uint64_t));
+                    padded_write(out, reinterpret_cast<const char*>(ctr_slots), ext.n_ctr_slots * sizeof(uint32_t));
+                    padded_write(out, reinterpret_cast<const char*>(ctr_values), ext.n_ctr_values * sizeof(float));
+                }
+
                 // The binned kernel is stored too, so a mapped model needs no preparation at load time.
                 if (binned) {
                     BinnedFileHeader bh;
@@ -428,6 +473,8 @@ namespace lignum {
                     bh.n_cat_features = binned->n_cat_features;
                     bh.n_table_words = binned->n_table_words;
                     bh.decision_words = binned->decision_words;
+                    bh.n_q16 = static_cast<uint32_t>(binned->n_q16);
+                    bh.n_onodes = binned->n_onodes;
                     out.write(reinterpret_cast<const char*>(&bh), sizeof(bh));
                     for (const Section& sec : binned_sections(*binned)) {
                         padded_write(out, static_cast<const char*>(sec.data), sec.element_size * sec.count);
@@ -464,12 +511,13 @@ namespace lignum {
         constexpr uint8_t kKnownFlags = header_flags::Float32 | header_flags::SpecialTrees | header_flags::Binned | header_flags::Oblivious;
         if (header.flags & ~kKnownFlags) throw std::runtime_error("Binary file is truncated or corrupted.");
         const bool is_oblivious = (header.flags & header_flags::Oblivious) != 0;
-        // 0.9 adds the categories of training in what was padding in 0.8, so both read the same way.
-        if (header.version_major != 0 || (header.version_minor != 8 && header.version_minor != 9)) {
+        // 0.9 adds the categories of training in what was padding in 0.8, 0.10 adds ExtensionHeader.
+        if (header.version_major != 0 || header.version_minor < 8 || header.version_minor > 10) {
             throw std::runtime_error("Unsupported lignum binary format version " + std::to_string(header.version_major) + "." +
-                                     std::to_string(header.version_minor) + " (this lignum reads 0.8 and 0.9); save the model again " +
-                                     "from its LightGBM, XGBoost or CatBoost file.");
+                                     std::to_string(header.version_minor) + " (this lignum reads 0.8 to 0.10); save the model again " +
+                                     "from its LightGBM, XGBoost, CatBoost or miter file.");
         }
+        const bool has_extension = header.version_minor >= 10;
 
         Model info;  // source, feature names, objective, categories and writer
         const size_t base = read_info(binary_data->data, binary_data->size, header.n_features, info);
@@ -567,6 +615,83 @@ namespace lignum {
         }
         offset += align(model.n_cat_words * sizeof(uint32_t));
 
+        if (has_extension) {
+            if (binary_data->size < offset + sizeof(ExtensionHeader)) {
+                throw std::runtime_error("Binary file is truncated or corrupted.");
+            }
+            ExtensionHeader ext;
+            std::memcpy(&ext, binary_data->data + offset, sizeof(ext));
+            offset += sizeof(ext);
+
+            auto add_bytes = [&](size_t& cur, uint64_t count, size_t elem) {
+                check_count(count, elem, binary_data->size);
+                const size_t bytes = align(static_cast<size_t>(count) * elem);
+                if (bytes > binary_data->size - cur) throw std::runtime_error("Binary file is truncated or corrupted.");
+                cur += bytes;
+            };
+            if (ext.n_leaf_widths != model.n_offsets || (ext.n_oblique > 0) != (ext.n_quantizers > 0) ||
+                (ext.n_quantizer_knots > 0 && ext.n_quantizers == 0) ||
+                (ext.n_ctr_tables == 0 && (ext.n_ctr_keys || ext.n_ctr_slots || ext.n_ctr_values))) {
+                throw std::runtime_error("Binary file is truncated or corrupted.");
+            }
+            size_t needed = offset;
+            add_bytes(needed, ext.n_leaf_widths, sizeof(uint16_t));
+            add_bytes(needed, ext.n_oblique, sizeof(ObliqueSplit));
+            add_bytes(needed, ext.n_quantizers, sizeof(FeatureQuantizer));
+            add_bytes(needed, ext.n_quantizers, sizeof(uint8_t));
+            if (ext.n_quantizer_knots > 0) {
+                add_bytes(needed, ext.n_quantizers + 1, sizeof(uint32_t));
+                add_bytes(needed, ext.n_quantizer_knots, sizeof(double));
+            }
+            if (ext.n_ctr_tables > 0) {
+                add_bytes(needed, ext.n_ctr_tables, sizeof(CtrTableHeader));
+                add_bytes(needed, ext.n_ctr_keys, sizeof(uint64_t));
+                add_bytes(needed, ext.n_ctr_slots, sizeof(uint32_t));
+                add_bytes(needed, ext.n_ctr_values, sizeof(float));
+            }
+            (void)needed;
+
+            const auto* widths = reinterpret_cast<const uint16_t*>(binary_data->data + offset);
+            for (size_t t = 0; t < ext.n_leaf_widths; t++) {
+                uint16_t w;
+                std::memcpy(&w, widths + t, sizeof(w));
+                if (w != 1) {
+                    throw std::runtime_error("The model has vector leaves (leaf width " + std::to_string(w) +
+                                             "), which this lignum cannot predict.");
+                }
+            }
+            offset += align(ext.n_leaf_widths * sizeof(uint16_t));
+            model.n_oblique = ext.n_oblique;
+            model.oblique_splits = ext.n_oblique ? reinterpret_cast<const ObliqueSplit*>(binary_data->data + offset) : nullptr;
+            offset += align(ext.n_oblique * sizeof(ObliqueSplit));
+            model.n_quantizers = ext.n_quantizers;
+            model.quantizers = ext.n_quantizers ? reinterpret_cast<const FeatureQuantizer*>(binary_data->data + offset) : nullptr;
+            offset += align(ext.n_quantizers * sizeof(FeatureQuantizer));
+            model.quantizer_constant = ext.n_quantizers ? reinterpret_cast<const uint8_t*>(binary_data->data + offset) : nullptr;
+            offset += align(ext.n_quantizers * sizeof(uint8_t));
+            if (ext.n_quantizer_knots > 0) {
+                model.quantizer_knot_offsets = reinterpret_cast<const uint32_t*>(binary_data->data + offset);
+                offset += align((ext.n_quantizers + 1) * sizeof(uint32_t));
+                model.n_quantizer_knots = ext.n_quantizer_knots;
+                model.quantizer_knots = reinterpret_cast<const double*>(binary_data->data + offset);
+                offset += align(ext.n_quantizer_knots * sizeof(double));
+            }
+            if (ext.n_ctr_tables > 0) {
+                model.n_ctr_tables = ext.n_ctr_tables;
+                model.ctr_tables = reinterpret_cast<const CtrTableHeader*>(binary_data->data + offset);
+                offset += align(ext.n_ctr_tables * sizeof(CtrTableHeader));
+                model.n_ctr_keys = ext.n_ctr_keys;
+                model.ctr_keys = ext.n_ctr_keys ? reinterpret_cast<const uint64_t*>(binary_data->data + offset) : nullptr;
+                offset += align(ext.n_ctr_keys * sizeof(uint64_t));
+                model.n_ctr_slots = ext.n_ctr_slots;
+                model.ctr_slots = ext.n_ctr_slots ? reinterpret_cast<const uint32_t*>(binary_data->data + offset) : nullptr;
+                offset += align(ext.n_ctr_slots * sizeof(uint32_t));
+                model.n_ctr_values = ext.n_ctr_values;
+                model.ctr_values = ext.n_ctr_values ? reinterpret_cast<const float*>(binary_data->data + offset) : nullptr;
+                offset += align(ext.n_ctr_values * sizeof(float));
+            }
+        }
+
         std::shared_ptr<BinnedForest> binned_mut;
         if (binned && (header.flags & header_flags::Binned)) {
             if (binary_data->size < offset + sizeof(BinnedFileHeader)) {
@@ -581,6 +706,11 @@ namespace lignum {
             check_count(bh.n_cuts, sizeof(double), binary_data->size);
             check_count(bh.n_cat_features, sizeof(BinnedCatFeature), binary_data->size);
             check_count(bh.n_table_words, sizeof(uint64_t), binary_data->size);
+            check_count(bh.n_q16, sizeof(uint32_t), binary_data->size);
+            check_count(bh.n_onodes, sizeof(ONode), binary_data->size);
+            if (!has_extension && (bh.n_q16 || bh.n_onodes)) {
+                throw std::runtime_error("Binary file is truncated or corrupted.");
+            }
 
             auto f = std::make_shared<BinnedForest>();
             f->n_nodes = bh.n_nodes;
@@ -590,11 +720,16 @@ namespace lignum {
             f->n_cat_features = bh.n_cat_features;
             f->n_table_words = bh.n_table_words;
             f->decision_words = bh.decision_words;
+            f->n_q16 = bh.n_q16;
+            f->n_onodes = bh.n_onodes;
             if (f->n_trees != model.n_offsets) throw std::runtime_error("Binary file is truncated or corrupted.");
 
             size_t needed = offset;
-            for (const Section& sec : binned_sections(*f)) needed += align(sec.element_size * sec.count);
-            if (binary_data->size < needed) throw std::runtime_error("Binary file is truncated or corrupted.");
+            for (const Section& sec : binned_sections(*f)) {
+                const size_t bytes = align(sec.element_size * sec.count);
+                if (bytes > binary_data->size - needed) throw std::runtime_error("Binary file is truncated or corrupted.");
+                needed += bytes;
+            }
 
             auto at = [&](size_t bytes) {
                 const char* p = binary_data->data + offset;
@@ -611,13 +746,19 @@ namespace lignum {
             f->cuts = reinterpret_cast<const double*>(at(f->n_cuts * sizeof(double)));
             f->cat_features = reinterpret_cast<const BinnedCatFeature*>(at(f->n_cat_features * sizeof(BinnedCatFeature)));
             f->cat_tables = reinterpret_cast<const uint64_t*>(at(f->n_table_words * sizeof(uint64_t)));
+            f->q16_columns = reinterpret_cast<const uint32_t*>(at(f->n_q16 * sizeof(uint32_t)));
+            f->onodes = reinterpret_cast<const ONode*>(at(f->n_onodes * sizeof(ONode)));
             f->owner = binary_data;
             binned_mut = f;
             model.binned = f;
         }
 
         validate_model(model);
-        if (binned_mut) binned_mut->fits_u8_codes = compute_fits_u8_codes(*binned_mut);
+        if (binned_mut) {
+            binned_mut->has_ctr_features = compute_has_ctr_features(*binned_mut);
+            binned_mut->sym = detect_symmetric_forest(model, *binned_mut);
+            binned_mut->fits_u8_codes = compute_fits_u8_codes(*binned_mut);
+        }
         return model;
     }
 

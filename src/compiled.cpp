@@ -141,7 +141,7 @@ namespace lignum {
                     << "(const double* restrict X, size_t stride, size_t n, uint16_t* restrict codes) {\n"
                     << "  for (size_t i = 0; i < n; i++) {\n"
                     << "    const double* restrict x = X + i * stride;\n"
-                    << "    uint16_t* restrict c = codes + i * " << f.n_features << ";\n";
+                    << "    uint16_t* restrict c = codes + i * " << f.row_codes() << ";\n";
                 for (size_t idx = begin; idx < end; idx++) {
                     const size_t j = numeric[idx];
                     const uint32_t len = n_cuts(f, j);
@@ -162,9 +162,79 @@ namespace lignum {
         }
 
         // Emits lignum_bin: inline loop for <= 128 numeric features, otherwise calls the per-group
-        // helpers (distributed across translation units) over 64-row L2-resident strips.
-        void binning_entry(std::ostream& out, const BinnedForest& f, const std::vector<size_t>& numeric, size_t n_groups) {
+        // helpers (distributed across translation units) over 64-row L2-resident strips. When
+        // f.n_q16 > 0 (miter models), also appends Q16 affine / quantile codes per row.
+        void emit_q16_helpers(std::ostream& out, const Model& model, const BinnedForest& f) {
+            if (f.n_q16 == 0) return;
+            out << "static uint16_t lignum_q16(double x, double lo, double scale) {\n"
+                << "  if (x != x) return 0xFFFF;\n"
+                << "  volatile double t = (x - lo) * scale;\n"
+                << "  const double v = t;\n"
+                << "  if (v <= 0.0) return 0;\n"
+                << "  if (v >= 65534.0) return 65534;\n"
+                << "  const uint32_t r = (uint32_t)(v + 0.5);\n"
+                << "  return r >= 65534u ? (uint16_t)65534 : (uint16_t)r;\n"
+                << "}\n";
+            if (!model.quantizer_knot_offsets) return;
+            bool any_knots = false;
+            for (size_t q = 0; q < f.n_q16; q++) {
+                const uint32_t col = f.q16_columns[q];
+                const uint32_t lo = model.quantizer_knot_offsets[col];
+                const uint32_t hi = model.quantizer_knot_offsets[col + 1];
+                if (hi > lo) {
+                    if (!any_knots) {
+                        out << "static uint16_t lignum_q16_knots(double x, const double* knots, uint32_t n_knots) {\n"
+                            << "  if (x != x) return 0xFFFF;\n"
+                            << "  if (x <= knots[0]) return 0;\n"
+                            << "  if (x >= knots[n_knots - 1]) return 65534;\n"
+                            << "  uint32_t lo = 0, hi = n_knots;\n"
+                            << "  while (lo < hi) {\n"
+                            << "    const uint32_t mid = lo + (hi - lo) / 2;\n"
+                            << "    if (x < knots[mid]) hi = mid; else lo = mid + 1;\n"
+                            << "  }\n"
+                            << "  const uint32_t idx = lo - 1;\n"
+                            << "  const double denom = knots[idx + 1] - knots[idx];\n"
+                            << "  const double raw = denom > 0.0 ? (x - knots[idx]) / denom : 0.0;\n"
+                            << "  const double frac = raw < 0.0 ? 0.0 : (raw > 1.0 ? 1.0 : raw);\n"
+                            << "  volatile double m_inv_v = 65534.0 / (double)(n_knots - 1);\n"
+                            << "  const double m_inv = m_inv_v;\n"
+                            << "  volatile double pos_v = ((double)idx + frac) * m_inv;\n"
+                            << "  const double pos = pos_v;\n"
+                            << "  if (pos <= 0.0) return 0;\n"
+                            << "  if (pos >= 65534.0) return 65534;\n"
+                            << "  const uint32_t r = (uint32_t)(pos + 0.5);\n"
+                            << "  return r >= 65534u ? (uint16_t)65534 : (uint16_t)r;\n"
+                            << "}\n";
+                        any_knots = true;
+                    }
+                    const uint32_t len = hi - lo;
+                    out << "static const double q16_knots_" << col << "[" << len << "] = {";
+                    for (uint32_t k = 0; k < len; k++) out << (k ? ", " : "") << literal(model.quantizer_knots[lo + k]);
+                    out << "};\n";
+                }
+            }
+        }
+
+        void emit_q16_row_writes(std::ostream& out, const Model& model, const BinnedForest& f) {
+            for (size_t q = 0; q < f.n_q16; q++) {
+                const uint32_t col = f.q16_columns[q];
+                out << "    c[" << f.n_features + q << "] = ";
+                if (model.quantizer_constant[col]) {
+                    out << "(x[" << col << "] != x[" << col << "]) ? 0xFFFF : 0;\n";
+                } else if (model.quantizer_knot_offsets &&
+                           model.quantizer_knot_offsets[col + 1] > model.quantizer_knot_offsets[col]) {
+                    const uint32_t len = model.quantizer_knot_offsets[col + 1] - model.quantizer_knot_offsets[col];
+                    out << "lignum_q16_knots(x[" << col << "], q16_knots_" << col << ", " << len << ");\n";
+                } else {
+                    out << "lignum_q16(x[" << col << "], " << literal(model.quantizers[col].lo) << ", "
+                        << literal(model.quantizers[col].scale) << ");\n";
+                }
+            }
+        }
+
+        void binning_entry(std::ostream& out, const Model& model, const BinnedForest& f, const std::vector<size_t>& numeric, size_t n_groups) {
             constexpr uint32_t kLinear = 8;
+            emit_q16_helpers(out, model, f);
             if (numeric.size() <= kBinGroupThreshold) {
                 for (size_t j : numeric) {
                     const uint32_t len = n_cuts(f, j);
@@ -176,7 +246,8 @@ namespace lignum {
                 out << "LIGNUM_EXPORT void lignum_bin(const double* restrict X, size_t stride, size_t n, uint16_t* restrict codes) {\n"
                     << "  for (size_t i = 0; i < n; i++) {\n"
                     << "    const double* restrict x = X + i * stride;\n"
-                    << "    uint16_t* restrict c = codes + i * " << f.n_features << ";\n";
+                    << "    uint16_t* restrict c = codes + i * " << f.row_codes() << ";\n";
+                emit_q16_row_writes(out, model, f);
                 for (size_t j : numeric) {
                     const uint32_t len = n_cuts(f, j);
                     const double* cuts = &f.cuts[f.cut_offsets[j]];
@@ -201,8 +272,15 @@ namespace lignum {
                 << "  for (size_t b = 0; b < n; b += 64) {\n"
                 << "    const size_t m = (b + 64 <= n) ? 64 : (n - b);\n"
                 << "    const double* restrict Xb = X + b * stride;\n"
-                << "    uint16_t* restrict cb = codes + b * " << f.n_features << ";\n";
+                << "    uint16_t* restrict cb = codes + b * " << f.row_codes() << ";\n";
             for (size_t g = 0; g < n_groups; g++) out << "    lignum_bin_g" << g << "(Xb, stride, m, cb);\n";
+            if (f.n_q16 > 0) {
+                out << "    for (size_t i = 0; i < m; i++) {\n"
+                    << "      const double* restrict x = Xb + i * stride;\n"
+                    << "      uint16_t* restrict c = cb + i * " << f.row_codes() << ";\n";
+                emit_q16_row_writes(out, model, f);
+                out << "    }\n";
+            }
             out << "  }\n}\n";
         }
 
@@ -217,9 +295,18 @@ namespace lignum {
                 const char* acc() const { return float32_ ? "float" : "double"; }
 
                 void tree(std::ostream& out, size_t t, const std::string& sum) {
+                    if (f_.sym) {
+                        sym_tree(out, t, sum);
+                        return;
+                    }
                     leaf_ = sum + " += ";
                     leaf_end_ = "; goto end_" + std::to_string(t) + ";";
-                    ref(out, f_.roots[t], 2);
+                    if ((f_.tree_kind[t] & tree_kind::Oblique) != 0) {
+                        cat_ = (f_.tree_kind[t] & tree_kind::Categorical) != 0;
+                        oref(out, f_.roots[t], 2);
+                    } else {
+                        ref(out, f_.roots[t], 2);
+                    }
                     out << "    end_" << t << ":;\n";
                 }
 
@@ -228,7 +315,9 @@ namespace lignum {
                 const std::vector<double>& table() const { return table_values_; }
 
                 // Counts the slots of tree t that can read a local, per dense feature.
-                void count_locals(size_t t, std::vector<size_t>& uses) const { locals_of(f_.roots[t], uses); }
+                void count_locals(size_t t, std::vector<size_t>& uses) const {
+                    if (!f_.sym && (f_.tree_kind[t] & tree_kind::Oblique) == 0) locals_of(f_.roots[t], uses);
+                }
                 void set_locals(const std::vector<bool>* locals) { locals_ = locals; }
 
             private:
@@ -262,6 +351,91 @@ namespace lignum {
                 }
 
                 std::string value(int32_t r) { return "L[" + std::to_string(slot(r)) + "]"; }
+
+                // ---- ONode & Symmetric trees (see ONode, SymTree in binned.hpp) ----
+                bool cat_ = false;  // the slot may use categorical decision bits (zero weights)
+
+                // C expression that is 1 when the slot goes right, exactly the kernel's odir<cat_>.
+                std::string ocondition(const ONodeSlot& s) const {
+                    if (cat_ && s.w[0] == 0 && s.w[1] == 0 && s.w[2] == 0) {
+                        const auto bit = static_cast<uint32_t>(s.thr);
+                        return "!((d[" + std::to_string(bit >> 6) + "] >> " + std::to_string(bit & 63) + ") & 1)";
+                    }
+                    const unsigned f0 = s.f[0] & 0x7FFFu;
+                    const std::string def = std::to_string(s.f[0] >> 15);
+                    const auto c = [](unsigned j) { return "c[" + std::to_string(j) + "]"; };
+                    if (s.w[0] == 1 && s.w[1] == 0 && s.w[2] == 0 && s.f[1] == f0 && s.f[2] == f0) {
+                        // Axis/CTR form: 1 * (c - 32768) >= thr  <=>  c >= thr + 32768 (int32, no overflow).
+                        return "(" + c(f0) + " == 0xFFFF ? " + def + " : (int32_t)" + c(f0) + " >= " + std::to_string(int64_t{s.thr} + 32768) + ")";
+                    }
+                    std::string nan = "(" + c(f0) + " == 0xFFFF) | (" + c(s.f[1]) + " == 0xFFFF) | (" + c(s.f[2]) + " == 0xFFFF)";
+                    std::string p;
+                    const unsigned fs[3] = {f0, s.f[1], s.f[2]};
+                    for (int q = 0; q < 3; q++) {
+                        if (s.w[q] == 0) continue;  // 0 * (c - 32768) adds nothing (int32)
+                        p += (p.empty() ? "" : " + ") + std::string("(int32_t)") + std::to_string(s.w[q]) + " * ((int32_t)" + c(fs[q]) + " - 32768)";
+                    }
+                    if (p.empty()) p = "0";
+                    return "((" + nan + ") ? " + def + " : (" + p + " >= " + std::to_string(s.thr) + "))";
+                }
+
+                void sym_tree(std::ostream& out, size_t t, const std::string& sum) {
+                    const SymTree& st = f_.sym->trees[t];
+                    const size_t base = table_values_.size();
+                    const size_t n_leaves_tree = size_t{1} << st.depth;
+                    const double* tl = f_.sym->leaves.data() + st.leaf_offset;
+                    table_values_.insert(table_values_.end(), tl, tl + n_leaves_tree);
+                    if (st.depth == 0) {
+                        out << "    " << sum << " += L[" << base << "];\n";
+                        return;
+                    }
+                    out << "    { uint32_t idx = 0;\n";
+                    for (uint8_t lv = 0; lv < st.depth; lv++) {
+                        const ONodeSlot& sl = f_.sym->slots[st.slot_offset + lv];
+                        cat_ = (st.has_cat != 0) && ((sl.w[0] | sl.w[1] | sl.w[2]) == 0);
+                        out << "      idx = (idx << 1) | (uint32_t)(" << ocondition(sl) << ");\n";
+                    }
+                    out << "      " << sum << " += L[" << base << " + idx]; }\n";
+                }
+
+                void oref(std::ostream& out, int32_t r, int depth) {
+                    if (r < 0) {
+                        indent(out, depth);
+                        out << leaf_ << value(r) << leaf_end_ << "\n";
+                        return;
+                    }
+                    const ONode& o = f_.onodes[r];
+                    const int32_t* c = o.children;
+                    indent(out, depth);
+                    out << "if (" << ocondition(o.s[0]) << ") {\n";
+                    oside(out, o, 2, c[2], c[3], depth + 1);
+                    indent(out, depth);
+                    out << "} else {\n";
+                    oside(out, o, 1, c[0], c[1], depth + 1);
+                    indent(out, depth);
+                    out << "}\n";
+                }
+
+                // Slot s (1 or 2) with children `left`, `right` (equal when the child is a leaf).
+                void oside(std::ostream& out, const ONode& o, int s, int32_t left, int32_t right, int depth) {
+                    if (left == right) {
+                        oref(out, left, depth);
+                        return;
+                    }
+                    if (left < 0 && right < 0) {
+                        indent(out, depth);
+                        out << leaf_ << "L[(" << ocondition(o.s[s]) << ") ? " << slot(right) << " : " << slot(left) << "]" << leaf_end_ << "\n";
+                        return;
+                    }
+                    indent(out, depth);
+                    out << "if (" << ocondition(o.s[s]) << ") {\n";
+                    oref(out, right, depth + 1);
+                    indent(out, depth);
+                    out << "} else {\n";
+                    oref(out, left, depth + 1);
+                    indent(out, depth);
+                    out << "}\n";
+                }
 
                 void ref(std::ostream& out, int32_t r, int depth) {
                     if (r < 0) {
@@ -893,6 +1067,32 @@ namespace lignum {
         h.value(f.decision_words);
         h.array(model.leaf_values, model.n_leaves);
         if (model.n_outputs > 1) h.array(model.tree_outputs, model.n_offsets);
+        if (f.n_onodes > 0 || f.n_q16 > 0 || f.has_ctr_features || f.sym != nullptr) {
+            // miter models only, so the fingerprints of other models stay as they were.
+            h.array(f.tree_kind, f.n_trees);
+            h.array(f.onodes, f.n_onodes);
+            h.array(f.q16_columns, f.n_q16);
+            h.value(uint8_t{f.sym != nullptr});
+            for (size_t q = 0; q < f.n_q16; q++) {
+                const uint32_t col = f.q16_columns[q];
+                h.value(model.quantizers[col].lo);
+                h.value(model.quantizers[col].scale);
+                h.value(model.quantizer_constant[col]);
+                if (model.quantizer_knot_offsets) {
+                    const uint32_t lo = model.quantizer_knot_offsets[col];
+                    const uint32_t hi = model.quantizer_knot_offsets[col + 1];
+                    h.array(model.quantizer_knots + lo, hi - lo);
+                } else {
+                    h.value(uint64_t{0});
+                }
+            }
+            if (f.has_ctr_features) {
+                h.array(model.ctr_tables, model.n_ctr_tables);
+                h.array(model.ctr_keys, model.n_ctr_keys);
+                h.array(model.ctr_slots, model.n_ctr_slots);
+                h.array(model.ctr_values, model.n_ctr_values);
+            }
+        }
         return h.get();
     }
 
@@ -1006,7 +1206,7 @@ namespace lignum {
                 src << "LIGNUM_EXPORT const uint32_t lignum_abi = " << kAbi << ";\n"
                     << "LIGNUM_EXPORT const uint64_t lignum_fingerprint = " << hex(compiled_fingerprint(model)) << ";\n"
                     << "LIGNUM_EXPORT const uint32_t lignum_n_blocks = " << n_blocks << ";\n";
-                binning_entry(src, f, numeric, n_bin_groups);
+                binning_entry(src, model, f, numeric, n_bin_groups);
             }
             for (size_t b = n_blocks * p / parts; b < n_blocks * (p + 1) / parts; b++) {
                 const size_t begin = b * block_trees, end = std::min(begin + block_trees, f.n_trees);
@@ -1042,7 +1242,7 @@ namespace lignum {
                     << "LIGNUM_EXPORT void lignum_block_" << b << "(const uint16_t* restrict codes, const uint64_t* restrict decisions, size_t n, double* restrict out) {\n"
                     << "  const " << acc << "* restrict L = leaves_" << b << "; LIGNUM_KEEP(L);\n";
                 src << "  for (size_t i = 0; i < n; i++) {\n"
-                    << "    const uint16_t* restrict c = codes + i * " << f.n_features << ";\n"
+                    << "    const uint16_t* restrict c = codes + i * " << f.row_codes() << ";\n"
                     << "    const uint64_t* restrict d = decisions" << (f.decision_words ? " + i * " + std::to_string(f.decision_words) : std::string()) << ";\n"
                     << "    (void)c; (void)d;\n";
                 for (size_t k = 0; k < K; k++) {

@@ -66,10 +66,11 @@ namespace {
 
     size_t align64(size_t n) { return (n + 63) & ~size_t{63}; }
 
-    // Byte offsets of the format 0.8 (src/io.cpp): FileHeader fields, the BinnedFileHeader and
-    // the binned kernel's BinnedCatFeature section.
+    // Byte offsets of the format (src/io.cpp): FileHeader fields, the 0.10 ExtensionHeader and its
+    // sections, the BinnedFileHeader and the binned kernel's BinnedCatFeature section.
     struct Layout {
         static constexpr size_t kCatWords = 16, kNodes = 24, kOffsets = 32, kLeaves = 40;
+        size_t extension = 0, extension_end = 0;  // equal when the file has no ExtensionHeader (< 0.10)
         size_t binned_header = 0;
         size_t cat_features = 0;
 
@@ -79,9 +80,21 @@ namespace {
             const uint16_t n_outputs = get<uint16_t>(b, 60);
             const uint64_t names_bytes = get<uint64_t>(b, 64 + 24);
             const uint32_t objective_bytes = get<uint32_t>(b, 64 + 40);
-            size_t pos = 128 + align64(names_bytes + objective_bytes);
+            const uint32_t categories_bytes = get<uint32_t>(b, 64 + 44);
+            size_t pos = 128 + align64(names_bytes + objective_bytes + categories_bytes);
             pos += align64(n_nodes * 64) + align64(n_offsets * 4) + align64(n_leaves * 8) + align64(n_offsets) +
                    align64(n_outputs * 8) + (n_outputs > 1 ? align64(n_offsets * 2) : 0) + align64(n_cat_words * 4);
+            extension = extension_end = pos;
+            if (static_cast<uint8_t>(b[7]) >= 10) {
+                const uint64_t widths = get<uint64_t>(b, pos), oblique = get<uint64_t>(b, pos + 8);
+                const uint64_t quant = get<uint64_t>(b, pos + 16), knots = get<uint64_t>(b, pos + 24);
+                const uint64_t ctr_t = get<uint64_t>(b, pos + 32), ctr_k = get<uint64_t>(b, pos + 40);
+                const uint64_t ctr_s = get<uint64_t>(b, pos + 48), ctr_v = get<uint64_t>(b, pos + 56);
+                pos += 64 + align64(widths * 2) + align64(oblique * 24) + align64(quant * 16) + align64(quant);
+                if (knots > 0) pos += align64((quant + 1) * 4) + align64(knots * 8);
+                if (ctr_t > 0) pos += align64(ctr_t * 56) + align64(ctr_k * 8) + align64(ctr_s * 4) + align64(ctr_v * 4);
+                extension_end = pos;
+            }
             binned_header = pos;
             const uint64_t bn = get<uint64_t>(b, pos), bt = get<uint64_t>(b, pos + 8), bf = get<uint64_t>(b, pos + 16);
             const uint64_t bc = get<uint64_t>(b, pos + 24);
@@ -91,6 +104,16 @@ namespace {
             cat_features = pos;
         }
     };
+
+    // The same file in an older format (0.8 / 0.9): without the 0.10 extension block. Only for
+    // models without oblique splits or CTR tables (older formats cannot hold them).
+    std::vector<char> as_version(std::vector<char> bytes, uint8_t minor) {
+        const Layout l(bytes);
+        bytes.erase(bytes.begin() + static_cast<std::ptrdiff_t>(l.extension),
+                    bytes.begin() + static_cast<std::ptrdiff_t>(l.extension_end));
+        bytes[7] = static_cast<char>(minor);
+        return bytes;
+    }
 
     // Writes `bytes` and expects loading to reject them: with and without the binned kernel, or
     // only with it for damage in the binned sections (binned=false does not read them).
@@ -117,6 +140,8 @@ TEST(BinaryIO, CountsThatWrapAroundAreRejected) {
 
     std::vector<size_t> counts = {Layout::kCatWords, Layout::kNodes, Layout::kOffsets, Layout::kLeaves};
     for (size_t k = 0; k < 6; k++) counts.push_back(layout.binned_header + 8 * k);  // BinnedFileHeader counts
+    counts.push_back(layout.binned_header + 56);  // BinnedFileHeader::n_onodes (0.10)
+    for (size_t k = 0; k < 8; k++) counts.push_back(layout.extension + 8 * k);  // ExtensionHeader counts (0.10)
     for (size_t pos : counts) {
         for (int shift : {58, 59, 60, 61, 62, 63}) {
             std::vector<char> bytes = original;
@@ -264,14 +289,16 @@ TEST(BinaryIO, CategoriesOfTrainingSurviveAndOldFilesLoad) {
     put<uint32_t>(bytes, 64 + 44, categories_bytes + 64);  // longer than the data that follows
     expect_rejected(bytes, "categories longer than their section");
 
-    // The same model as format 0.8: no categories (the field was padding there).
+    // The same model as format 0.8 and 0.9: no ExtensionHeader / categories (the field was padding in 0.8).
     const auto plain = (std::filesystem::temp_directory_path() / "lignum_test_io_08.bin").string();
     lignum::load(write_temp("io_08.json", kSectionsModel), "lightgbm").save(plain);
-    bytes = read_bytes(plain);
-    ASSERT_EQ(bytes[7], 9);  // version_minor
-    bytes[7] = 8;
-    std::ofstream(plain, std::ios::binary).write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-    EXPECT_NO_THROW(lignum::load(plain));
+    const std::vector<char> current = read_bytes(plain);
+    ASSERT_EQ(current[7], 10);  // version_minor
+    for (const uint8_t minor : {uint8_t{8}, uint8_t{9}}) {
+        bytes = as_version(current, minor);
+        std::ofstream(plain, std::ios::binary).write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        EXPECT_NO_THROW(lignum::load(plain)) << "format 0." << int{minor};
+    }
 }
 
 TEST(BinaryIO, RejectsInvalidPrecisionFlagsCutsDepthAndDuplicateCategories) {
@@ -291,7 +318,7 @@ TEST(BinaryIO, RejectsInvalidPrecisionFlagsCutsDepthAndDuplicateCategories) {
     // W5: cat_bitsets[0] != 0.
     {
         std::vector<char> bytes = original;
-        const size_t cat_pos = layout.binned_header - align64(get<uint64_t>(original, Layout::kCatWords) * 4);
+        const size_t cat_pos = layout.extension - align64(get<uint64_t>(original, Layout::kCatWords) * 4);
         put<uint32_t>(bytes, cat_pos, 1u);
         expect_rejected(bytes, "cat_bitsets[0] != 0");
     }

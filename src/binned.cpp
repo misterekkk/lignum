@@ -2,8 +2,8 @@
 #include "ir.hpp"
 
 #include <algorithm>
-#include <cmath>
 #include <bit>
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -27,6 +27,8 @@ namespace lignum {
             std::vector<BinnedCatFeature> cat_features;
             std::vector<uint64_t> cat_tables;
             uint32_t decision_words = 0;
+            std::vector<ONode> onodes;
+            std::vector<uint32_t> q16_columns;
         };
 
         // Plain binary tree recovered from the KNode form.
@@ -93,8 +95,8 @@ namespace lignum {
         class Packer {
             public:
                 Packer(const std::vector<BTNode>& bt, BinnedStorage& out, const std::vector<uint16_t>& dense,
-                       const std::vector<std::vector<double>>& cuts)
-                    : bt_(bt), out_(out), dense_(dense), cuts_(cuts) {}
+                       const std::vector<uint16_t>& dense_ctr, const std::vector<std::vector<double>>& cuts)
+                    : bt_(bt), out_(out), dense_(dense), dense_ctr_(dense_ctr), cuts_(cuts) {}
 
                 uint8_t tree_kind = 0;
 
@@ -114,10 +116,20 @@ namespace lignum {
                 const std::vector<BTNode>& bt_;
                 BinnedStorage& out_;
                 const std::vector<uint16_t>& dense_;
+                const std::vector<uint16_t>& dense_ctr_;
                 const std::vector<std::vector<double>>& cuts_;
 
                 void fill(BNode& b, int slot, int32_t i) {
                     const BTNode& n = bt_[i];
+                    if (n.kind == slot_kind::Ctr) {
+                        const uint16_t j = dense_ctr_[n.feature];
+                        b.features[slot] = j;
+                        const auto& c = cuts_[j];
+                        const auto k = std::lower_bound(c.begin(), c.end(), n.threshold) - c.begin();
+                        b.thresholds[slot] = static_cast<uint16_t>(k + 1);
+                        tree_kind |= tree_kind::Ctr;
+                        return;
+                    }
                     const uint16_t j = dense_[n.feature];
                     b.features[slot] = j;
                     const bool nan_right = (n.dirs & dir_bits::DefaultRight) != 0;
@@ -174,6 +186,111 @@ namespace lignum {
                     // Recursion may grow out_.nodes; b is a local copy, written back by pack().
                     b.children[first] = pack(bt_[i].left);
                     b.children[first + 1] = pack(bt_[i].right);
+                }
+        };
+
+        // Packs a tree with oblique splits into ONodes (see binned.hpp). Throws std::domain_error
+        // for what the ONode form does not cover (the model then keeps the KNode kernel).
+        class OPacker {
+            public:
+                OPacker(const Model& m, const std::vector<BTNode>& bt, BinnedStorage& out,
+                        const std::vector<uint16_t>& dense, const std::vector<uint16_t>& dense_ctr,
+                        const std::vector<std::vector<double>>& cuts, const std::vector<uint16_t>& q16, size_t n_dense)
+                    : m_(m), bt_(bt), out_(out), dense_(dense), dense_ctr_(dense_ctr),
+                      cuts_(cuts), q16_(q16), n_dense_(n_dense) {}
+
+                uint8_t tree_kind = 0;
+
+                int32_t pack(int32_t i) {
+                    if (bt_[i].leaf) return bt_[i].leaf_ref;
+                    const int32_t idx = static_cast<int32_t>(out_.onodes.size());
+                    out_.onodes.push_back(ONode{});
+                    ONode o{};
+                    fill(o.s[0], i);
+                    side(o, 1, bt_[i].left, 0);
+                    side(o, 2, bt_[i].right, 2);
+                    out_.onodes[idx] = o;
+                    return idx;
+                }
+
+            private:
+                const Model& m_;
+                const std::vector<BTNode>& bt_;
+                BinnedStorage& out_;
+                const std::vector<uint16_t>& dense_;
+                const std::vector<uint16_t>& dense_ctr_;
+                const std::vector<std::vector<double>>& cuts_;
+                const std::vector<uint16_t>& q16_;
+                size_t n_dense_;
+
+                static uint16_t code_index(size_t j) {
+                    if (j >= 0x8000) throw std::domain_error("too many code columns for ONode");
+                    return static_cast<uint16_t>(j);
+                }
+
+                void fill(ONodeSlot& s, int32_t i) {
+                    const BTNode& n = bt_[i];
+                    const bool right = (n.dirs & dir_bits::DefaultRight) != 0;
+                    if (n.kind == slot_kind::Oblique) {
+                        const ObliqueSplit& o = m_.oblique_splits[std::bit_cast<uint64_t>(n.threshold)];
+                        if (o.weights[0] == 0 && o.weights[1] == 0 && o.weights[2] == 0) {
+                            throw std::domain_error("oblique split without weights");
+                        }
+                        for (int q = 0; q < 3; q++) {
+                            s.f[q] = code_index(n_dense_ + q16_[o.features[q]]);
+                            s.w[q] = o.weights[q];
+                        }
+                        s.thr = o.threshold;
+                        tree_kind |= tree_kind::Oblique;
+                    } else if (n.kind == slot_kind::Numeric) {
+                        if (n.dirs & dir_bits::ZeroIsMissing) throw std::domain_error("zero-as-missing in an oblique tree");
+                        const uint16_t j = code_index(dense_[n.feature]);
+                        const auto& c = cuts_[j];
+                        const auto k = std::lower_bound(c.begin(), c.end(), n.threshold) - c.begin();
+                        s.f[0] = s.f[1] = s.f[2] = j;
+                        s.w[0] = 1;
+                        s.w[1] = s.w[2] = 0;
+                        s.thr = static_cast<int32_t>(k + 1) - 32768;
+                    } else if (n.kind == slot_kind::Ctr) {
+                        const uint16_t j = code_index(dense_ctr_[n.feature]);
+                        const auto& c = cuts_[j];
+                        const auto k = std::lower_bound(c.begin(), c.end(), n.threshold) - c.begin();
+                        s.f[0] = s.f[1] = s.f[2] = j;
+                        s.w[0] = 1;
+                        s.w[1] = s.w[2] = 0;
+                        s.thr = static_cast<int32_t>(k + 1) - 32768;
+                        tree_kind |= tree_kind::Ctr;
+                        return;  // CTR never produces NaN; bit 15 stays 0
+                    } else {
+                        if (n.dirs & dir_bits::XGBoostCategory) throw std::domain_error("XGBoost categories in an oblique tree");
+                        if (out_.cat_slots.size() >= 0xFFFF) throw std::length_error("too many categorical slots");
+                        const uint16_t j = code_index(dense_[n.feature]);
+                        BinnedCatSlot c{};
+                        c.payload = std::bit_cast<uint64_t>(n.threshold);
+                        c.kind = n.kind;
+                        c.nan_right = right;
+                        c.dense = j;
+                        s.f[0] = s.f[1] = s.f[2] = j;
+                        s.w[0] = s.w[1] = s.w[2] = 0;
+                        s.thr = static_cast<int32_t>(out_.cat_slots.size());  // rewritten to a decision bit
+                        out_.cat_slots.push_back(c);
+                        tree_kind |= tree_kind::Categorical;
+                        return;  // NaN goes right (decision bits are clear), bit 15 unused
+                    }
+                    if (right) s.f[0] = static_cast<uint16_t>(s.f[0] | 0x8000);
+                }
+
+                // Child `i` of the root goes to slot 1 or 2; its children to children[first], [first + 1].
+                void side(ONode& o, int slot, int32_t i, int first) {
+                    if (bt_[i].leaf) {
+                        o.s[slot] = ONodeSlot{{0, 0, 0}, {1, 0, 0}, 0};  // never decides: both children equal
+                        o.children[first] = o.children[first + 1] = bt_[i].leaf_ref;
+                        return;
+                    }
+                    fill(o.s[slot], i);
+                    // Recursion may grow out_.onodes; `o` is a local copy, written back by pack().
+                    o.children[first] = pack(bt_[i].left);
+                    o.children[first + 1] = pack(bt_[i].right);
                 }
         };
 
@@ -288,12 +405,175 @@ namespace lignum {
                     if ((b.cat_slots >> s) & 1) b.thresholds[s] = static_cast<uint16_t>(bit_of[b.thresholds[s]]);
                 }
             }
+            for (ONode& o : f.onodes) {
+                for (ONodeSlot& s : o.s) {
+                    if (s.w[0] == 0 && s.w[1] == 0 && s.w[2] == 0) {
+                        s.thr = static_cast<int32_t>(bit_of[static_cast<uint32_t>(s.thr)]);
+                    }
+                }
+            }
             return true;
         }
 
+        constexpr int kMaxSymDepth = 10;
+
+        bool bslot_to_oslot(const BNode& b, int s, ONodeSlot& out, uint8_t& has_cat) {
+            if (((b.xgb_slots >> s) & 1) || ((b.zero_slots >> s) & 1)) return false;
+            const uint16_t j = b.features[s];
+            if (j >= 0x8000) return false;
+            if ((b.cat_slots >> s) & 1) {
+                out = ONodeSlot{{j, j, j}, {0, 0, 0}, static_cast<int32_t>(b.thresholds[s])};
+                has_cat = 1;
+                return true;
+            }
+            const uint8_t shift = (b.nan_left >> s) & 1;
+            const uint16_t nan_right = static_cast<uint16_t>(shift ^ 1);
+            const int32_t k1 = static_cast<int32_t>(b.thresholds[s]) - static_cast<int32_t>(shift);
+            if (k1 < 0) return false;
+            out = ONodeSlot{{static_cast<uint16_t>(j | (nan_right << 15)), j, j}, {1, 0, 0}, k1 - 32768};
+            return true;
+        }
+
+        struct SymCollector {
+            const Model& model;
+            const BinnedForest& f;
+            std::vector<ONodeSlot> level_slots;
+            std::vector<uint8_t> has_slot;
+            std::vector<double> leaves;
+            int leaf_depth = -1;
+            uint8_t has_cat = 0;
+
+            bool record_slot(int level, const ONodeSlot& sl) {
+                if (level >= kMaxSymDepth) return false;
+                if (static_cast<size_t>(level) >= level_slots.size()) {
+                    level_slots.resize(static_cast<size_t>(level) + 1);
+                    has_slot.resize(static_cast<size_t>(level) + 1, 0);
+                }
+                if (!has_slot[level]) {
+                    level_slots[level] = sl;
+                    has_slot[level] = 1;
+                } else if (std::memcmp(&level_slots[level], &sl, sizeof(ONodeSlot)) != 0) {
+                    return false;
+                }
+                if ((sl.w[0] | sl.w[1] | sl.w[2]) == 0) has_cat = 1;
+                return true;
+            }
+
+            bool emit_leaf(int32_t ref, int level) {
+                if (ref >= 0) return false;
+                if (leaf_depth < 0) leaf_depth = level;
+                else if (leaf_depth != level) return false;
+                leaves.push_back(model.leaf_values[(-ref) - 1]);
+                return true;
+            }
+
+            bool walk_bnode(int32_t node, int sub, int level) {
+                if (node < 0) return emit_leaf(node, level);
+                const BNode& b = f.nodes[node];
+                ONodeSlot sl{};
+                if (!bslot_to_oslot(b, sub, sl, has_cat) || !record_slot(level, sl)) return false;
+
+                if (sub == 0) {
+                    const int32_t* cl = &b.children[0];
+                    if (cl[0] == cl[1] && cl[0] == cl[2] && cl[0] == cl[3]) {
+                        if (!emit_leaf(cl[0], level + 1)) return false;
+                    } else if (!walk_bnode(node, 1, level + 1)) {
+                        return false;
+                    }
+                    const int32_t* cr = &b.children[4];
+                    if (cr[0] == cr[1] && cr[0] == cr[2] && cr[0] == cr[3]) {
+                        return emit_leaf(cr[0], level + 1);
+                    }
+                    return walk_bnode(node, 2, level + 1);
+                }
+                if (sub <= 2) {
+                    const int first = (sub == 1) ? 0 : 4;
+                    if (b.children[first] == b.children[first + 1]) {
+                        if (!emit_leaf(b.children[first], level + 1)) return false;
+                    } else if (!walk_bnode(node, 2 * sub + 1, level + 1)) {
+                        return false;
+                    }
+                    if (b.children[first + 2] == b.children[first + 3]) {
+                        return emit_leaf(b.children[first + 2], level + 1);
+                    }
+                    return walk_bnode(node, 2 * sub + 2, level + 1);
+                }
+                const int first = 2 * (sub - 3);
+                if (b.children[first] < 0) {
+                    if (!emit_leaf(b.children[first], level + 1)) return false;
+                } else if (!walk_bnode(b.children[first], 0, level + 1)) {
+                    return false;
+                }
+                if (b.children[first + 1] < 0) {
+                    return emit_leaf(b.children[first + 1], level + 1);
+                }
+                return walk_bnode(b.children[first + 1], 0, level + 1);
+            }
+
+            bool walk_onode(int32_t node, int sub, int level) {
+                if (node < 0) return emit_leaf(node, level);
+                const ONode& o = f.onodes[node];
+                if (!record_slot(level, o.s[sub])) return false;
+
+                if (sub == 0) {
+                    if (o.children[0] == o.children[1]) {
+                        if (!emit_leaf(o.children[0], level + 1)) return false;
+                    } else if (!walk_onode(node, 1, level + 1)) {
+                        return false;
+                    }
+                    if (o.children[2] == o.children[3]) {
+                        return emit_leaf(o.children[2], level + 1);
+                    }
+                    return walk_onode(node, 2, level + 1);
+                }
+                const int first = (sub == 1) ? 0 : 2;
+                if (o.children[first] < 0) {
+                    if (!emit_leaf(o.children[first], level + 1)) return false;
+                } else if (!walk_onode(o.children[first], 0, level + 1)) {
+                    return false;
+                }
+                if (o.children[first + 1] < 0) {
+                    return emit_leaf(o.children[first + 1], level + 1);
+                }
+                return walk_onode(o.children[first + 1], 0, level + 1);
+            }
+        };
+
     } // namespace
 
+    std::shared_ptr<const SymForest> detect_symmetric_forest(const Model& model, const BinnedForest& f) {
+        if (model.source != model_source::Miter || model.float32 || f.n_trees == 0 || f.row_codes() > 0x8000) {
+            return nullptr;
+        }
+        auto sym = std::make_shared<SymForest>();
+        sym->trees.reserve(f.n_trees);
+        int max_depth = 0;
+        for (size_t t = 0; t < f.n_trees; t++) {
+            SymCollector col{model, f, {}, {}, {}, -1, 0};
+            const bool is_oblique = (f.tree_kind[t] & tree_kind::Oblique) != 0;
+            const bool ok = is_oblique ? col.walk_onode(f.roots[t], 0, 0)
+                                       : col.walk_bnode(f.roots[t], 0, 0);
+            if (!ok || col.leaf_depth < 0 || col.leaf_depth > kMaxSymDepth) return nullptr;
+            if (col.leaves.size() != (size_t{1} << col.leaf_depth)) return nullptr;
+            if (col.level_slots.size() != static_cast<size_t>(col.leaf_depth)) return nullptr;
+
+            SymTree st;
+            st.slot_offset = static_cast<uint32_t>(sym->slots.size());
+            st.leaf_offset = static_cast<uint32_t>(sym->leaves.size());
+            st.depth = static_cast<uint8_t>(col.leaf_depth);
+            st.has_cat = col.has_cat;
+            st.output = model.n_outputs > 1 ? model.tree_outputs[t] : 0;
+            sym->slots.insert(sym->slots.end(), col.level_slots.begin(), col.level_slots.end());
+            sym->leaves.insert(sym->leaves.end(), col.leaves.begin(), col.leaves.end());
+            sym->trees.push_back(st);
+            max_depth = std::max(max_depth, col.leaf_depth);
+        }
+        return max_depth >= 2 ? sym : nullptr;
+    }
+
     std::shared_ptr<const BinnedForest> build_binned(const Model& model) {
+        // miter oblique / CTR trees are always double precision.
+        if ((model.n_oblique > 0 || model.n_ctr_tables > 0) && model.float32) return nullptr;
         Unpacker unpacker(model);
         unpacker.nodes.reserve(model.n_nodes * 3 + model.n_leaves);
         std::vector<int32_t> bt_roots;
@@ -301,8 +581,10 @@ namespace lignum {
         for (size_t t = 0; t < model.n_offsets; t++) bt_roots.push_back(unpacker.from_ref(model.tree_offsets[t]));
         const auto& bt = unpacker.nodes;
 
-        // Dense features with their kind; sorted unique thresholds for numeric ones.
+        // Dense features with their kind; sorted unique thresholds for numeric and CTR ones.
         std::vector<uint16_t> dense(model.n_features, 0xFFFF);
+        std::vector<uint16_t> dense_ctr(model.n_ctr_tables, 0xFFFF);
+        std::vector<uint16_t> q16_map(model.n_features, 0xFFFF);
         std::vector<std::vector<double>> cuts;
         auto forest = std::make_shared<BinnedStorage>();
         forest->nodes.reserve(model.n_nodes);
@@ -311,6 +593,30 @@ namespace lignum {
         std::vector<bool> zero_feature;
         for (const BTNode& n : bt) {
             if (n.leaf) continue;
+            if (n.kind == slot_kind::Oblique) {
+                const ObliqueSplit& o = model.oblique_splits[std::bit_cast<uint64_t>(n.threshold)];
+                for (uint32_t col : o.features) {
+                    if (q16_map[col] == 0xFFFF) {
+                        if (forest->q16_columns.size() >= 0x7FFF) return nullptr;
+                        q16_map[col] = static_cast<uint16_t>(forest->q16_columns.size());
+                        forest->q16_columns.push_back(col);
+                    }
+                }
+                continue;
+            }
+            if (n.kind == slot_kind::Ctr) {
+                uint16_t& slot = dense_ctr[n.feature];
+                if (slot == 0xFFFF) {
+                    if (cuts.size() >= 0xFFFF) return nullptr;
+                    slot = static_cast<uint16_t>(cuts.size());
+                    cuts.emplace_back();
+                    zero_feature.push_back(false);
+                    forest->feature_of.push_back(n.feature);
+                    forest->feature_kind.push_back(feature_kind::Ctr);
+                }
+                cuts[slot].push_back(n.threshold);
+                continue;
+            }
 
             uint8_t kind = feature_kind::Numeric;
             if (n.kind != slot_kind::Numeric) {
@@ -360,15 +666,25 @@ namespace lignum {
             forest->cut_offsets.push_back(static_cast<uint32_t>(forest->cuts.size()));
         }
 
-        Packer packer(bt, *forest, dense, cuts);
+        Packer packer(bt, *forest, dense, dense_ctr, cuts);
+        OPacker opacker(model, bt, *forest, dense, dense_ctr, cuts, q16_map, cuts.size());
         try {
-            for (int32_t root : bt_roots) {
-                packer.tree_kind = 0;
-                forest->roots.push_back(packer.pack(root));
-                forest->tree_kind.push_back(packer.tree_kind);
+            for (size_t t = 0; t < bt_roots.size(); t++) {
+                const bool oblique = model.tree_kinds && (model.tree_kinds[t] & tree_kind::Oblique) != 0;
+                if (oblique) {
+                    opacker.tree_kind = 0;
+                    forest->roots.push_back(opacker.pack(bt_roots[t]));
+                    forest->tree_kind.push_back(opacker.tree_kind);
+                } else {
+                    packer.tree_kind = 0;
+                    forest->roots.push_back(packer.pack(bt_roots[t]));
+                    forest->tree_kind.push_back(packer.tree_kind);
+                }
             }
         } catch (const std::length_error&) {
             return nullptr;  // more categorical slots than a 16-bit index can address
+        } catch (const std::domain_error&) {
+            return nullptr;  // an oblique tree the ONode form does not cover: KNode kernel
         }
         if (!build_decision_tables(model, *forest)) return nullptr;
 
@@ -390,8 +706,14 @@ namespace lignum {
         view->cat_tables = forest->cat_tables.data();
         view->n_table_words = forest->cat_tables.size();
         view->decision_words = forest->decision_words;
+        view->onodes = forest->onodes.data();
+        view->n_onodes = forest->onodes.size();
+        view->q16_columns = forest->q16_columns.data();
+        view->n_q16 = forest->q16_columns.size();
         forest->cat_slots.clear();
         forest->cat_slots.shrink_to_fit();
+        view->has_ctr_features = compute_has_ctr_features(*view);
+        view->sym = detect_symmetric_forest(model, *view);
         view->fits_u8_codes = compute_fits_u8_codes(*view);
         view->owner = forest;
         return view;

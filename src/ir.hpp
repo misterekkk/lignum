@@ -31,6 +31,9 @@ namespace lignum {
         bool categorical = false;           // categorical split on `categories` (see cat_set_goes_right)
         bool cat_set_goes_right = false;    // false: LightGBM (in set -> left); true: XGBoost (in set -> right)
         std::vector<uint32_t> categories;
+        bool oblique = false;               // miter oblique split (feature_id unused; see ObliqueSplit)
+        ObliqueSplit oblique_split;
+        bool ctr = false;                   // miter native CTR split (feature_id is CTR table index)
         std::unique_ptr<TempBinNode> left;
         std::unique_ptr<TempBinNode> right;
     };
@@ -51,6 +54,14 @@ namespace lignum {
         std::vector<std::string> feature_names;  // as stored in the file; may be empty or defaults
         std::string objective;                   // the library's name for it ("binary", "reg:squarederror")
         std::shared_ptr<TrainingCategories> categories;  // pandas categories of training; null when none
+        std::vector<FeatureQuantizer> quantizers;        // miter: per input column (oblique splits)
+        std::vector<uint8_t> quantizer_constant;
+        std::vector<double> quantizer_knots;
+        std::vector<uint32_t> quantizer_knot_offsets;
+        std::vector<CtrTableHeader> ctr_tables;
+        std::vector<uint64_t> ctr_keys;
+        std::vector<uint32_t> ctr_slots;
+        std::vector<float> ctr_values;
     };
 
 } // namespace lignum

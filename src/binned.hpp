@@ -50,6 +50,46 @@ namespace lignum {
     };
     static_assert(sizeof(BNode) == 64, "BNode must fill exactly one cache line");
 
+    // Trees with oblique splits (miter models, tree_kind::Oblique): two tree levels per node, three
+    // slots of one uniform form over the row's 16-bit codes (NaN = 0xFFFF in every code kind):
+    //   any of c[f0], c[f1], c[f2] is NaN ? default (bit 15 of f[0]) : P >= thr,
+    //   P = w0 * (c[f0] - 32768) + w1 * (c[f1] - 32768) + w2 * (c[f2] - 32768)  (int32)
+    // - oblique split: f = Q16 code columns (after the dense features), w = the split's weights;
+    // - axis / CTR:    f = (j, j, j) on dense feature j, w = (1, 0, 0), thr = k + 1 - 32768, where k is
+    //                  the threshold's index among the feature's cuts (x >= cut_k  <=>  bin >= k + 1);
+    // - categorical (only in trees with tree_kind::Categorical; LightGBM semantics): all weights 0,
+    //                  thr = decision bit index, goes right iff the bit is clear (NaN: right).
+    // children[(d0 << 1) | d1] as in KNode (negative = leaf). Slots of leaf children are never
+    // used for routing (both grandchildren are the same leaf).
+    struct ONodeSlot {
+        uint16_t f[3];
+        int16_t w[3];
+        int32_t thr;
+    };
+    static_assert(sizeof(ONodeSlot) == 16, "ONodeSlot is part of the binary format");
+
+    struct alignas(64) ONode {
+        ONodeSlot s[3];
+        int32_t children[4];
+    };
+    static_assert(sizeof(ONode) == 64, "ONode must fill exactly one cache line");
+
+    // Symmetric (oblivious) miter trees recovered at load/build time: every tree has fixed depth d
+    // and one ONodeSlot per level, indexing 2^d leaves branch-free via bit shifts.
+    struct SymTree {
+        uint32_t slot_offset = 0;
+        uint32_t leaf_offset = 0;
+        uint8_t depth = 0;
+        uint8_t has_cat = 0;
+        uint16_t output = 0;
+    };
+
+    struct SymForest {
+        std::vector<SymTree> trees;
+        std::vector<ONodeSlot> slots;
+        std::vector<double> leaves;
+    };
+
     // A categorical split: the set encoding of KNode (slot_kind, 64-bit payload into
     // Model::cat_bitsets) plus its semantics.
     struct BinnedCatSlot {
@@ -66,6 +106,7 @@ namespace lignum {
         constexpr uint8_t Numeric = 0;
         constexpr uint8_t LightGBMCategory = 1;
         constexpr uint8_t XGBoostCategory = 2;
+        constexpr uint8_t Ctr = 3;  // dense feature whose cuts bin CTR lookup floats (`feature_of` = CTR table index)
     } // namespace feature_kind
 
     // Per categorical feature: table[c] = decision bits of category c for every categorical slot
@@ -99,17 +140,37 @@ namespace lignum {
         const uint64_t* cat_tables = nullptr;
         size_t n_table_words = 0;
         uint32_t decision_words = 0;             // 64-bit words of decision bits per row
+        // Oblique trees (miter): their roots index `onodes`; rows carry n_q16 extra codes after the
+        // n_features dense codes: the Q16 code of input column q16_columns[q] (Model::quantizers).
+        const ONode* onodes = nullptr;
+        size_t n_onodes = 0;
+        const uint32_t* q16_columns = nullptr;
+        size_t n_q16 = 0;
+        size_t row_codes() const { return n_features + n_q16; }
+        bool has_ctr_features = false;           // runtime cache: any dense feature has feature_kind::Ctr
         bool fits_u8_codes = false;              // runtime cache: numeric-only with <= 254 cuts per feature
+        std::shared_ptr<const SymForest> sym;    // runtime cache: symmetric miter trees (null otherwise)
         std::shared_ptr<const void> owner;
     };
 
+    inline bool compute_has_ctr_features(const BinnedForest& f) {
+        for (size_t j = 0; j < f.n_features; j++) {
+            if (f.feature_kind[j] == feature_kind::Ctr) return true;
+        }
+        return false;
+    }
+
     inline bool compute_fits_u8_codes(const BinnedForest& f) {
-        if (f.n_cat_features > 0) return false;
+        if (f.n_cat_features > 0 || f.n_onodes > 0 || f.n_q16 > 0 || f.has_ctr_features || f.sym != nullptr) return false;
         for (size_t j = 0; j < f.n_features; j++) {
             if (f.cut_offsets[j + 1] - f.cut_offsets[j] > 254) return false;
         }
         return true;
     }
+
+    // Detects when every tree in a miter model is symmetric (level-wise oblivious) of uniform
+    // depth <= 10 and packs them into a compact branch-free SymForest (or returns nullptr).
+    std::shared_ptr<const SymForest> detect_symmetric_forest(const Model& model, const BinnedForest& f);
 
     // Builds the binned form of a model, or returns nullptr when it does not fit the 16-bit codes
     // (category ids >= kInvalidCat, too many thresholds per feature, more than 65535 categorical
@@ -120,8 +181,8 @@ namespace lignum {
     struct alignas(64) BinnedFileHeader {
         uint64_t n_nodes = 0, n_trees = 0, n_features = 0, n_cuts = 0, n_cat_features = 0, n_table_words = 0;
         uint32_t decision_words = 0;
-        uint32_t reserved = 0;
-        uint64_t reserved2 = 0;
+        uint32_t n_q16 = 0;     // format 0.10 (0 before): Q16 code columns, then their section
+        uint64_t n_onodes = 0;  // format 0.10 (0 before): ONodes, after the other binned sections
     };
     static_assert(sizeof(BinnedFileHeader) == 64, "BinnedFileHeader must stay 64 bytes");
 

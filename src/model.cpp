@@ -64,6 +64,15 @@ namespace lignum {
         }
 
         // Transforms mirror the source library's arithmetic so outputs match exactly.
+        inline double sigmoid_miter(double z) {
+            if (z >= 0.0) {
+                const double ez = std::exp(-z);
+                return 1.0 / (1.0 + ez);
+            }
+            const double ez = std::exp(z);
+            return ez / (1.0 + ez);
+        }
+
         inline double apply_transform(double x, uint8_t transform, double sigmoid) {
             switch (transform) {
                 case transform::Sigmoid:  return 1.0 / (1.0 + std::exp(-sigmoid * x));
@@ -136,6 +145,80 @@ namespace lignum {
             return cmp_dir<(Kind & tree_kind::ZeroMissing) != 0>(x, kn.thresholds[k], kn.dirs[k]);
         }
 
+        // miter Q16 encoder (affine or quantile knots): matches miter::Q16Quantizer::encode_u16 bit-for-bit.
+        LIGNUM_INLINE uint16_t q16_code_affine(double x, const FeatureQuantizer& q, bool constant) {
+            if (std::isnan(x)) return kNanBin;
+            if (constant) return 0;
+            const double v = (x - q.lo) * q.scale;
+            if (v <= 0.0) return 0;
+            if (v >= 65534.0) return 65534;
+            const double rounded = std::floor(v + 0.5);
+            if (rounded <= 0.0) return 0;
+            if (rounded >= 65534.0) return 65534;
+            return static_cast<uint16_t>(rounded);
+        }
+
+        LIGNUM_INLINE uint16_t q16_code_quantile(double x, const double* LIGNUM_RESTRICT knots, uint32_t n_knots) {
+            if (x <= knots[0]) return 0;
+            if (x >= knots[n_knots - 1]) return 65534;
+            const double* it = std::upper_bound(knots, knots + n_knots, x);
+            const size_t idx = static_cast<size_t>(it - knots) - 1;
+            const double denom = knots[idx + 1] - knots[idx];
+            const double raw = denom > 0.0 ? (x - knots[idx]) / denom : 0.0;
+            const double frac = raw < 0.0 ? 0.0 : (raw > 1.0 ? 1.0 : raw);
+            const double m_inv = 65534.0 / static_cast<double>(n_knots - 1);
+            const double pos = (static_cast<double>(idx) + frac) * m_inv;
+            const double rounded = std::floor(pos + 0.5);
+            if (rounded <= 0.0) return 0;
+            if (rounded >= 65534.0) return 65534;
+            return static_cast<uint16_t>(rounded);
+        }
+
+        LIGNUM_INLINE uint16_t q16_code(const FeatureQuantizer* LIGNUM_RESTRICT quant,
+                                        const uint8_t* LIGNUM_RESTRICT quant_constant,
+                                        const double* LIGNUM_RESTRICT knots,
+                                        const uint32_t* LIGNUM_RESTRICT knot_offsets,
+                                        uint32_t col, double x) {
+            if (std::isnan(x)) return kNanBin;
+            if (quant_constant[col]) return 0;
+            if (knot_offsets) {
+                const uint32_t lo = knot_offsets[col];
+                const uint32_t hi = knot_offsets[col + 1];
+                if (hi > lo) return q16_code_quantile(x, knots + lo, hi - lo);
+            }
+            return q16_code_affine(x, quant[col], false);
+        }
+
+        LIGNUM_INLINE uint32_t read_cat_hash(double x) {
+            constexpr uint32_t kMissingCatHash = 0x9e3779b9U;
+            if (std::isnan(x) || x < 0.0 || x >= 4294967296.0) return kMissingCatHash;
+            return static_cast<uint32_t>(x);
+        }
+
+        LIGNUM_INLINE float lookup_ctr(const CtrTableHeader* LIGNUM_RESTRICT tables,
+                                       const uint64_t* LIGNUM_RESTRICT keys,
+                                       const uint32_t* LIGNUM_RESTRICT slots,
+                                       const float* LIGNUM_RESTRICT values,
+                                       uint32_t table_idx, const double* LIGNUM_RESTRICT row) {
+            constexpr uint64_t kCtrHashMagic = 0x4906ba494954cb65ULL;
+            const CtrTableHeader& t = tables[table_idx];
+            if (t.n_slots == 0) return t.default_value;
+            uint64_t h = static_cast<uint64_t>(read_cat_hash(row[t.columns[0]]));
+            for (uint8_t c = 1; c < t.n_cols; c++) {
+                h = kCtrHashMagic * (h + kCtrHashMagic * static_cast<uint64_t>(read_cat_hash(row[t.columns[c]])));
+            }
+            const uint64_t* LIGNUM_RESTRICT tkeys = keys + t.keys_offset;
+            const uint32_t* LIGNUM_RESTRICT tslots = slots + t.slots_offset;
+            const float* LIGNUM_RESTRICT tvals = values + t.values_offset;
+            uint64_t idx = (h ^ (h >> 29U)) & t.mask;
+            for (;;) {
+                const uint32_t entry = tslots[idx];
+                if (entry == 0U) return t.default_value;
+                if (tkeys[idx] == h) return tvals[entry - 1U];
+                idx = (idx + 1U) & t.mask;
+            }
+        }
+
         // Where the branchy traversal is used (measured with bench-lleaves.yml, 300k rows, 500 trees):
         //   LIGNUM_BRANCHY_TAIL (default 1): leftover rows (fewer than four, e.g. a single row);
         //     faster everywhere (one row: -16..-18% on x86-64/aarch64 Linux, -16% on M4).
@@ -185,7 +268,61 @@ namespace lignum {
         struct Forest {
             const KNode* LIGNUM_RESTRICT nodes;
             const uint32_t* LIGNUM_RESTRICT bitsets;
+            const ObliqueSplit* LIGNUM_RESTRICT oblique;     // miter models only
+            const FeatureQuantizer* LIGNUM_RESTRICT quant;
+            const uint8_t* LIGNUM_RESTRICT quant_constant;
+            const double* LIGNUM_RESTRICT quant_knots;
+            const uint32_t* LIGNUM_RESTRICT quant_knot_offsets;
+            const CtrTableHeader* LIGNUM_RESTRICT ctr_tables;
+            const uint64_t* LIGNUM_RESTRICT ctr_keys;
+            const uint32_t* LIGNUM_RESTRICT ctr_slots;
+            const float* LIGNUM_RESTRICT ctr_values;
         };
+
+        // Oblique slot (see ObliqueSplit): any NaN input -> default direction, else P >= threshold.
+        LIGNUM_INLINE int32_t oblique_dir(const KNode& kn, int k, const double* LIGNUM_RESTRICT row, Forest f) {
+            const ObliqueSplit& o = f.oblique[std::bit_cast<uint64_t>(kn.thresholds[k])];
+            const double x0 = row[o.features[0]], x1 = row[o.features[1]], x2 = row[o.features[2]];
+            if (std::isnan(x0) || std::isnan(x1) || std::isnan(x2)) return kn.dirs[k] & dir_bits::DefaultRight;
+            const int32_t c0 = static_cast<int32_t>(q16_code(f.quant, f.quant_constant, f.quant_knots, f.quant_knot_offsets, o.features[0], x0)) - 32768;
+            const int32_t c1 = static_cast<int32_t>(q16_code(f.quant, f.quant_constant, f.quant_knots, f.quant_knot_offsets, o.features[1], x1)) - 32768;
+            const int32_t c2 = static_cast<int32_t>(q16_code(f.quant, f.quant_constant, f.quant_knots, f.quant_knot_offsets, o.features[2], x2)) - 32768;
+            const int32_t p = static_cast<int32_t>(o.weights[0]) * c0 + static_cast<int32_t>(o.weights[1]) * c1 +
+                              static_cast<int32_t>(o.weights[2]) * c2;
+            return static_cast<int32_t>(p >= o.threshold);
+        }
+
+        // Generic extended slot (used only for miter models with oblique splits or CTR tables).
+        LIGNUM_INLINE int32_t extended_slot_dir(const KNode& kn, int k, const double* LIGNUM_RESTRICT row, Forest f) {
+            if (kn.kinds[k] == slot_kind::Oblique) return oblique_dir(kn, k, row, f);
+            if (kn.kinds[k] == slot_kind::Ctr) {
+                const float val = lookup_ctr(f.ctr_tables, f.ctr_keys, f.ctr_slots, f.ctr_values, kn.features[k], row);
+                return static_cast<int32_t>(static_cast<double>(val) >= kn.thresholds[k]);
+            }
+            return slot_dir<tree_kind::ZeroMissing | tree_kind::Categorical>(kn, k, row, f.bitsets);
+        }
+
+        template <bool Branchy>
+        LIGNUM_INLINE int32_t extended_step(const KNode& kn, const double* LIGNUM_RESTRICT row, Forest f) {
+            if constexpr (Branchy) {
+                if (extended_slot_dir(kn, 0, row, f)) return kn.children[2 | extended_slot_dir(kn, 2, row, f)];
+                return kn.children[extended_slot_dir(kn, 1, row, f)];
+            } else {
+                int32_t r = extended_slot_dir(kn, 0, row, f);
+                int32_t l = extended_slot_dir(kn, 1, row, f);
+                int32_t c = extended_slot_dir(kn, 2, row, f);
+                return kn.children[(r << 1) | (r ? c : l)];
+            }
+        }
+
+        template <uint8_t Kind, bool Branchy>
+        LIGNUM_INLINE int32_t step_any(const KNode& kn, const double* LIGNUM_RESTRICT row, Forest f) {
+            if constexpr ((Kind & (tree_kind::Oblique | tree_kind::Ctr)) != 0) {
+                return extended_step<Branchy>(kn, row, f);
+            } else {
+                return step<Kind, Branchy>(kn, row, f.bitsets);
+            }
+        }
 
         // Eight rows walk the same tree interleaved to hide memory latency on numeric trees.
         template <uint8_t Kind>
@@ -197,23 +334,23 @@ namespace lignum {
             constexpr bool B = branchy_rows<Kind>;
             if (root < 0) { n0 = n1 = n2 = n3 = n4 = n5 = n6 = n7 = root; return; }
             const KNode& rn = f.nodes[root];
-            n0 = step<Kind, B>(rn, r0, f.bitsets);
-            n1 = step<Kind, B>(rn, r1, f.bitsets);
-            n2 = step<Kind, B>(rn, r2, f.bitsets);
-            n3 = step<Kind, B>(rn, r3, f.bitsets);
-            n4 = step<Kind, B>(rn, r4, f.bitsets);
-            n5 = step<Kind, B>(rn, r5, f.bitsets);
-            n6 = step<Kind, B>(rn, r6, f.bitsets);
-            n7 = step<Kind, B>(rn, r7, f.bitsets);
+            n0 = step_any<Kind, B>(rn, r0, f);
+            n1 = step_any<Kind, B>(rn, r1, f);
+            n2 = step_any<Kind, B>(rn, r2, f);
+            n3 = step_any<Kind, B>(rn, r3, f);
+            n4 = step_any<Kind, B>(rn, r4, f);
+            n5 = step_any<Kind, B>(rn, r5, f);
+            n6 = step_any<Kind, B>(rn, r6, f);
+            n7 = step_any<Kind, B>(rn, r7, f);
             while ((n0 & n1 & n2 & n3 & n4 & n5 & n6 & n7) >= 0) {
-                if (n0 >= 0) n0 = step<Kind, B>(f.nodes[n0], r0, f.bitsets);
-                if (n1 >= 0) n1 = step<Kind, B>(f.nodes[n1], r1, f.bitsets);
-                if (n2 >= 0) n2 = step<Kind, B>(f.nodes[n2], r2, f.bitsets);
-                if (n3 >= 0) n3 = step<Kind, B>(f.nodes[n3], r3, f.bitsets);
-                if (n4 >= 0) n4 = step<Kind, B>(f.nodes[n4], r4, f.bitsets);
-                if (n5 >= 0) n5 = step<Kind, B>(f.nodes[n5], r5, f.bitsets);
-                if (n6 >= 0) n6 = step<Kind, B>(f.nodes[n6], r6, f.bitsets);
-                if (n7 >= 0) n7 = step<Kind, B>(f.nodes[n7], r7, f.bitsets);
+                if (n0 >= 0) n0 = step_any<Kind, B>(f.nodes[n0], r0, f);
+                if (n1 >= 0) n1 = step_any<Kind, B>(f.nodes[n1], r1, f);
+                if (n2 >= 0) n2 = step_any<Kind, B>(f.nodes[n2], r2, f);
+                if (n3 >= 0) n3 = step_any<Kind, B>(f.nodes[n3], r3, f);
+                if (n4 >= 0) n4 = step_any<Kind, B>(f.nodes[n4], r4, f);
+                if (n5 >= 0) n5 = step_any<Kind, B>(f.nodes[n5], r5, f);
+                if (n6 >= 0) n6 = step_any<Kind, B>(f.nodes[n6], r6, f);
+                if (n7 >= 0) n7 = step_any<Kind, B>(f.nodes[n7], r7, f);
             }
         }
 
@@ -225,15 +362,15 @@ namespace lignum {
             constexpr bool B = branchy_rows<Kind>;
             if (root < 0) { n0 = n1 = n2 = n3 = root; return; }
             const KNode& rn = f.nodes[root];
-            n0 = step<Kind, B>(rn, r0, f.bitsets);
-            n1 = step<Kind, B>(rn, r1, f.bitsets);
-            n2 = step<Kind, B>(rn, r2, f.bitsets);
-            n3 = step<Kind, B>(rn, r3, f.bitsets);
+            n0 = step_any<Kind, B>(rn, r0, f);
+            n1 = step_any<Kind, B>(rn, r1, f);
+            n2 = step_any<Kind, B>(rn, r2, f);
+            n3 = step_any<Kind, B>(rn, r3, f);
             while ((n0 & n1 & n2 & n3) >= 0) {
-                if (n0 >= 0) n0 = step<Kind, B>(f.nodes[n0], r0, f.bitsets);
-                if (n1 >= 0) n1 = step<Kind, B>(f.nodes[n1], r1, f.bitsets);
-                if (n2 >= 0) n2 = step<Kind, B>(f.nodes[n2], r2, f.bitsets);
-                if (n3 >= 0) n3 = step<Kind, B>(f.nodes[n3], r3, f.bitsets);
+                if (n0 >= 0) n0 = step_any<Kind, B>(f.nodes[n0], r0, f);
+                if (n1 >= 0) n1 = step_any<Kind, B>(f.nodes[n1], r1, f);
+                if (n2 >= 0) n2 = step_any<Kind, B>(f.nodes[n2], r2, f);
+                if (n3 >= 0) n3 = step_any<Kind, B>(f.nodes[n3], r3, f);
             }
         }
 
@@ -244,27 +381,35 @@ namespace lignum {
             constexpr bool B = branchy_tail<Kind>;
             n0 = roots[0]; n1 = roots[1]; n2 = roots[2]; n3 = roots[3];
             while ((n0 & n1 & n2 & n3) >= 0) {
-                if (n0 >= 0) n0 = step<Kind, B>(f.nodes[n0], row, f.bitsets);
-                if (n1 >= 0) n1 = step<Kind, B>(f.nodes[n1], row, f.bitsets);
-                if (n2 >= 0) n2 = step<Kind, B>(f.nodes[n2], row, f.bitsets);
-                if (n3 >= 0) n3 = step<Kind, B>(f.nodes[n3], row, f.bitsets);
+                if (n0 >= 0) n0 = step_any<Kind, B>(f.nodes[n0], row, f);
+                if (n1 >= 0) n1 = step_any<Kind, B>(f.nodes[n1], row, f);
+                if (n2 >= 0) n2 = step_any<Kind, B>(f.nodes[n2], row, f);
+                if (n3 >= 0) n3 = step_any<Kind, B>(f.nodes[n3], row, f);
             }
         }
 
         template <uint8_t Kind>
         LIGNUM_INLINE int32_t walk1(Forest f, int32_t node, const double* row) {
             constexpr bool B = branchy_tail<Kind>;
-            while (node >= 0) node = step<Kind, B>(f.nodes[node], row, f.bitsets);
+            while (node >= 0) node = step_any<Kind, B>(f.nodes[node], row, f);
             return node;
         }
 
         // Calls fn(std::integral_constant<uint8_t, kind>) so the traversal is specialised per tree
-        // kind. Models with only numeric trees (Mixed = false) never branch.
-        template <bool Mixed, typename Fn>
+        // kind. Models with only numeric trees (Mixed = false) never branch. Extended = true only
+        // for models with oblique or CTR splits (miter): kept in a separate instantiation so other
+        // models compile identically.
+        template <bool Mixed, bool Extended = false, typename Fn>
         LIGNUM_INLINE void with_kind(uint8_t kind, Fn&& fn) {
             using K0 = std::integral_constant<uint8_t, 0>;
             if constexpr (!Mixed) {
                 fn(K0{});
+            } else if constexpr (Extended) {
+                if ((kind & (tree_kind::Oblique | tree_kind::Ctr)) != 0) {
+                    fn(std::integral_constant<uint8_t, tree_kind::All>{});
+                } else {
+                    with_kind<true, false>(kind, fn);
+                }
             } else {
                 switch (kind & 3) {
                     case 0:  fn(K0{}); break;
@@ -312,6 +457,19 @@ namespace lignum {
             }
         }
 
+        template <typename Acc>
+        void softmax_miter(double* v, size_t K) {
+            double wmax = v[0];
+            for (size_t c = 1; c < K; c++) wmax = std::max(wmax, v[c]);
+            double wsum = 0.0;
+            for (size_t c = 0; c < K; c++) {
+                v[c] = std::exp(v[c] - wmax);
+                wsum += v[c];
+            }
+            const double inv_sum = 1.0 / wsum;
+            for (size_t c = 0; c < K; c++) v[c] *= inv_sum;
+        }
+
         // Output transform of rows [i_begin, i_end); rows hold K = n_outputs values when Multi.
         template <typename Acc, bool Multi>
         void finish_rows(const Model& m, bool raw_score, size_t i_begin, size_t i_end, double* LIGNUM_RESTRICT out) {
@@ -320,8 +478,20 @@ namespace lignum {
 
             const size_t K = Multi ? m.n_outputs : 1;
             if (tr == transform::Softmax) {
+                if constexpr (std::is_same_v<Acc, double>) {
+                    if (m.source == model_source::Miter) {
+                        for (size_t i = i_begin; i < i_end; i++) softmax_miter<Acc>(&out[i * K], K);
+                        return;
+                    }
+                }
                 for (size_t i = i_begin; i < i_end; i++) softmax<Acc>(&out[i * K], K);
                 return;
+            }
+            if constexpr (std::is_same_v<Acc, double>) {
+                if (m.source == model_source::Miter && tr == transform::Sigmoid && m.sigmoid == 1.0) {
+                    for (size_t j = i_begin * K; j < i_end * K; j++) out[j] = sigmoid_miter(out[j]);
+                    return;
+                }
             }
             for (size_t j = i_begin * K; j < i_end * K; j++) {
                 if constexpr (std::is_same_v<Acc, float>) {
@@ -336,7 +506,7 @@ namespace lignum {
         // Only then does the kernel branch per tree; numeric trees always take the plain traversal.
         // `Multi`: the model has several outputs (classes). Row i's outputs live in
         // out[i * K .. i * K + K), and each tree adds to its own output, still in model order.
-        template <typename Acc, bool Mixed, bool Multi>
+        template <typename Acc, bool Mixed, bool Multi, bool Extended = false>
         class Kernel {
             public:
                 Kernel(const Model& model, const double* X, size_t n_features, bool raw_score)
@@ -403,7 +573,11 @@ namespace lignum {
                     }
                 }
 
-                Forest forest() const { return Forest{m_.k_nodes, m_.cat_bitsets}; }
+                Forest forest() const {
+                    return Forest{m_.k_nodes, m_.cat_bitsets, m_.oblique_splits, m_.quantizers,
+                                  m_.quantizer_constant, m_.quantizer_knots, m_.quantizer_knot_offsets,
+                                  m_.ctr_tables, m_.ctr_keys, m_.ctr_slots, m_.ctr_values};
+                }
 
                 const double* row(size_t i) const { return &X_[i * n_features_]; }
 
@@ -451,7 +625,7 @@ namespace lignum {
                         Acc sum3 = static_cast<Acc>(out[i + 3]);
                         for (size_t t = t_begin; t < t_end; t++) {
                             int32_t n0, n1, n2, n3;
-                            with_kind<Mixed>(kind_of(kinds, t, 1), [&](auto K) LIGNUM_LAMBDA_INLINE {
+                            with_kind<Mixed, Extended>(kind_of(kinds, t, 1), [&](auto K) LIGNUM_LAMBDA_INLINE {
                                 walk4<decltype(K)::value>(f, roots[t], r0, r1, r2, r3, n0, n1, n2, n3);
                             });
                             sum0 += static_cast<Acc>(leaf_value(leaf_values, n0));
@@ -472,7 +646,7 @@ namespace lignum {
                         Acc sum = static_cast<Acc>(out[i]);
                         for (size_t t = t_begin; t < trees_unrolled_end; t += 4) {
                             int32_t n0, n1, n2, n3;
-                            with_kind<Mixed>(kind_of(kinds, t, 4), [&](auto K) LIGNUM_LAMBDA_INLINE {
+                            with_kind<Mixed, Extended>(kind_of(kinds, t, 4), [&](auto K) LIGNUM_LAMBDA_INLINE {
                                 walk4_trees<decltype(K)::value>(f, &roots[t], r, n0, n1, n2, n3);
                             });
                             sum += static_cast<Acc>(leaf_value(leaf_values, n0));
@@ -482,7 +656,7 @@ namespace lignum {
                         }
                         for (size_t t = trees_unrolled_end; t < t_end; t++) {
                             int32_t leaf;
-                            with_kind<Mixed>(kind_of(kinds, t, 1), [&](auto K) LIGNUM_LAMBDA_INLINE { leaf = walk1<decltype(K)::value>(f, roots[t], r); });
+                            with_kind<Mixed, Extended>(kind_of(kinds, t, 1), [&](auto K) LIGNUM_LAMBDA_INLINE { leaf = walk1<decltype(K)::value>(f, roots[t], r); });
                             sum += static_cast<Acc>(leaf_value(leaf_values, leaf));
                         }
                         out[i] = static_cast<double>(sum);
@@ -524,7 +698,7 @@ namespace lignum {
                         const double *r0 = row(i), *r1 = row(i + 1), *r2 = row(i + 2), *r3 = row(i + 3);
                         for (size_t t = t_begin; t < t_end; t++) {
                             int32_t n0, n1, n2, n3;
-                            with_kind<Mixed>(kind_of(kinds, t, 1), [&](auto K) LIGNUM_LAMBDA_INLINE {
+                            with_kind<Mixed, Extended>(kind_of(kinds, t, 1), [&](auto K) LIGNUM_LAMBDA_INLINE {
                                 walk4<decltype(K)::value>(f, roots[t], r0, r1, r2, r3, n0, n1, n2, n3);
                             });
                             add(i, t, n0);
@@ -538,7 +712,7 @@ namespace lignum {
                         const double* r = row(i);
                         for (size_t t = t_begin; t < trees_unrolled_end; t += 4) {
                             int32_t n0, n1, n2, n3;
-                            with_kind<Mixed>(kind_of(kinds, t, 4), [&](auto K) LIGNUM_LAMBDA_INLINE {
+                            with_kind<Mixed, Extended>(kind_of(kinds, t, 4), [&](auto K) LIGNUM_LAMBDA_INLINE {
                                 walk4_trees<decltype(K)::value>(f, &roots[t], r, n0, n1, n2, n3);
                             });
                             add(i, t, n0);
@@ -548,7 +722,7 @@ namespace lignum {
                         }
                         for (size_t t = trees_unrolled_end; t < t_end; t++) {
                             int32_t leaf;
-                            with_kind<Mixed>(kind_of(kinds, t, 1), [&](auto K) LIGNUM_LAMBDA_INLINE { leaf = walk1<decltype(K)::value>(f, roots[t], r); });
+                            with_kind<Mixed, Extended>(kind_of(kinds, t, 1), [&](auto K) LIGNUM_LAMBDA_INLINE { leaf = walk1<decltype(K)::value>(f, roots[t], r); });
                             add(i, t, leaf);
                         }
                     }
@@ -609,10 +783,10 @@ namespace lignum {
             return Strategy::Rows;
         }
 
-        template <typename Acc, bool Mixed, bool Multi>
+        template <typename Acc, bool Mixed, bool Multi, bool Extended = false>
         void run(const Model& model, const double* X, size_t n_samples, size_t n_features, double* out,
                  int n_jobs, Strategy strategy, bool raw_score) {
-            const Kernel<Acc, Mixed, Multi> kernel(model, X, n_features, raw_score);
+            const Kernel<Acc, Mixed, Multi, Extended> kernel(model, X, n_features, raw_score);
             const int n_threads = resolve_threads(n_jobs);
             if (strategy == Strategy::Auto) strategy = choose_strategy(n_samples, n_threads);
 
@@ -622,16 +796,18 @@ namespace lignum {
             }
         }
 
-        template <typename Acc, bool Mixed>
+        template <typename Acc, bool Mixed, bool Extended = false>
         void run_outputs(const Model& model, const double* X, size_t n_samples, size_t n_features, double* out,
                          int n_jobs, Strategy strategy, bool raw_score) {
-            if (model.n_outputs > 1) run<Acc, Mixed, true>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
-            else                     run<Acc, Mixed, false>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+            if (model.n_outputs > 1) run<Acc, Mixed, true, Extended>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+            else                     run<Acc, Mixed, false, Extended>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
         }
 
         void run_any(const Model& model, const double* X, size_t n_samples, size_t n_features, double* out,
                      int n_jobs, Strategy strategy, bool raw_score) {
-            if (model.float32) {
+            if (model.n_oblique > 0 || model.n_ctr_tables > 0) {
+                run_outputs<double, true, true>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
+            } else if (model.float32) {
                 if (model.has_special_trees) run_outputs<float, true>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
                 else                        run_outputs<float, false>(model, X, n_samples, n_features, out, n_jobs, strategy, raw_score);
             } else {
@@ -908,32 +1084,202 @@ namespace lignum {
             }
         }
 
+        // Bins all CTR dense features for row-major X[i_begin .. i_begin + count).
+        void bin_ctr_rows(const Model& m, const BinnedForest& f, const double* X, size_t n_features,
+                          size_t i_begin, size_t count, uint16_t* LIGNUM_RESTRICT codes, size_t stride) {
+            for (size_t j = 0; j < f.n_features; j++) {
+                if (f.feature_kind[j] != feature_kind::Ctr) continue;
+                const uint32_t tbl_idx = f.feature_of[j];
+                const uint32_t lo = f.cut_offsets[j];
+                const uint32_t len = f.cut_offsets[j + 1] - lo;
+                const double* cuts = &f.cuts[lo];
+                for (size_t r = 0; r < count; r++) {
+                    const double* row = &X[(i_begin + r) * n_features];
+                    const float val = lookup_ctr(m.ctr_tables, m.ctr_keys, m.ctr_slots, m.ctr_values, tbl_idx, row);
+                    codes[r * stride + j] = bin_of<uint16_t>(cuts, len, static_cast<double>(val));
+                }
+            }
+        }
+
+        // Bins all CTR dense features for columnar input.
+        void bin_ctr_columns(const Model& m, const BinnedForest& f, const ColumnSource& columns,
+                             size_t i_begin, size_t count, uint16_t* LIGNUM_RESTRICT codes, size_t stride) {
+            std::vector<uint32_t> cols;
+            for (size_t j = 0; j < f.n_features; j++) {
+                if (f.feature_kind[j] != feature_kind::Ctr) continue;
+                const CtrTableHeader& t = m.ctr_tables[f.feature_of[j]];
+                for (uint8_t c = 0; c < t.n_cols; c++) cols.push_back(t.columns[c]);
+            }
+            if (cols.empty()) return;
+            std::sort(cols.begin(), cols.end());
+            cols.erase(std::unique(cols.begin(), cols.end()), cols.end());
+
+            thread_local std::vector<double> col_buf;
+            col_buf.resize(cols.size() * count);
+            for (size_t ci = 0; ci < cols.size(); ci++) {
+                columns.read(cols[ci], i_begin, count, &col_buf[ci * count]);
+            }
+            constexpr uint32_t kMissingCatHash = 0x9e3779b9U;
+            constexpr uint64_t kCtrHashMagic = 0x4906ba494954cb65ULL;
+            auto slot_of = [&](uint32_t col) -> size_t {
+                return static_cast<size_t>(std::lower_bound(cols.begin(), cols.end(), col) - cols.begin());
+            };
+            auto hash_at = [&](size_t slot, size_t r) -> uint64_t {
+                const double x = col_buf[slot * count + r];
+                if (std::isnan(x) || x < 0.0 || x >= 4294967296.0) return kMissingCatHash;
+                return static_cast<uint64_t>(static_cast<uint32_t>(x));
+            };
+            for (size_t j = 0; j < f.n_features; j++) {
+                if (f.feature_kind[j] != feature_kind::Ctr) continue;
+                const CtrTableHeader& t = m.ctr_tables[f.feature_of[j]];
+                const uint32_t lo = f.cut_offsets[j];
+                const uint32_t len = f.cut_offsets[j + 1] - lo;
+                const double* cuts = &f.cuts[lo];
+                const size_t s0 = slot_of(t.columns[0]);
+                const size_t s1 = t.n_cols > 1 ? slot_of(t.columns[1]) : 0;
+                const size_t s2 = t.n_cols > 2 ? slot_of(t.columns[2]) : 0;
+                const uint64_t* LIGNUM_RESTRICT tkeys = m.ctr_keys + t.keys_offset;
+                const uint32_t* LIGNUM_RESTRICT tslots = m.ctr_slots + t.slots_offset;
+                const float* LIGNUM_RESTRICT tvals = m.ctr_values + t.values_offset;
+                for (size_t r = 0; r < count; r++) {
+                    float val = t.default_value;
+                    if (t.n_slots > 0) {
+                        uint64_t h = hash_at(s0, r);
+                        if (t.n_cols > 1) h = kCtrHashMagic * (h + kCtrHashMagic * hash_at(s1, r));
+                        if (t.n_cols > 2) h = kCtrHashMagic * (h + kCtrHashMagic * hash_at(s2, r));
+                        uint64_t idx = (h ^ (h >> 29U)) & t.mask;
+                        for (;;) {
+                            const uint32_t entry = tslots[idx];
+                            if (entry == 0U) break;
+                            if (tkeys[idx] == h) { val = tvals[entry - 1U]; break; }
+                            idx = (idx + 1U) & t.mask;
+                        }
+                    }
+                    codes[r * stride + j] = bin_of<uint16_t>(cuts, len, static_cast<double>(val));
+                }
+            }
+        }
+
         // Columnar input: each feature column of the chunk is read once into a small contiguous
         // buffer and binned in one loop, then categorical decision bits are copied per row.
-        template <typename CodeT>
-        void bin_columns_into(const BinnedForest& f, const ColumnSource& columns, size_t i_begin, size_t i_end,
+        template <typename CodeT, bool Extended = false>
+        void bin_columns_into(const Model& m, const BinnedForest& f, const ColumnSource& columns, size_t i_begin, size_t i_end,
                               CodeT* LIGNUM_RESTRICT codes, uint64_t* LIGNUM_RESTRICT decisions) {
-            const size_t nd = f.n_features, nw = f.decision_words, count = i_end - i_begin;
+            const size_t stride = Extended ? f.row_codes() : f.n_features;
+            const size_t nw = f.decision_words, count = i_end - i_begin;
             thread_local std::vector<double> values;
             values.resize(count);
-            for (size_t j = 0; j < nd; j++) {
-                columns.read(f.feature_of[j], i_begin, count, values.data());
+            if constexpr (Extended && sizeof(CodeT) == 2) {
+                for (size_t q = 0; q < f.n_q16; q++) {
+                    const uint32_t col = f.q16_columns[q];
+                    columns.read(col, i_begin, count, values.data());
+                    for (size_t i = 0; i < count; i++) {
+                        codes[i * stride + f.n_features + q] = q16_code(
+                            m.quantizers, m.quantizer_constant, m.quantizer_knots, m.quantizer_knot_offsets, col, values[i]);
+                    }
+                }
+            }
+            for (size_t j = 0; j < f.n_features; j++) {
                 const uint8_t kind = f.feature_kind[j];
+                if (kind == feature_kind::Ctr) continue;
+                columns.read(f.feature_of[j], i_begin, count, values.data());
                 if (kind == feature_kind::Numeric) {
                     const uint32_t lo = f.cut_offsets[j];
                     bin_feature_strided<CodeT>(&f.cuts[lo], f.cut_offsets[j + 1] - lo,
-                                               values.data(), 1, count, codes + j, nd);
+                                               values.data(), 1, count, codes + j, stride);
                 } else if constexpr (sizeof(CodeT) == 2) {
                     const bool xgboost = kind == feature_kind::XGBoostCategory;
-                    for (size_t i = 0; i < count; i++) codes[i * nd + j] = category_code(values[i], xgboost);
+                    for (size_t i = 0; i < count; i++) codes[i * stride + j] = category_code(values[i], xgboost);
                 }
             }
             if constexpr (sizeof(CodeT) == 2) {
+                if (f.has_ctr_features) bin_ctr_columns(m, f, columns, i_begin, count, codes, stride);
                 if (f.n_cat_features > 0) {
-                    for (size_t i = 0; i < count; i++) copy_decisions(f, &codes[i * nd], &decisions[i * nw]);
+                    for (size_t i = 0; i < count; i++) copy_decisions(f, &codes[i * stride], &decisions[i * nw]);
                 }
             } else {
-                (void)nw; (void)decisions;
+                (void)nw; (void)decisions; (void)m;
+            }
+        }
+
+        // Shared row-major / columnar Phase 1 binning for BinnedKernel / ObliqueBinnedKernel / SymBinnedKernel.
+        template <typename CodeT, bool Extended>
+        void bin_rows_into(const Model& m, const BinnedForest& f, const ColumnSource* columns, const double* X,
+                           size_t n_features, size_t i_begin, size_t i_end, CodeT* LIGNUM_RESTRICT codes,
+                           uint64_t* LIGNUM_RESTRICT decisions) {
+            const size_t count = i_end - i_begin;
+            const size_t stride = Extended ? f.row_codes() : f.n_features;
+            const size_t nw = f.decision_words;
+            if (columns) {
+                bin_columns_into<CodeT, Extended>(m, f, *columns, i_begin, i_end, codes, decisions);
+                return;
+            }
+            if (count >= 16) {
+                const double* base_X = &X[i_begin * n_features];
+                if constexpr (Extended && sizeof(CodeT) == 2) {
+                    for (size_t q = 0; q < f.n_q16; q++) {
+                        const uint32_t col = f.q16_columns[q];
+                        for (size_t r = 0; r < count; r++) {
+                            codes[r * stride + f.n_features + q] = q16_code(
+                                m.quantizers, m.quantizer_constant, m.quantizer_knots, m.quantizer_knot_offsets,
+                                col, base_X[r * n_features + col]);
+                        }
+                    }
+                }
+                for (size_t j = 0; j < f.n_features; j++) {
+                    const uint8_t kind = f.feature_kind[j];
+                    if (kind == feature_kind::Ctr) continue;
+                    const uint32_t col = f.feature_of[j];
+                    if (kind == feature_kind::Numeric) {
+                        const uint32_t lo = f.cut_offsets[j];
+                        bin_feature_strided<CodeT>(&f.cuts[lo], f.cut_offsets[j + 1] - lo,
+                                                   base_X + col, n_features, count, codes + j, stride);
+                    } else if constexpr (sizeof(CodeT) == 2) {
+                        const bool xgboost = kind == feature_kind::XGBoostCategory;
+                        for (size_t r = 0; r < count; r++) {
+                            codes[r * stride + j] = category_code(base_X[r * n_features + col], xgboost);
+                        }
+                    }
+                }
+                if constexpr (sizeof(CodeT) == 2) {
+                    if (f.has_ctr_features) bin_ctr_rows(m, f, X, n_features, i_begin, count, codes, stride);
+                    if (f.n_cat_features > 0) {
+                        for (size_t r = 0; r < count; r++) {
+                            copy_decisions(f, &codes[r * stride], &decisions[r * nw]);
+                        }
+                    }
+                }
+                return;
+            }
+            for (size_t i = i_begin; i < i_end; i++) {
+                const double* row = &X[i * n_features];
+                CodeT* rc = &codes[(i - i_begin) * stride];
+                if constexpr (Extended && sizeof(CodeT) == 2) {
+                    for (size_t q = 0; q < f.n_q16; q++) {
+                        const uint32_t col = f.q16_columns[q];
+                        rc[f.n_features + q] = q16_code(
+                            m.quantizers, m.quantizer_constant, m.quantizer_knots, m.quantizer_knot_offsets, col, row[col]);
+                    }
+                }
+                for (size_t j = 0; j < f.n_features; j++) {
+                    const uint8_t kind = f.feature_kind[j];
+                    if (kind == feature_kind::Ctr) continue;
+                    const double x = row[f.feature_of[j]];
+                    if (kind == feature_kind::Numeric) {
+                        const uint32_t lo = f.cut_offsets[j];
+                        rc[j] = bin_of<CodeT>(&f.cuts[lo], f.cut_offsets[j + 1] - lo, x);
+                    } else if constexpr (sizeof(CodeT) == 2) {
+                        rc[j] = category_code(x, kind == feature_kind::XGBoostCategory);
+                    }
+                }
+                if constexpr (sizeof(CodeT) == 2) {
+                    if (f.n_cat_features > 0) {
+                        copy_decisions(f, rc, &decisions[(i - i_begin) * nw]);
+                    }
+                }
+            }
+            if constexpr (sizeof(CodeT) == 2) {
+                if (f.has_ctr_features) bin_ctr_rows(m, f, X, n_features, i_begin, count, codes, stride);
             }
         }
 
@@ -977,23 +1323,24 @@ namespace lignum {
 
                 void predict_rows(size_t i_begin, size_t i_end, double* LIGNUM_RESTRICT out) const {
                     const size_t count = i_end - i_begin;
-                    const size_t nd = f_.n_features;
+                    const size_t stride = f_.row_codes();
                     const size_t nw = f_.decision_words;
                     thread_local std::vector<uint16_t> buffer;
                     thread_local std::vector<uint64_t> decision_buffer;
-                    buffer.resize(count * nd);
+                    buffer.resize(count * stride);
                     decision_buffer.resize(count * nw);
                     uint16_t* codes = buffer.data();
                     uint64_t* decisions = decision_buffer.data();
                     if (columns_) {
-                        bin_columns_into<uint16_t>(f_, *columns_, i_begin, i_end, codes, decisions);
+                        bin_columns_into<uint16_t, true>(m_, f_, *columns_, i_begin, i_end, codes, decisions);
                     } else {
-                        // Compiled trees come with their own binning of the numeric features.
+                        // Compiled trees come with their own binning of numeric and Q16 features.
                         compiled_.bin(&X_[i_begin * n_features_], n_features_, count, codes);
+                        if (f_.has_ctr_features) bin_ctr_rows(m_, f_, X_, n_features_, i_begin, count, codes, stride);
                         if (f_.n_cat_features > 0) {
                             for (size_t r = 0; r < count; r++) {
                                 const double* row = &X_[(i_begin + r) * n_features_];
-                                uint16_t* rc = &codes[r * nd];
+                                uint16_t* rc = &codes[r * stride];
                                 for (size_t k = 0; k < f_.n_cat_features; k++) {
                                     const uint32_t j = f_.cat_features[k].dense;
                                     rc[j] = category_code(row[f_.feature_of[j]], f_.feature_kind[j] == feature_kind::XGBoostCategory);
@@ -1048,54 +1395,7 @@ namespace lignum {
                     decision_buffer.resize(count * nw);
                     CodeT* codes = buffer.data();
                     uint64_t* decisions = decision_buffer.data();
-                    if (columns_) {
-                        bin_columns_into<CodeT>(f_, *columns_, i_begin, i_end, codes, decisions);
-                    } else if (count >= 16) {
-                        // Feature-outer binning with fixed-step unrolled binary search: keeps each
-                        // feature's cuts hot in L1D across the whole block.
-                        const double* base_X = &X_[i_begin * n_features_];
-                        for (size_t j = 0; j < nd; j++) {
-                            const uint32_t col = f_.feature_of[j];
-                            const uint8_t kind = f_.feature_kind[j];
-                            if (kind == feature_kind::Numeric) {
-                                const uint32_t lo = f_.cut_offsets[j];
-                                bin_feature_strided<CodeT>(&f_.cuts[lo], f_.cut_offsets[j + 1] - lo,
-                                                           base_X + col, n_features_, count, codes + j, nd);
-                            } else if constexpr (sizeof(CodeT) == 2) {
-                                const bool xgboost = kind == feature_kind::XGBoostCategory;
-                                for (size_t r = 0; r < count; r++) {
-                                    codes[r * nd + j] = category_code(base_X[r * n_features_ + col], xgboost);
-                                }
-                            }
-                        }
-                        if constexpr (sizeof(CodeT) == 2) {
-                            if (f_.n_cat_features > 0) {
-                                for (size_t r = 0; r < count; r++) {
-                                    copy_decisions(f_, &codes[r * nd], &decisions[r * nw]);
-                                }
-                            }
-                        }
-                    } else {
-                        for (size_t i = i_begin; i < i_end; i++) {
-                            const double* row = &X_[i * n_features_];
-                            CodeT* rc = &codes[(i - i_begin) * nd];
-                            for (size_t j = 0; j < nd; j++) {
-                                const double x = row[f_.feature_of[j]];
-                                const uint8_t kind = f_.feature_kind[j];
-                                if (kind == feature_kind::Numeric) {
-                                    const uint32_t lo = f_.cut_offsets[j];
-                                    rc[j] = bin_of<CodeT>(&f_.cuts[lo], f_.cut_offsets[j + 1] - lo, x);
-                                } else if constexpr (sizeof(CodeT) == 2) {
-                                    rc[j] = category_code(x, kind == feature_kind::XGBoostCategory);
-                                }
-                            }
-                            if constexpr (sizeof(CodeT) == 2) {
-                                if (f_.n_cat_features > 0) {
-                                    copy_decisions(f_, rc, &decisions[(i - i_begin) * nw]);
-                                }
-                            }
-                        }
-                    }
+                    bin_rows_into<CodeT, false>(m_, f_, columns_, X_, n_features_, i_begin, i_end, codes, decisions);
 
                     const bool argmax = !raw_score_ && m_.transform == transform::Argmax;
                     double* LIGNUM_RESTRICT dst = nullptr;
@@ -1265,6 +1565,294 @@ namespace lignum {
                 }
         };
 
+        // ---- ONode walk (trees with oblique splits; see ONode in src/binned.hpp) ----
+        template <bool Cat>
+        LIGNUM_INLINE int32_t odir(const ONodeSlot& s, const BinnedRow<uint16_t>& r) {
+            if constexpr (Cat) {
+                if ((s.w[0] | s.w[1] | s.w[2]) == 0) {
+                    const uint32_t bit = static_cast<uint32_t>(s.thr);
+                    return static_cast<int32_t>(((r.decisions[bit >> 6] >> (bit & 63)) & 1) == 0);
+                }
+            }
+            const uint16_t c0 = r.codes[s.f[0] & 0x7FFF], c1 = r.codes[s.f[1]], c2 = r.codes[s.f[2]];
+            const bool nan = (c0 == kNanBin) | (c1 == kNanBin) | (c2 == kNanBin);
+            const int32_t p = static_cast<int32_t>(s.w[0]) * (static_cast<int32_t>(c0) - 32768) +
+                              static_cast<int32_t>(s.w[1]) * (static_cast<int32_t>(c1) - 32768) +
+                              static_cast<int32_t>(s.w[2]) * (static_cast<int32_t>(c2) - 32768);
+            return nan ? static_cast<int32_t>(s.f[0] >> 15) : static_cast<int32_t>(p >= s.thr);
+        }
+
+        template <bool Cat>
+        LIGNUM_INLINE int32_t ostep(const ONode& o, const BinnedRow<uint16_t>& r) {
+            // All three slots speculatively (no dependency between the two levels), as in KNode.
+            const int32_t d0 = odir<Cat>(o.s[0], r);
+            const int32_t l = odir<Cat>(o.s[1], r);
+            const int32_t c = odir<Cat>(o.s[2], r);
+            return o.children[(d0 << 1) | (d0 ? c : l)];
+        }
+
+        template <bool Cat>
+        LIGNUM_INLINE void owalk4(const ONode* LIGNUM_RESTRICT nodes, int32_t root, const BinnedRow<uint16_t>* r,
+                                  int32_t& n0, int32_t& n1, int32_t& n2, int32_t& n3) {
+            n0 = n1 = n2 = n3 = root;
+            while ((n0 & n1 & n2 & n3) >= 0) {
+                if (n0 >= 0) n0 = ostep<Cat>(nodes[n0], r[0]);
+                if (n1 >= 0) n1 = ostep<Cat>(nodes[n1], r[1]);
+                if (n2 >= 0) n2 = ostep<Cat>(nodes[n2], r[2]);
+                if (n3 >= 0) n3 = ostep<Cat>(nodes[n3], r[3]);
+            }
+        }
+
+        template <bool Cat>
+        LIGNUM_INLINE void owalk4_trees(const ONode* LIGNUM_RESTRICT nodes, const int32_t* roots, const BinnedRow<uint16_t>& r,
+                                        int32_t& n0, int32_t& n1, int32_t& n2, int32_t& n3) {
+            n0 = roots[0]; n1 = roots[1]; n2 = roots[2]; n3 = roots[3];
+            while ((n0 & n1 & n2 & n3) >= 0) {
+                if (n0 >= 0) n0 = ostep<Cat>(nodes[n0], r);
+                if (n1 >= 0) n1 = ostep<Cat>(nodes[n1], r);
+                if (n2 >= 0) n2 = ostep<Cat>(nodes[n2], r);
+                if (n3 >= 0) n3 = ostep<Cat>(nodes[n3], r);
+            }
+        }
+
+        template <bool Cat>
+        LIGNUM_INLINE int32_t owalk1(const ONode* LIGNUM_RESTRICT nodes, int32_t node, const BinnedRow<uint16_t>& r) {
+            while (node >= 0) node = ostep<Cat>(nodes[node], r);
+            return node;
+        }
+
+        // Binned kernel for models with ONode trees (miter): isolated from BinnedKernel so
+        // non-oblique models keep their exact codegen and cache footprint.
+        template <bool Multi>
+        class ObliqueBinnedKernel {
+            public:
+                ObliqueBinnedKernel(const Model& model, const BinnedForest& forest, const double* X,
+                                    size_t n_features, bool raw_score, const ColumnSource* columns = nullptr)
+                    : m_(model), f_(forest), columns_(columns), X_(X), n_features_(n_features), raw_score_(raw_score) {}
+
+                void predict_rows(size_t i_begin, size_t i_end, double* LIGNUM_RESTRICT out) const {
+                    const size_t count = i_end - i_begin;
+                    const size_t stride = f_.row_codes();
+                    const size_t nw = f_.decision_words;
+                    thread_local std::vector<uint16_t> buffer;
+                    thread_local std::vector<uint64_t> decision_buffer;
+                    buffer.resize(count * stride);
+                    decision_buffer.resize(count * nw);
+                    uint16_t* codes = buffer.data();
+                    uint64_t* decisions = decision_buffer.data();
+                    bin_rows_into<uint16_t, true>(m_, f_, columns_, X_, n_features_, i_begin, i_end, codes, decisions);
+
+                    const bool argmax = !raw_score_ && m_.transform == transform::Argmax;
+                    double* LIGNUM_RESTRICT dst = nullptr;
+                    if constexpr (Multi) {
+                        if (argmax) {
+                            thread_local std::vector<double> block_margins;
+                            block_margins.resize(count * m_.n_outputs);
+                            dst = prepare_block_dst<double, true>(m_, i_begin, count, true, out, block_margins.data());
+                        } else {
+                            dst = prepare_block_dst<double, true>(m_, i_begin, count, false, out, nullptr);
+                        }
+                    } else {
+                        dst = prepare_block_dst<double, false>(m_, i_begin, count, argmax, out, nullptr);
+                    }
+                    for (size_t t_start = 0; t_start < f_.n_trees; t_start += T_BLOCK) {
+                        accumulate(codes, stride, decisions, nw, count, t_start, std::min(t_start + T_BLOCK, f_.n_trees), dst);
+                    }
+                    finish_block_dst<double, Multi>(m_, i_begin, count, raw_score_, argmax, dst, out);
+                }
+
+            private:
+                const Model& m_;
+                const BinnedForest& f_;
+                const ColumnSource* columns_;
+                const double* X_;
+                size_t n_features_;
+                bool raw_score_;
+
+                LIGNUM_INLINE void add(double* LIGNUM_RESTRICT dst, size_t r, size_t t, int32_t node) const {
+                    const size_t slot = Multi ? r * m_.n_outputs + m_.tree_outputs[t] : r;
+                    dst[slot] += leaf_value(m_.leaf_values, node);
+                }
+
+                void accumulate(const uint16_t* LIGNUM_RESTRICT codes, size_t stride, const uint64_t* LIGNUM_RESTRICT decisions,
+                                size_t nw, size_t count, size_t t_begin, size_t t_end, double* LIGNUM_RESTRICT dst) const {
+                    static constexpr uint64_t kZeroDecision = 0;
+                    const BNode* LIGNUM_RESTRICT nodes = f_.nodes;
+                    const ONode* LIGNUM_RESTRICT onodes = f_.onodes;
+                    const int32_t* LIGNUM_RESTRICT roots = f_.roots;
+                    const uint8_t* LIGNUM_RESTRICT kinds = f_.tree_kind;
+                    const double* LIGNUM_RESTRICT leaf_values = m_.leaf_values;
+                    auto row = [&](size_t r) LIGNUM_LAMBDA_INLINE {
+                        return BinnedRow<uint16_t>{&codes[r * stride], nw > 0 ? &decisions[r * nw] : &kZeroDecision, f_.zero_bin};
+                    };
+                    auto walk4 = [&](size_t t, const BinnedRow<uint16_t>* r, int32_t& n0, int32_t& n1, int32_t& n2, int32_t& n3) LIGNUM_LAMBDA_INLINE {
+                        const uint8_t k = kinds[t];
+                        if ((k & tree_kind::Oblique) != 0) {
+                            if ((k & tree_kind::Categorical) != 0) owalk4<true>(onodes, roots[t], r, n0, n1, n2, n3);
+                            else                                   owalk4<false>(onodes, roots[t], r, n0, n1, n2, n3);
+                        } else {
+                            with_kind<true>(k, [&](auto K) LIGNUM_LAMBDA_INLINE { bwalk4<decltype(K)::value>(nodes, roots[t], r, n0, n1, n2, n3); });
+                        }
+                    };
+                    auto walk1 = [&](size_t t, const BinnedRow<uint16_t>& r) LIGNUM_LAMBDA_INLINE {
+                        const uint8_t k = kinds[t];
+                        int32_t leaf;
+                        if ((k & tree_kind::Oblique) != 0) {
+                            leaf = (k & tree_kind::Categorical) != 0 ? owalk1<true>(onodes, roots[t], r) : owalk1<false>(onodes, roots[t], r);
+                        } else {
+                            with_kind<true>(k, [&](auto K) LIGNUM_LAMBDA_INLINE { leaf = bwalk1<decltype(K)::value>(nodes, roots[t], r); });
+                        }
+                        return leaf;
+                    };
+                    const size_t unrolled_end = (count / 4) * 4;
+                    for (size_t i = 0; i < unrolled_end; i += 4) {
+                        const BinnedRow<uint16_t> r[4] = {row(i), row(i + 1), row(i + 2), row(i + 3)};
+                        if constexpr (Multi) {
+                            for (size_t t = t_begin; t < t_end; t++) {
+                                int32_t n0, n1, n2, n3;
+                                walk4(t, r, n0, n1, n2, n3);
+                                add(dst, i, t, n0); add(dst, i + 1, t, n1); add(dst, i + 2, t, n2); add(dst, i + 3, t, n3);
+                            }
+                        } else {
+                            double sum0 = dst[i], sum1 = dst[i + 1], sum2 = dst[i + 2], sum3 = dst[i + 3];
+                            for (size_t t = t_begin; t < t_end; t++) {
+                                int32_t n0, n1, n2, n3;
+                                walk4(t, r, n0, n1, n2, n3);
+                                sum0 += leaf_value(leaf_values, n0);
+                                sum1 += leaf_value(leaf_values, n1);
+                                sum2 += leaf_value(leaf_values, n2);
+                                sum3 += leaf_value(leaf_values, n3);
+                            }
+                            dst[i] = sum0; dst[i + 1] = sum1; dst[i + 2] = sum2; dst[i + 3] = sum3;
+                        }
+                    }
+                    const size_t trees_unrolled_end = t_begin + ((t_end - t_begin) / 4) * 4;
+                    for (size_t i = unrolled_end; i < count; i++) {
+                        const BinnedRow<uint16_t> r = row(i);
+                        for (size_t t = t_begin; t < trees_unrolled_end; t += 4) {
+                            const uint8_t all = static_cast<uint8_t>(kinds[t] & kinds[t + 1] & kinds[t + 2] & kinds[t + 3]);
+                            const uint8_t any = static_cast<uint8_t>(kinds[t] | kinds[t + 1] | kinds[t + 2] | kinds[t + 3]);
+                            if ((all & tree_kind::Oblique) != 0) {
+                                int32_t n0, n1, n2, n3;
+                                if ((any & tree_kind::Categorical) != 0) owalk4_trees<true>(onodes, &roots[t], r, n0, n1, n2, n3);
+                                else                                     owalk4_trees<false>(onodes, &roots[t], r, n0, n1, n2, n3);
+                                add(dst, i, t, n0); add(dst, i, t + 1, n1); add(dst, i, t + 2, n2); add(dst, i, t + 3, n3);
+                            } else {
+                                for (size_t u = t; u < t + 4; u++) add(dst, i, u, walk1(u, r));
+                            }
+                        }
+                        for (size_t t = trees_unrolled_end; t < t_end; t++) add(dst, i, t, walk1(t, r));
+                    }
+                }
+        };
+
+        // Branch-free symmetric (oblivious) miter kernel: one ONodeSlot condition per tree level
+        // builds the leaf index directly without chasing ONode/BNode child pointers.
+        template <bool Multi>
+        class SymBinnedKernel {
+            public:
+                SymBinnedKernel(const Model& model, const BinnedForest& forest, const double* X,
+                                size_t n_features, bool raw_score, const ColumnSource* columns = nullptr)
+                    : m_(model), f_(forest), sym_(*forest.sym), columns_(columns), X_(X),
+                      n_features_(n_features), raw_score_(raw_score) {}
+
+                void predict_rows(size_t i_begin, size_t i_end, double* LIGNUM_RESTRICT out) const {
+                    const size_t count = i_end - i_begin;
+                    const size_t stride = f_.row_codes();
+                    const size_t nw = f_.decision_words;
+                    thread_local std::vector<uint16_t> buffer;
+                    thread_local std::vector<uint64_t> decision_buffer;
+                    buffer.resize(count * stride);
+                    decision_buffer.resize(count * nw);
+                    uint16_t* codes = buffer.data();
+                    uint64_t* decisions = decision_buffer.data();
+                    bin_rows_into<uint16_t, true>(m_, f_, columns_, X_, n_features_, i_begin, i_end, codes, decisions);
+
+                    const bool argmax = !raw_score_ && m_.transform == transform::Argmax;
+                    double* LIGNUM_RESTRICT dst = nullptr;
+                    if constexpr (Multi) {
+                        if (argmax) {
+                            thread_local std::vector<double> block_margins;
+                            block_margins.resize(count * m_.n_outputs);
+                            dst = prepare_block_dst<double, true>(m_, i_begin, count, true, out, block_margins.data());
+                        } else {
+                            dst = prepare_block_dst<double, true>(m_, i_begin, count, false, out, nullptr);
+                        }
+                    } else {
+                        dst = prepare_block_dst<double, false>(m_, i_begin, count, argmax, out, nullptr);
+                    }
+                    for (size_t t_start = 0; t_start < sym_.trees.size(); t_start += T_BLOCK) {
+                        accumulate(codes, stride, decisions, nw, count, t_start, std::min(t_start + T_BLOCK, sym_.trees.size()), dst);
+                    }
+                    finish_block_dst<double, Multi>(m_, i_begin, count, raw_score_, argmax, dst, out);
+                }
+
+            private:
+                const Model& m_;
+                const BinnedForest& f_;
+                const SymForest& sym_;
+                const ColumnSource* columns_;
+                const double* X_;
+                size_t n_features_;
+                bool raw_score_;
+
+                void accumulate(const uint16_t* LIGNUM_RESTRICT codes, size_t stride, const uint64_t* LIGNUM_RESTRICT decisions,
+                                size_t nw, size_t count, size_t t_begin, size_t t_end, double* LIGNUM_RESTRICT dst) const {
+                    static constexpr uint64_t kZeroDecision = 0;
+                    const SymTree* LIGNUM_RESTRICT trees = sym_.trees.data();
+                    const ONodeSlot* LIGNUM_RESTRICT slots = sym_.slots.data();
+                    const double* LIGNUM_RESTRICT leaves = sym_.leaves.data();
+                    const size_t K = Multi ? m_.n_outputs : 1;
+                    auto row = [&](size_t r) LIGNUM_LAMBDA_INLINE {
+                        return BinnedRow<uint16_t>{&codes[r * stride], nw > 0 ? &decisions[r * nw] : &kZeroDecision, f_.zero_bin};
+                    };
+
+                    const size_t unrolled_end = (count / 4) * 4;
+                    for (size_t i = 0; i < unrolled_end; i += 4) {
+                        const BinnedRow<uint16_t> r0 = row(i), r1 = row(i + 1), r2 = row(i + 2), r3 = row(i + 3);
+                        for (size_t t = t_begin; t < t_end; t++) {
+                            const SymTree& st = trees[t];
+                            const ONodeSlot* LIGNUM_RESTRICT ts = slots + st.slot_offset;
+                            const double* LIGNUM_RESTRICT tl = leaves + st.leaf_offset;
+                            auto step4 = [&](auto cat_tag) LIGNUM_LAMBDA_INLINE {
+                                constexpr bool Cat = decltype(cat_tag)::value;
+                                uint32_t idx0 = 0, idx1 = 0, idx2 = 0, idx3 = 0;
+                                for (uint32_t lv = 0; lv < st.depth; lv++) {
+                                    const ONodeSlot& sl = ts[lv];
+                                    idx0 = (idx0 << 1) | static_cast<uint32_t>(odir<Cat>(sl, r0));
+                                    idx1 = (idx1 << 1) | static_cast<uint32_t>(odir<Cat>(sl, r1));
+                                    idx2 = (idx2 << 1) | static_cast<uint32_t>(odir<Cat>(sl, r2));
+                                    idx3 = (idx3 << 1) | static_cast<uint32_t>(odir<Cat>(sl, r3));
+                                }
+                                const size_t out_col = Multi ? st.output : 0;
+                                dst[i * K + out_col]       += tl[idx0];
+                                dst[(i + 1) * K + out_col] += tl[idx1];
+                                dst[(i + 2) * K + out_col] += tl[idx2];
+                                dst[(i + 3) * K + out_col] += tl[idx3];
+                            };
+                            if (st.has_cat) step4(std::true_type{});
+                            else            step4(std::false_type{});
+                        }
+                    }
+                    for (size_t i = unrolled_end; i < count; i++) {
+                        const BinnedRow<uint16_t> r = row(i);
+                        for (size_t t = t_begin; t < t_end; t++) {
+                            const SymTree& st = trees[t];
+                            const ONodeSlot* LIGNUM_RESTRICT ts = slots + st.slot_offset;
+                            const double* LIGNUM_RESTRICT tl = leaves + st.leaf_offset;
+                            uint32_t idx = 0;
+                            if (st.has_cat) {
+                                for (uint32_t lv = 0; lv < st.depth; lv++) idx = (idx << 1) | static_cast<uint32_t>(odir<true>(ts[lv], r));
+                            } else {
+                                for (uint32_t lv = 0; lv < st.depth; lv++) idx = (idx << 1) | static_cast<uint32_t>(odir<false>(ts[lv], r));
+                            }
+                            const size_t out_col = Multi ? st.output : 0;
+                            dst[i * K + out_col] += tl[idx];
+                        }
+                    }
+                }
+        };
+
         template <typename Acc, bool Mixed, bool Multi>
         void run_binned(const Model& model, const double* X, size_t n_samples, size_t n_features, double* out,
                         int n_jobs, Strategy strategy, bool raw_score, const ColumnSource* columns) {
@@ -1276,13 +1864,25 @@ namespace lignum {
             const BinnedForest& f = *model.binned;
             if (compiled) {
                 const CompiledKernel<Acc, Multi> kernel(model, f, *compiled, X, n_features, raw_score, columns);
-                const size_t per_row = f.n_features * sizeof(uint16_t) + f.decision_words * sizeof(uint64_t) + model.n_outputs * sizeof(double);
+                const size_t per_row = f.row_codes() * sizeof(uint16_t) + f.decision_words * sizeof(uint64_t) + model.n_outputs * sizeof(double);
                 const size_t rows = std::clamp<size_t>(kCompiledChunkBytes / per_row / 4 * 4, N_BLOCK, 1 << 16);
                 if (strategy != Strategy::Serial) {
                     run_rows(kernel, n_samples, out, n_threads, rows);
                     return;
                 }
                 for (size_t i = 0; i < n_samples; i += rows) kernel.predict_rows(i, std::min(i + rows, n_samples), out);
+                return;
+            }
+            if (f.sym) {
+                const SymBinnedKernel<Multi> kernel(model, f, X, n_features, raw_score, columns);
+                if (strategy == Strategy::Serial) run_serial(kernel, n_samples, out);
+                else                              run_rows(kernel, n_samples, out, n_threads);
+                return;
+            }
+            if (f.n_onodes > 0) {
+                const ObliqueBinnedKernel<Multi> kernel(model, f, X, n_features, raw_score, columns);
+                if (strategy == Strategy::Serial) run_serial(kernel, n_samples, out);
+                else                              run_rows(kernel, n_samples, out, n_threads);
                 return;
             }
             auto exec = [&](auto code_tag) {

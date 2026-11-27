@@ -39,6 +39,28 @@ category is below 64, `[first, last - first]` when the set is contiguous, otherw
 `[offset, words]` into `Model::cat_bitsets` (word 0 is always zero, so branch-free lookups of
 non-bitset slots read a valid address).
 
+## miter models and in-memory building (include/lignum/build.hpp, src/build.cpp)
+
+`build_model(const ir::Forest&)` builds a model without a file: flat trees (children after their
+parent, checked), lignum's split semantics, validated like a `.bin` file (`validate_model`). The
+miter training library uses it directly (supports binary, regression, and multiclass):
+
+- axis splits on miter's 16-bit codes (`u >= t`) arrive as plain numeric thresholds `x >= x_t`, so
+  they use the regular numeric path;
+- categorical splits arrive as category sets on miter's codes (`LightGBM` semantics);
+- **oblique splits** (`slot_kind::Oblique`): the slot's 64 bits index `Model::oblique_splits`
+  (`ObliqueSplit`: `k = 2` or `3` columns, `int16` weights `|w| <= 2^14`, `int32` threshold). Each
+  input is quantized with `FeatureQuantizer` (affine Q16 or piecewise-linear `quantizer_knots`),
+  `P = sum w_q * (code_q - 32768)` in int32, right iff any input is NaN ? default : `P >= thr`.
+- **native CTR splits** (`slot_kind::Ctr`): `features[slot]` indexes `Model::ctr_tables`
+  (open-addressed hash tables keyed by `combine_cat_hash` of 1-3 categorical hash columns passed as
+  doubles, missing/invalid hash mapped to `0x9e3779b9`), right iff `float(val) >= float(thr)`.
+- **Binned / ONodes / Symmetric miter**: trees with oblique splits pack into 64-byte `ONode`s (two
+  levels, three uniform 16-bit-code slots). If every tree in a `model_source::Miter` forest is
+  level-wise symmetric (`depth <= 10`, `max_depth >= 2`), `detect_symmetric_forest` packs them into
+  a `SymForest` evaluated branch-free level-by-level (including oblique, axis, categorical, and CTR
+  splits, plus multiclass). All paths have matching compiled C codegen (`src/compiled.cpp`).
+
 ## Kernel (src/model.cpp)
 
 - `Kernel<Acc, ZeroMissing>` predicts a block of rows: trees in tiles of `T_BLOCK` so a tile of
@@ -116,7 +138,7 @@ sums in double and divides by `float(sum)`; LightGBM's softmax is all double.
 Verified bit-exact by `tests/python/test_parity.py` on inputs with NaNs, zeros, values in the zero
 band and values placed exactly on every split threshold.
 
-## Binary format (version 0.9; 0.8 is read too)
+## Binary format (version 0.10; 0.8 and 0.9 are read too)
 
 64-byte header (`magic "LIGNUM"`, version, transform, flags {float32, special trees}, sigmoid,
 n_features, n_outputs, n_cat_words, section sizes), then a 64-byte `InfoHeader` (the lignum version
@@ -124,9 +146,11 @@ that wrote the file, taken by CMake from `python/lignum/__init__.py`; the source
 the feature names, which follow as length-prefixed UTF-8 strings, of the objective's name, which
 follows them, and (0.9) of the categories of training, which follow it; 0.8 had padding there, so
 it reads as no categories), then 64-byte aligned sections: nodes, tree offsets,
-leaves, tree kinds, base scores, tree outputs (multiclass only), categorical bitsets and, when the
-`Binned` flag is set, a `BinnedFileHeader` followed by the binned kernel's sections (nodes, roots,
-tree kinds, dense features, cuts, zero bins, categorical decision tables).
+leaves, tree kinds, base scores, tree outputs (multiclass only), categorical bitsets, the format
+0.10 `ExtensionHeader` (per-tree leaf width reserved for vector leaves, oblique splits, quantizers,
+optional quantile knots, and optional native CTR hash tables) and, when the `Binned` flag is set, a
+`BinnedFileHeader` followed by the binned kernel's sections (nodes, roots, tree kinds, dense
+features, cuts, zero bins, categorical decision tables, and in 0.10 Q16 columns + ONodes).
 Feature names are only checked against named inputs (`check_feature_names`: pandas in Python,
 Arrow schemas in `predict_arrow`); the kernels read columns by position.
 Loading validates the version and the file size, maps the file read-only and then checks every

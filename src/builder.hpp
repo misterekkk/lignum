@@ -13,6 +13,9 @@ namespace lignum {
     class Builder {
         public:
             static Model load_model(const std::string& filepath, ModelSource source);
+            // Packs a parsed forest; `source` is a model_source value.
+            static Model build(std::vector<std::unique_ptr<TempBinNode>>& temp_forest, ModelInfo& info,
+                               uint8_t source, uint32_t min_features = 0);
 
         private:
             struct BuildStats {
@@ -24,6 +27,8 @@ namespace lignum {
             static int32_t process_leaf(TempBinNode* node, VectorData& data);
             static void fill_slot(KNode& kn, int slot, const TempBinNode* split, VectorData& data, BuildStats& stats);
             static void fill_categorical(KNode& kn, int slot, const TempBinNode* split, VectorData& data);
+            static void fill_oblique(KNode& kn, int slot, const TempBinNode* split, VectorData& data, BuildStats& stats);
+            static void fill_ctr(KNode& kn, int slot, const TempBinNode* split, BuildStats& stats);
             static int32_t build_knode(TempBinNode* node, VectorData& data, BuildStats& stats);
     };
 

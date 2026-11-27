@@ -296,6 +296,7 @@ NB_MODULE(_core, m) {
                 case model_source::LightGBM: return "lightgbm";
                 case model_source::XGBoost: return "xgboost";
                 case model_source::CatBoost: return "catboost";
+                case model_source::Miter: return "miter";
                 default: return "";
             }
         }, "Library the model was trained with.")

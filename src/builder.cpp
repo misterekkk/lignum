@@ -12,7 +12,6 @@
 namespace lignum {
 
     Model Builder::load_model(const std::string& filepath, ModelSource source) {
-        auto data = std::make_shared<VectorData>();
         ModelInfo info;
 
         std::vector<std::unique_ptr<TempBinNode>> temp_forest;
@@ -22,7 +21,13 @@ namespace lignum {
             case ModelSource::XGBoostJson:   temp_forest = parsers::load_xgboost_json(filepath, info); break;
             case ModelSource::XGBoostUbjson: temp_forest = parsers::load_xgboost_ubj(filepath, info); break;
         }
+        const bool lightgbm = source == ModelSource::LightGBMJson || source == ModelSource::LightGBMText;
+        return build(temp_forest, info, lightgbm ? model_source::LightGBM : model_source::XGBoost);
+    }
 
+    Model Builder::build(std::vector<std::unique_ptr<TempBinNode>>& temp_forest, ModelInfo& info,
+                         uint8_t source, uint32_t min_features) {
+        auto data = std::make_shared<VectorData>();
         BuildStats stats;
         data->cat_bitsets.assign(1, 0);  // word 0 is a zero target for branch-free lookups
         for (const auto& root : temp_forest) {
@@ -46,7 +51,7 @@ namespace lignum {
         model.transform = info.transform;
         model.float32 = info.precision == Precision::Float32;
         model.has_special_trees = stats.any_special;
-        model.n_features = static_cast<uint32_t>(stats.max_feature + 1);
+        model.n_features = std::max<uint32_t>(min_features, static_cast<uint32_t>(stats.max_feature + 1));
         model.n_nodes = data->k_nodes.size();
         model.k_nodes = data->k_nodes.data();
         model.n_offsets = data->tree_offsets.size();
@@ -57,7 +62,49 @@ namespace lignum {
         model.n_cat_words = data->cat_bitsets.size();
         model.cat_bitsets = data->cat_bitsets.data();
         model.data = data;
-        model.source = (source == ModelSource::LightGBMJson || source == ModelSource::LightGBMText) ? model_source::LightGBM : model_source::XGBoost;
+        model.source = source;
+        if (!info.ctr_tables.empty()) {
+            data->ctr_tables = std::move(info.ctr_tables);
+            data->ctr_keys = std::move(info.ctr_keys);
+            data->ctr_slots = std::move(info.ctr_slots);
+            data->ctr_values = std::move(info.ctr_values);
+            for (const CtrTableHeader& t : data->ctr_tables) {
+                for (uint8_t c = 0; c < t.n_cols; c++) {
+                    model.n_features = std::max<uint32_t>(model.n_features, t.columns[c] + 1);
+                }
+            }
+            model.ctr_tables = data->ctr_tables.data();
+            model.n_ctr_tables = data->ctr_tables.size();
+            model.ctr_keys = data->ctr_keys.empty() ? nullptr : data->ctr_keys.data();
+            model.n_ctr_keys = data->ctr_keys.size();
+            model.ctr_slots = data->ctr_slots.empty() ? nullptr : data->ctr_slots.data();
+            model.n_ctr_slots = data->ctr_slots.size();
+            model.ctr_values = data->ctr_values.empty() ? nullptr : data->ctr_values.data();
+            model.n_ctr_values = data->ctr_values.size();
+        }
+        if (!data->oblique_splits.empty()) {
+            if (info.quantizers.size() < model.n_features || info.quantizer_constant.size() != info.quantizers.size()) {
+                throw std::runtime_error("Oblique splits need a quantizer for every input column.");
+            }
+            data->quantizers = std::move(info.quantizers);
+            data->quantizer_constant = std::move(info.quantizer_constant);
+            model.n_features = std::max<uint32_t>(model.n_features, static_cast<uint32_t>(data->quantizers.size()));
+            model.oblique_splits = data->oblique_splits.data();
+            model.n_oblique = data->oblique_splits.size();
+            model.quantizers = data->quantizers.data();
+            model.quantizer_constant = data->quantizer_constant.data();
+            model.n_quantizers = data->quantizers.size();
+            if (!info.quantizer_knots.empty()) {
+                if (info.quantizer_knot_offsets.size() != data->quantizers.size() + 1) {
+                    throw std::runtime_error("Quantile knot offsets must have n_quantizers + 1 entries.");
+                }
+                data->quantizer_knots = std::move(info.quantizer_knots);
+                data->quantizer_knot_offsets = std::move(info.quantizer_knot_offsets);
+                model.quantizer_knots = data->quantizer_knots.data();
+                model.n_quantizer_knots = data->quantizer_knots.size();
+                model.quantizer_knot_offsets = data->quantizer_knot_offsets.data();
+            }
+        }
         model.feature_names = model_feature_names(std::move(info.feature_names), model.n_features, model.source);
         model.objective = std::move(info.objective);
         if (info.categories) {
@@ -87,8 +134,16 @@ namespace lignum {
     }
 
     void Builder::fill_slot(KNode& kn, int slot, const TempBinNode* split, VectorData& data, BuildStats& stats) {
-        if (split->feature_id < 0 || split->feature_id > 65535) {
+        if (!split->oblique && (split->feature_id < 0 || split->feature_id > 65535)) {
             throw std::out_of_range("Features are stored as uint16_t.");
+        }
+        if (split->oblique) {
+            fill_oblique(kn, slot, split, data, stats);
+            return;
+        }
+        if (split->ctr) {
+            fill_ctr(kn, slot, split, stats);
+            return;
         }
         kn.features[slot] = static_cast<uint16_t>(split->feature_id);
         kn.dirs[slot] = static_cast<uint8_t>((split->default_dir ? dir_bits::DefaultRight : 0) |
@@ -103,6 +158,32 @@ namespace lignum {
         }
         stats.max_feature = std::max(stats.max_feature, split->feature_id);
         if (split->zero_is_missing) stats.tree_kind |= tree_kind::ZeroMissing;
+    }
+
+    // An oblique slot keeps the index of its ObliqueSplit in the 64 bits of thresholds[slot];
+    // `features[slot]` is 0 (never read for this slot kind).
+    void Builder::fill_oblique(KNode& kn, int slot, const TempBinNode* split, VectorData& data, BuildStats& stats) {
+        const ObliqueSplit& o = split->oblique_split;
+        if (o.k < 2 || o.k > 3) throw std::invalid_argument("Oblique splits have 2 or 3 inputs.");
+        kn.features[slot] = 0;
+        kn.dirs[slot] = static_cast<uint8_t>(split->default_dir ? dir_bits::DefaultRight : 0);
+        kn.kinds[slot] = slot_kind::Oblique;
+        kn.thresholds[slot] = std::bit_cast<double>(static_cast<uint64_t>(data.oblique_splits.size()));
+        data.oblique_splits.push_back(o);
+        for (uint32_t f : o.features) {
+            if (f > 0x7FFFFFFFu) throw std::out_of_range("Oblique input column out of range.");
+            stats.max_feature = std::max(stats.max_feature, static_cast<int32_t>(f));
+        }
+        stats.tree_kind |= tree_kind::Oblique;
+    }
+
+    // A CTR slot keeps the CTR table index in `features[slot]` and the float threshold widened to double.
+    void Builder::fill_ctr(KNode& kn, int slot, const TempBinNode* split, BuildStats& stats) {
+        kn.features[slot] = static_cast<uint16_t>(split->feature_id);
+        kn.dirs[slot] = 0;
+        kn.kinds[slot] = slot_kind::Ctr;
+        kn.thresholds[slot] = static_cast<double>(static_cast<float>(split->threshold_or_value));
+        stats.tree_kind |= tree_kind::Ctr;
     }
 
     // Picks the cheapest exact encoding of a category set: a 64-bit mask when every category

@@ -34,6 +34,7 @@ endif()
 add_library(lignum STATIC
     src/arrow.cpp
     src/binned.cpp
+    src/build.cpp
     src/builder.cpp
     src/categories.cpp
     src/catboost.cpp

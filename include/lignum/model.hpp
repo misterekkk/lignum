@@ -35,6 +35,7 @@ namespace lignum {
         constexpr uint8_t LightGBM = 1;
         constexpr uint8_t XGBoost = 2;
         constexpr uint8_t CatBoost = 3;
+        constexpr uint8_t Miter = 4;
     } // namespace model_source
 
     // How predict() spreads work across threads. All strategies return identical results.
@@ -57,6 +58,9 @@ namespace lignum {
         constexpr uint8_t Numeric = 0;
         constexpr uint8_t ZeroMissing = 1 << 0;  // has splits with dir_bits::ZeroIsMissing
         constexpr uint8_t Categorical = 1 << 1;  // has categorical splits (see slot_kind)
+        constexpr uint8_t Oblique = 1 << 2;      // has oblique splits (miter; see ObliqueSplit)
+        constexpr uint8_t Ctr = 1 << 3;          // has native CTR splits (miter; see CtrTableHeader)
+        constexpr uint8_t All = ZeroMissing | Categorical | Oblique | Ctr;
     } // namespace tree_kind
 
     // Kind of each KNode slot. A categorical slot stores its category set in the 64 bits of
@@ -69,7 +73,51 @@ namespace lignum {
         constexpr uint8_t CatMask = 1;    // bits: categories 0..63 (bit c set = c in the set)
         constexpr uint8_t CatRange = 2;   // low 32 bits: first category, high 32 bits: last - first
         constexpr uint8_t CatBitset = 3;  // low 32 bits: offset into Model::cat_bitsets, high 32 bits: words
+        constexpr uint8_t Oblique = 4;    // 64 bits: index into Model::oblique_splits; `features` is unused
+        constexpr uint8_t Ctr = 5;        // `features` is table index in Model::ctr_tables; right iff val >= float(threshold)
     } // namespace slot_kind
+
+    // Per-input-column quantizer of miter models (Q16 affine or quantile):
+    //   NaN -> 65535; constant -> 0;
+    //   quantile (when quantizer_knot_offsets gives non-empty knots): piecewise linear over intervals;
+    //   affine: v = (x - lo) * scale clamped to [0, 65534], rounded via floor(v + 0.5)
+    // (bit-identical to miter's Q16Quantizer::encode_u16; needs -ffp-contract=off).
+    struct alignas(16) FeatureQuantizer {
+        double lo = 0.0;
+        double scale = 0.0;
+    };
+    static_assert(sizeof(FeatureQuantizer) == 16, "FeatureQuantizer is part of the binary format");
+
+    // An oblique split of a miter model (k = 2 or 3 inputs; for k = 2, features[2] repeats
+    // features[0] with weight 0): with c_q = code(x_{features[q]}) - 32768,
+    //   P = w0 * c0 + w1 * c1 + w2 * c2   (int32; |w| <= 2^14 so no overflow),
+    // go right iff (any of the inputs is NaN) ? default direction : P >= threshold.
+    // The default direction is KNode::dirs & DefaultRight of the slot.
+    struct ObliqueSplit {
+        uint32_t features[3] = {0, 0, 0};  // input columns (each has a quantizer)
+        int16_t weights[3] = {0, 0, 0};
+        uint8_t k = 0;
+        uint8_t reserved = 0;
+        int32_t threshold = 0;
+    };
+    static_assert(sizeof(ObliqueSplit) == 24, "ObliqueSplit is part of the binary format");
+
+    // Native online ordered CTR open-addressed hash table (miter):
+    // input columns[0..n_cols-1] hold 32-bit cat hashes stored as doubles; keys are combined via
+    // combine_cat_hash and looked up with linear probing on Model::ctr_keys/ctr_slots/ctr_values.
+    struct alignas(8) CtrTableHeader {
+        uint32_t columns[3] = {0, 0, 0};
+        uint8_t n_cols = 0;               // 1..3
+        uint8_t padding[3] = {0, 0, 0};
+        float default_value = 0.0f;
+        uint32_t mask = 0;                // n_slots - 1 when n_slots > 0
+        uint32_t n_slots = 0;             // 0 (empty table) or power of 2 >= 2
+        uint32_t n_values = 0;
+        uint64_t keys_offset = 0;         // offset into Model::ctr_keys (n_slots entries)
+        uint64_t slots_offset = 0;        // offset into Model::ctr_slots (n_slots entries)
+        uint64_t values_offset = 0;       // offset into Model::ctr_values (n_values entries)
+    };
+    static_assert(sizeof(CtrTableHeader) == 56, "CtrTableHeader is part of the binary format");
 
     // Two levels of a binary tree in one cache line. Slot 0 is the root split, slots 1 and 2
     // its left and right children; children[0..3] are the four grandchildren (negative = leaf).
@@ -122,6 +170,15 @@ namespace lignum {
             std::vector<double> leaf_values;
             std::vector<double> base_scores;
             std::vector<uint32_t> cat_bitsets;
+            std::vector<ObliqueSplit> oblique_splits;
+            std::vector<FeatureQuantizer> quantizers;
+            std::vector<uint8_t> quantizer_constant;
+            std::vector<double> quantizer_knots;
+            std::vector<uint32_t> quantizer_knot_offsets;
+            std::vector<CtrTableHeader> ctr_tables;
+            std::vector<uint64_t> ctr_keys;
+            std::vector<uint32_t> ctr_slots;
+            std::vector<float> ctr_values;
     };
 
     class Model {
@@ -139,6 +196,25 @@ namespace lignum {
 
             const uint32_t* cat_bitsets = nullptr;  // category sets too large for one slot
             size_t n_cat_words = 0;
+
+            // miter models: oblique splits, per-column Q16 quantizers (affine or quantile knots),
+            // and native ordered CTR hash tables.
+            const ObliqueSplit* oblique_splits = nullptr;
+            size_t n_oblique = 0;
+            const FeatureQuantizer* quantizers = nullptr;
+            const uint8_t* quantizer_constant = nullptr;  // 1: constant column, code 0
+            size_t n_quantizers = 0;
+            const double* quantizer_knots = nullptr;      // concatenated quantile knot arrays
+            size_t n_quantizer_knots = 0;
+            const uint32_t* quantizer_knot_offsets = nullptr;  // n_quantizers + 1 entries when n_quantizer_knots > 0
+            const CtrTableHeader* ctr_tables = nullptr;
+            size_t n_ctr_tables = 0;
+            const uint64_t* ctr_keys = nullptr;
+            size_t n_ctr_keys = 0;
+            const uint32_t* ctr_slots = nullptr;
+            size_t n_ctr_slots = 0;
+            const float* ctr_values = nullptr;
+            size_t n_ctr_values = 0;
 
             const double* base_scores = nullptr;  // n_outputs entries, margin space
             uint32_t n_outputs = 1;                // classes for multiclass models, otherwise 1
