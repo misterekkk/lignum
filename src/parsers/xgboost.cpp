@@ -4,6 +4,7 @@
 #include <lignum/model.hpp>
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -20,6 +21,7 @@ namespace lignum {
             // XGBoost goes left iff float(x) < t (t is a float32). Returns the smallest double
             // `thr` such that float(x) >= t  <=>  x >= thr, so the kernel can compare doubles.
             double xgboost_threshold(double condition) {
+                if (std::isnan(condition)) throw std::runtime_error("Malformed XGBoost tree: NaN threshold.");
                 const float t = static_cast<float>(condition);
                 double below = static_cast<double>(std::nextafter(t, -INFINITY));
                 if (std::isinf(below)) {
@@ -102,7 +104,11 @@ namespace lignum {
                     return node;
                 }
 
-                node->feature_id = static_cast<int32_t>(t.split_index.at(node_id));
+                const int64_t fid = t.split_index.at(node_id);
+                if (fid < 0 || fid > 65535) {
+                    throw std::runtime_error("Malformed XGBoost tree: split feature out of range.");
+                }
+                node->feature_id = static_cast<int32_t>(fid);
                 node->default_dir = t.default_left.at(node_id) ? 0 : 1;
                 if (node_id < t.split_type.size() && t.split_type[node_id] == 1) {
                     // XGBoost: float(x) is the category; categories in the set go RIGHT, invalid
@@ -127,25 +133,30 @@ namespace lignum {
             int read_int_param(simdjson::dom::element params, const char* key, int fallback) {
                 auto elem = params[key];
                 if (elem.error() != simdjson::SUCCESS) return fallback;
-                return std::stoi(std::string(elem.get_string().value()));
+                const std::string_view s = elem.get_string().value();
+                int v = 0;
+                const auto r = std::from_chars(s.data(), s.data() + s.size(), v);
+                if (r.ec != std::errc() || r.ptr != s.data() + s.size()) {
+                    throw std::runtime_error("Invalid integer parameter '" + std::string(key) + "'.");
+                }
+                return v;
             }
 
             // base_score is "[v]" or, for multi-output models, "[v0,v1,...]".
             std::vector<float> read_base_scores(simdjson::dom::element params) {
                 auto elem = params["base_score"];
                 if (elem.error() != simdjson::SUCCESS) return {0.5f};
-                std::string text(elem.get_string().value());
-                std::replace(text.begin(), text.end(), '[', ' ');
-                std::replace(text.begin(), text.end(), ']', ' ');
-                std::replace(text.begin(), text.end(), ',', ' ');
+                const std::string_view text = elem.get_string().value();
                 std::vector<float> values;
                 size_t pos = 0;
+                auto is_sep = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '[' || c == ']' || c == ','; };
                 while (pos < text.size()) {
-                    size_t used = 0;
-                    const auto start = text.find_first_not_of(' ', pos);
-                    if (start == std::string::npos) break;
-                    values.push_back(std::stof(text.substr(start), &used));
-                    pos = start + used;
+                    while (pos < text.size() && is_sep(text[pos])) pos++;
+                    if (pos >= text.size()) break;
+                    size_t end = pos;
+                    while (end < text.size() && !is_sep(text[end])) end++;
+                    values.push_back(static_cast<float>(parse_double(text.substr(pos, end - pos))));
+                    pos = end;
                 }
                 if (values.empty()) throw std::runtime_error("Invalid base_score.");
                 return values;
@@ -166,9 +177,10 @@ namespace lignum {
         } // namespace
 
         std::vector<std::unique_ptr<TempBinNode>> load_xgboost_json(const std::string& filepath, ModelInfo& info) {
+            const simdjson::padded_string padded(read_file(filepath));
             simdjson::dom::parser parser;
             try {
-                return load_document(parser.load(filepath), info);
+                return load_document(parser.parse(padded), info);
             } catch (const simdjson::simdjson_error& e) {
                 // A missing or mistyped field: name the library, not only simdjson's error code.
                 throw std::runtime_error("Malformed XGBoost model file " + filepath + ": " + e.what());

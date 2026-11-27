@@ -32,6 +32,9 @@ namespace lignum {
 
             // A numeric split in the IR's terms (shared by the JSON and the text format).
             void numeric_split(TempBinNode& node, double raw_threshold, bool default_left, Missing missing) {
+                if (std::isnan(raw_threshold)) {
+                    throw std::runtime_error("Malformed LightGBM model file: NaN threshold.");
+                }
                 const double threshold = lightgbm_threshold(raw_threshold);
                 const int32_t natural_zero_dir = 0.0 >= threshold;
                 const int32_t default_dir = default_left ? 0 : 1;
@@ -95,7 +98,11 @@ namespace lignum {
                     return node;
                 }
 
-                node->feature_id = static_cast<int32_t>(obj["split_feature"].get_int64());
+                const int64_t fid = obj["split_feature"].get_int64();
+                if (fid < 0 || fid > 65535) {
+                    throw std::runtime_error("Malformed LightGBM model file: split_feature out of range.");
+                }
+                node->feature_id = static_cast<int32_t>(fid);
 
                 std::string_view decision_type = "<=";
                 auto dec_type_elem = obj["decision_type"];
@@ -112,13 +119,21 @@ namespace lignum {
                     node->right = parse_lgbm_node(obj["right_child"].get_object());
                     return node;
                 }
+                if (decision_type != "<=") {
+                    throw std::runtime_error("Unsupported LightGBM decision_type '" + std::string(decision_type) + "'.");
+                }
 
                 std::string_view missing_type = "NaN";
                 auto missing_elem = obj["missing_type"];
                 if (missing_elem.error() == simdjson::SUCCESS) {
                     missing_type = missing_elem.get_string().value();
                 }
-                const Missing missing = missing_type == "None" ? Missing::None : missing_type == "Zero" ? Missing::Zero : Missing::NaN;
+                Missing missing = Missing::NaN;
+                if (missing_type == "None") missing = Missing::None;
+                else if (missing_type == "Zero") missing = Missing::Zero;
+                else if (missing_type != "NaN") {
+                    throw std::runtime_error("Unsupported LightGBM missing_type '" + std::string(missing_type) + "'.");
+                }
                 numeric_split(*node, obj["threshold"].get_double(), obj["default_left"].get_bool(), missing);
 
                 node->left = parse_lgbm_node(obj["left_child"].get_object());
@@ -130,7 +145,7 @@ namespace lignum {
             double objective_number(const std::vector<std::string_view>& tokens, std::string_view key, double fallback) {
                 for (std::string_view t : tokens) {
                     if (t.size() > key.size() && t.substr(0, key.size()) == key && t[key.size()] == ':') {
-                        return std::stod(std::string(t.substr(key.size() + 1)));
+                        return parse_double(t.substr(key.size() + 1));
                     }
                 }
                 return fallback;
@@ -252,9 +267,10 @@ namespace lignum {
         }
 
         std::vector<std::unique_ptr<TempBinNode>> load_lightgbm_json(const std::string& filepath, ModelInfo& info) {
+            const simdjson::padded_string padded(read_file(filepath));
             simdjson::dom::parser parser;
             try {
-                return load_json_document(parser.load(filepath), info);
+                return load_json_document(parser.parse(padded), info);
             } catch (const simdjson::simdjson_error& e) {
                 // A missing or mistyped field: name the library, not only simdjson's error code.
                 throw std::runtime_error("Malformed LightGBM model file " + filepath + ": " + e.what());

@@ -365,3 +365,17 @@ def test_cbm_matches_json_and_loads_fast(tmp_path):
     assert from_cbm.categorical_features == from_json.categorical_features
     with pytest.raises(ValueError, match="CatBoost JSON / .cbm"):
         lignum.load(path, format="lightgbm")
+
+
+def test_unused_trailing_string_column_in_pandas_and_arrow(tmp_path):
+    # W10: CatBoost DataFrame with an extra trailing string column beyond n_features must not fail.
+    pa = pytest.importorskip("pyarrow")
+    rng = np.random.default_rng(19)
+    df, signal = make_frame(rng, n=200, n_float=2, cards=(3,))
+    m, path, _ = train(cb.CatBoostClassifier, df, (signal > 0.5).astype(int), tmp_path, "cbm", iterations=10, depth=3)
+    model = lignum.load(path)
+    with_trailing = df.iloc[:25].copy()
+    with_trailing["extra_id"] = [f"row_{i}" for i in range(len(with_trailing))]
+    expected = m.predict_proba(df.iloc[:25])[:, 1]
+    np.testing.assert_array_equal(model.predict(with_trailing), expected)
+    np.testing.assert_array_equal(model.predict(pa.Table.from_pandas(with_trailing, preserve_index=False)), expected)

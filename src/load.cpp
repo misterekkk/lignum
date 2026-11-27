@@ -3,6 +3,7 @@
 #include "io.hpp"
 #include "binned.hpp"
 #include "catboost.hpp"
+#include "paths.hpp"
 #include "parsers/parsers.hpp"
 
 #include <fstream>
@@ -23,7 +24,7 @@ namespace lignum {
         // (XGBoost .ubj: '{' followed by a length marker or an optimized-container header);
         // LightGBM's text format ("tree" on the first line).
         FileKind sniff(const std::string& filepath) {
-            std::ifstream file(filepath, std::ios::binary);
+            std::ifstream file(utf8_path(filepath), std::ios::binary);
             if (!file) throw std::invalid_argument("Cannot open model file: " + filepath);
             std::string head(4096, '\0');
             file.read(head.data(), static_cast<std::streamsize>(head.size()));
@@ -43,6 +44,9 @@ namespace lignum {
                     if (head.compare(j, 6, "\"name\"") == 0 || head.find("\"average_output\"") != std::string::npos ||
                         head.find("\"tree_info\"") != std::string::npos) {
                         return FileKind::LightGBMJson;
+                    }
+                    if (head.find("\"oblivious_trees\"") != std::string::npos || head.find("\"model_info\"") != std::string::npos) {
+                        return FileKind::CatBoostJson;
                     }
                     return head.find("\"learner\"") != std::string::npos ? FileKind::XGBoostJson : FileKind::LightGBMJson;
                 }
@@ -107,7 +111,8 @@ namespace lignum {
                 return Builder::load_model(filepath, ModelSource::XGBoostUbjson);
             case FileKind::LightGBMJson:
             case FileKind::XGBoostJson:
-                if (lignum || catboost) break;
+                if (lignum) break;
+                if (catboost) return parsers::load_catboost_json(filepath);
                 if (lightgbm) return Builder::load_model(filepath, ModelSource::LightGBMJson);
                 if (xgboost) return Builder::load_model(filepath, ModelSource::XGBoostJson);
                 return Builder::load_model(filepath, kind == FileKind::XGBoostJson ? ModelSource::XGBoostJson : ModelSource::LightGBMJson);

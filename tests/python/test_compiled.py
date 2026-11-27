@@ -186,3 +186,35 @@ def test_compile_options_are_keywords(tmp_path, data):
         model.compile("auto", "", str(tmp_path))  # the old positional work_dir
     with pytest.raises(TypeError):
         model.compile(work_dir=str(tmp_path))
+
+
+def test_autotune_handles_frames_arrow_1d_empty_and_preserves_setting(tmp_path, data):
+    # W9: autotune works on categorical DataFrames, Arrow tables, 1D arrays, rejects empty inputs,
+    # and restores compiled_min_rows on error instead of clobbering it to 0.
+    import pandas as pd
+
+    pa = pytest.importorskip("pyarrow")
+    X, y = data
+    source, fmt, _ = lightgbm_model(tmp_path, X, y)
+    model = lg.load(str(source), format=fmt)
+    model.compile(block_trees=4)
+    model.compiled_min_rows = 42
+
+    with pytest.raises(ValueError, match="at least one row"):
+        model.autotune(X[:0], budget=0.05)
+    assert model.compiled_min_rows == 42
+
+    # 1D sample
+    res_1d = model.autotune(X[0], budget=0.02)
+    assert 1 in res_1d["timings"]
+
+    # pandas DataFrame with Categorical column
+    df = pd.DataFrame({f"f{i}": X[:64, i] for i in range(5)})
+    df["cat"] = pd.Categorical(np.nan_to_num(X[:64, 5], nan=0).astype(int))
+    res_df = model.autotune(df, budget=0.02)
+    assert sorted(res_df["timings"]) == [1, 4, 16, 64]
+
+    # Arrow Table
+    tbl = pa.Table.from_pandas(df, preserve_index=False)
+    res_arrow = model.autotune(tbl, budget=0.02)
+    assert sorted(res_arrow["timings"]) == [1, 4, 16, 64]

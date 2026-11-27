@@ -1,4 +1,5 @@
 #include "test_util.hpp"
+#include "categories.hpp"
 
 #include <cmath>
 #include <filesystem>
@@ -93,4 +94,19 @@ TEST(Categorical, CategorySetsHaveAMemoryBudget) {
     const std::string json = R"({"objective": "regression", "tree_info": [{"tree_structure": )" + split +
                              R"(}, {"tree_structure": )" + split + "}]}";
     EXPECT_THROW(lignum::load(write_temp("cat_budget.json", json), "lightgbm"), std::length_error);
+}
+
+TEST(Categorical, LookupMatchesEarliestPositionAcrossIntegerAndNumber) {
+    // N4: when a training list has [1.0, 1], lookup for integer 1 or float 1.0 must find position 0.
+    const std::string text =
+        "tree\nversion=v4\nnum_class=1\nnum_tree_per_iteration=1\nobjective=regression\n\n"
+        "Tree=0\nnum_leaves=2\nnum_cat=1\nsplit_feature=0\nthreshold=0\ndecision_type=1\nleft_child=-1\nright_child=-2\n"
+        "leaf_value=1 2\ncat_boundaries=0 1\ncat_threshold=1\nis_linear=0\n\nend of trees\n\n"
+        "pandas_categorical:[[1.0, 1]]\n";
+    const auto model = lignum::load(write_temp("cat_int_num_order.txt", text), "lightgbm");
+    ASSERT_TRUE(model.categories);
+    lignum::CategoryValue iv;
+    iv.kind = lignum::CategoryValue::Kind::Integer;
+    iv.integer = 1;
+    EXPECT_EQ(lignum::lookup(*model.categories, 0, iv), 0);
 }

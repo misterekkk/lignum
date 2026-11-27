@@ -3,28 +3,24 @@
 #include "binned.hpp"
 #include "categories.hpp"
 #include "catboost.hpp"
+#include "paths.hpp"
 #include "validate.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <filesystem>
 #include <fstream>
+#include <random>
 #include <stdexcept>
+#include <unordered_set>
 #include <vector>
 #include <string>
 #include <string_view>
 #include <cstring>
 
-#if defined(_WIN32)
-    #include <windows.h>
-
-    std::wstring utf8_to_utf16(const std::string& str) {
-        if (str.empty()) return std::wstring();
-        int size_needed = MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), NULL, 0);
-        std::wstring wstrTo(size_needed, 0);
-        MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), &wstrTo[0], size_needed);
-        return wstrTo;
-    }
-
-#else
+#if !defined(_WIN32)
     #include <fcntl.h>
     #include <sys/mman.h>
     #include <sys/stat.h>
@@ -214,10 +210,14 @@ namespace lignum {
             const uint32_t n_lists = r.get<uint32_t>();
             if (n_lists == 0 || n_lists > r.left() / 8) CategoryReader::bad();  // every list takes 8 bytes at least
             c->lists.resize(n_lists);
+            std::unordered_set<uint32_t> seen_features;
             for (uint32_t k = 0; k < n_lists; k++) {
                 const uint32_t feature = r.get<uint32_t>(), n_values = r.get<uint32_t>();
                 if (c->by_position ? feature != 0 : feature >= n_features) CategoryReader::bad();
-                if (!c->by_position) c->features.push_back(feature);
+                if (!c->by_position) {
+                    if (!seen_features.insert(feature).second) CategoryReader::bad();
+                    c->features.push_back(feature);
+                }
                 if (n_values > r.left()) CategoryReader::bad();  // every value takes a byte at least
                 c->lists[k].resize(n_values);
                 for (CategoryValue& v : c->lists[k]) {
@@ -289,6 +289,16 @@ namespace lignum {
             return start + align(info.names_bytes + info.objective_bytes + info.categories_bytes);
         }
 
+        std::string unique_temp_suffix() {
+            static std::atomic<uint64_t> counter{0};
+            std::random_device device;
+            const uint64_t v = (uint64_t{device()} << 32 ^ device()) ^ (counter++ * 0x9e3779b97f4a7c15ULL) ^
+                               static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+            char text[24];
+            std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(v));
+            return text;
+        }
+
     } // namespace
 
     class MmapData : public Data {
@@ -299,33 +309,38 @@ namespace lignum {
         #if defined(_WIN32)
             HANDLE hFile = INVALID_HANDLE_VALUE;
             HANDLE hMap = NULL;
-        #else
-            int fd = -1;
         #endif
 
         MmapData(const std::string& filepath) {
             #if defined(_WIN32)
-                std::wstring wfilepath = utf8_to_utf16(filepath);
+                const std::wstring wfilepath = utf8_path(filepath).wstring();
                 hFile = CreateFileW(wfilepath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
                 if (hFile == INVALID_HANDLE_VALUE) throw std::runtime_error("Error opening file.");
 
                 LARGE_INTEGER file_size;
                 if (!GetFileSizeEx(hFile, &file_size)) {
                     CloseHandle(hFile);
+                    hFile = INVALID_HANDLE_VALUE;
                     throw std::runtime_error("Error getting file size.");
                 }
                 size = file_size.QuadPart;
 
-                if (size == 0) { CloseHandle(hFile); throw std::runtime_error("File is empty."); }
+                if (size == 0) { CloseHandle(hFile); hFile = INVALID_HANDLE_VALUE; throw std::runtime_error("File is empty."); }
                 
                 hMap = CreateFileMappingW(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
-                if (!hMap) { CloseHandle(hFile); throw std::runtime_error("Error running mmap."); }
+                if (!hMap) { CloseHandle(hFile); hFile = INVALID_HANDLE_VALUE; throw std::runtime_error("Error running mmap."); }
 
                 data = static_cast<const char*>(MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0));
-                if (!data) throw std::runtime_error("Error mapping view of file.");
+                if (!data) {
+                    CloseHandle(hMap);
+                    hMap = NULL;
+                    CloseHandle(hFile);
+                    hFile = INVALID_HANDLE_VALUE;
+                    throw std::runtime_error("Error mapping view of file.");
+                }
 
             #else
-                fd = open(filepath.c_str(), O_RDONLY);
+                const int fd = open(filepath.c_str(), O_RDONLY);
                 if (fd < 0) throw std::runtime_error("Error opening file: " + filepath);
 
                 struct stat sb;
@@ -335,7 +350,8 @@ namespace lignum {
                 if (size == 0) { close(fd); throw std::runtime_error("File is empty."); }
 
                 data = static_cast<const char*>(mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0));
-                if (data == MAP_FAILED) { close(fd); throw std::runtime_error("Error running mmap."); }
+                close(fd);
+                if (data == MAP_FAILED) throw std::runtime_error("Error running mmap.");
             #endif
         }
 
@@ -346,69 +362,85 @@ namespace lignum {
                 if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
             #else
                 if (data && data != MAP_FAILED) munmap(const_cast<char*>(data), size);
-                if (fd >= 0) close(fd);
             #endif
         }
     };
 
     void Model::save(const std::string& filepath) const {
-        std::ofstream out(filepath, std::ios::binary);
-        if (!out) throw std::runtime_error("Can't save the file.");
+        if (!oblivious && !base_scores) throw std::logic_error("Model is empty (not loaded).");
+        if (n_outputs == 0 || n_outputs > 65535) throw std::length_error("Number of outputs exceeds binary format limit.");
 
-        FileHeader header;
-        if (oblivious) {
-            header.flags = header_flags::Oblivious;
-            header.n_outputs = static_cast<uint16_t>(n_outputs);
-            header.transform = transform;
-            header.sigmoid = sigmoid;
-            header.n_features = n_features;
-            out.write(reinterpret_cast<const char*>(&header), sizeof(FileHeader));
-            write_info(out, *this);
-            padded_write(out, reinterpret_cast<const char*>(base_scores), n_outputs * sizeof(double));
-            save_oblivious(out, *oblivious);
-            if (!out) throw std::runtime_error("Failed to write the model file.");
-            return;
-        }
-        header.n_outputs = static_cast<uint16_t>(n_outputs);
-        header.n_cat_words = n_cat_words;
-        header.sigmoid = sigmoid;
-        header.transform = transform;
-        header.flags = static_cast<uint8_t>((float32 ? header_flags::Float32 : 0) | (has_special_trees ? header_flags::SpecialTrees : 0) |
-                                            (binned ? header_flags::Binned : 0));
-        header.n_features = n_features;
-        header.n_nodes = n_nodes;
-        header.n_offsets = n_offsets;
-        header.n_leaves = n_leaves;
+        namespace fs = std::filesystem;
+        const fs::path target = utf8_path(filepath);
+        const fs::path tmp = target.parent_path() / (target.filename().string() + ".tmp-" + unique_temp_suffix());
+        auto cleanup = [&] {
+            std::error_code ignored;
+            fs::remove(tmp, ignored);
+        };
 
-        out.write(reinterpret_cast<const char*>(&header), sizeof(FileHeader));
-        write_info(out, *this);
+        try {
+            std::ofstream out(tmp, std::ios::binary);
+            if (!out) throw std::runtime_error("Can't save the file.");
 
-        padded_write(out, reinterpret_cast<const char*>(k_nodes), n_nodes * sizeof(KNode));
-        padded_write(out, reinterpret_cast<const char*>(tree_offsets), n_offsets * sizeof(int32_t));
-        padded_write(out, reinterpret_cast<const char*>(leaf_values), n_leaves * sizeof(double));
-        padded_write(out, reinterpret_cast<const char*>(tree_kinds), n_offsets * sizeof(uint8_t));
-        padded_write(out, reinterpret_cast<const char*>(base_scores), n_outputs * sizeof(double));
-        if (n_outputs > 1) {
-            padded_write(out, reinterpret_cast<const char*>(tree_outputs), n_offsets * sizeof(uint16_t));
-        }
-        padded_write(out, reinterpret_cast<const char*>(cat_bitsets), n_cat_words * sizeof(uint32_t));
+            FileHeader header;
+            if (oblivious) {
+                header.flags = header_flags::Oblivious;
+                header.n_outputs = static_cast<uint16_t>(n_outputs);
+                header.transform = transform;
+                header.sigmoid = sigmoid;
+                header.n_features = n_features;
+                out.write(reinterpret_cast<const char*>(&header), sizeof(FileHeader));
+                write_info(out, *this);
+                padded_write(out, reinterpret_cast<const char*>(base_scores), n_outputs * sizeof(double));
+                save_oblivious(out, *oblivious);
+            } else {
+                header.n_outputs = static_cast<uint16_t>(n_outputs);
+                header.n_cat_words = n_cat_words;
+                header.sigmoid = sigmoid;
+                header.transform = transform;
+                header.flags = static_cast<uint8_t>((float32 ? header_flags::Float32 : 0) | (has_special_trees ? header_flags::SpecialTrees : 0) |
+                                                    (binned ? header_flags::Binned : 0));
+                header.n_features = n_features;
+                header.n_nodes = n_nodes;
+                header.n_offsets = n_offsets;
+                header.n_leaves = n_leaves;
 
-        // The binned kernel is stored too, so a mapped model needs no preparation at load time.
-        if (binned) {
-            BinnedFileHeader bh;
-            bh.n_nodes = binned->n_nodes;
-            bh.n_trees = binned->n_trees;
-            bh.n_features = binned->n_features;
-            bh.n_cuts = binned->n_cuts;
-            bh.n_cat_features = binned->n_cat_features;
-            bh.n_table_words = binned->n_table_words;
-            bh.decision_words = binned->decision_words;
-            out.write(reinterpret_cast<const char*>(&bh), sizeof(bh));
-            for (const Section& sec : binned_sections(*binned)) {
-                padded_write(out, static_cast<const char*>(sec.data), sec.element_size * sec.count);
+                out.write(reinterpret_cast<const char*>(&header), sizeof(FileHeader));
+                write_info(out, *this);
+
+                padded_write(out, reinterpret_cast<const char*>(k_nodes), n_nodes * sizeof(KNode));
+                padded_write(out, reinterpret_cast<const char*>(tree_offsets), n_offsets * sizeof(int32_t));
+                padded_write(out, reinterpret_cast<const char*>(leaf_values), n_leaves * sizeof(double));
+                padded_write(out, reinterpret_cast<const char*>(tree_kinds), n_offsets * sizeof(uint8_t));
+                padded_write(out, reinterpret_cast<const char*>(base_scores), n_outputs * sizeof(double));
+                if (n_outputs > 1) {
+                    padded_write(out, reinterpret_cast<const char*>(tree_outputs), n_offsets * sizeof(uint16_t));
+                }
+                padded_write(out, reinterpret_cast<const char*>(cat_bitsets), n_cat_words * sizeof(uint32_t));
+
+                // The binned kernel is stored too, so a mapped model needs no preparation at load time.
+                if (binned) {
+                    BinnedFileHeader bh;
+                    bh.n_nodes = binned->n_nodes;
+                    bh.n_trees = binned->n_trees;
+                    bh.n_features = binned->n_features;
+                    bh.n_cuts = binned->n_cuts;
+                    bh.n_cat_features = binned->n_cat_features;
+                    bh.n_table_words = binned->n_table_words;
+                    bh.decision_words = binned->decision_words;
+                    out.write(reinterpret_cast<const char*>(&bh), sizeof(bh));
+                    for (const Section& sec : binned_sections(*binned)) {
+                        padded_write(out, static_cast<const char*>(sec.data), sec.element_size * sec.count);
+                    }
+                }
             }
+            out.close();
+            if (!out) throw std::runtime_error("Failed to write the model file.");
+            fs::rename(tmp, target);
+        } catch (...) {
+            cleanup();
+            throw;
         }
-        if (!out) throw std::runtime_error("Failed to write the model file.");
     }
 
     Model load_binary(const std::string& filepath, bool binned) {
@@ -460,7 +492,7 @@ namespace lignum {
                                      align(header.n_offsets * sizeof(int32_t)) + align(header.n_leaves * sizeof(double)) +
                                      align(header.n_offsets * sizeof(uint8_t)) + align(header.n_outputs * sizeof(double)) +
                                      (header.n_outputs > 1 ? align(header.n_offsets * sizeof(uint16_t)) : 0) +
-                                     header.n_cat_words * sizeof(uint32_t);
+                                     align(header.n_cat_words * sizeof(uint32_t));
         if (header.n_outputs == 0) {
             throw std::runtime_error("Binary file declares zero outputs.");
         }

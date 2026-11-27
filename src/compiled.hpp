@@ -79,4 +79,8 @@ namespace lignum {
     // outputs, numeric precision) and of the generator's ABI.
     uint64_t compiled_fingerprint(const Model& model);
 
+    // Thread-safe access to `model.compiled` so predict() never races with compile()/decompile().
+    std::shared_ptr<const CompiledForest> get_compiled(const Model& model);
+    void set_compiled(Model& model, std::shared_ptr<const CompiledForest> compiled);
+
 } // namespace lignum

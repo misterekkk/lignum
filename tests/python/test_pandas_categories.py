@@ -154,3 +154,25 @@ def test_polars_categorical(tmp_path, data):
     frame = pl.DataFrame({"x": data["x"][:80], "s": pl.Series(s[::-1]).cast(pl.Categorical)[::-1]})  # categories in another order
     expected = booster.predict(pd.DataFrame({"x": data["x"][:80], "s": pd.Categorical(s, categories=STRINGS)}))
     np.testing.assert_array_equal(model.predict(frame), expected)
+
+
+def test_unused_trailing_category_and_string_columns(tmp_path, data):
+    # K5 & W10: LightGBM trained on a frame whose last column (category or string) is never split on
+    # still stores it in pandas_categorical, and must predict both pandas & Arrow.
+    frame = data["frame"].copy()
+    frame["k"] = pd.Categorical([10] * len(frame), categories=INTEGERS)  # constant -> never split on
+    booster = lgb.train({"objective": "binary", "verbose": -1, "min_data_per_group": 1, "cat_smooth": 1},
+                        lgb.Dataset(frame, data["y"]), num_boost_round=5)
+    txt_path = save_lightgbm(booster, tmp_path, "txt")
+    model = lignum.load(txt_path)
+    assert model.n_features <= 2
+    test_df = data["frame"].iloc[:30].copy()
+    expected = booster.predict(test_df)
+    np.testing.assert_array_equal(model.predict(test_df), expected)
+    np.testing.assert_array_equal(model.predict(pa.Table.from_pandas(test_df, preserve_index=False)), expected)
+
+    # Trailing non-numeric string column must also be ignored on pandas & Arrow.
+    with_id = test_df.copy()
+    with_id["row_id"] = [f"id_{i}" for i in range(len(with_id))]
+    np.testing.assert_array_equal(model.predict(with_id), expected)
+    np.testing.assert_array_equal(model.predict(pa.Table.from_pandas(with_id, preserve_index=False)), expected)

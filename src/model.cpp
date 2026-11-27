@@ -23,17 +23,15 @@
     using omp_iterator_t = size_t;
 #endif
 
-#ifndef CACHE_TILLING_BLOCK_SIZE
-    #if defined(__APPLE__) && defined(__ARM_NEON__)
-        #define N_BLOCK 256
-        #define T_BLOCK 32
-    #elif defined(__x86_64__) || defined(_M_X64)
-        #define N_BLOCK 128
-        #define T_BLOCK 16
-    #else
-        #define N_BLOCK 64
-        #define T_BLOCK 16
-    #endif
+#if defined(__APPLE__) && defined(__ARM_NEON__)
+    #define N_BLOCK 256
+    #define T_BLOCK 32
+#elif defined(__x86_64__) || defined(_M_X64)
+    #define N_BLOCK 128
+    #define T_BLOCK 16
+#else
+    #define N_BLOCK 64
+    #define T_BLOCK 16
 #endif
 
 #if defined(_MSC_VER)
@@ -276,12 +274,12 @@ namespace lignum {
 
         // Output transform of rows [i_begin, i_end); rows hold K = n_outputs values when Multi.
         template <typename Acc, bool Multi>
-        void finish_rows(const Model& m, bool raw_score, size_t i_begin, size_t i_end, double* __restrict__ out) {
+        void finish_rows(const Model& m, bool raw_score, size_t i_begin, size_t i_end, double* LIGNUM_RESTRICT out) {
             const uint8_t tr = m.transform;
             if (raw_score || tr == transform::Identity || tr == transform::Argmax) return;
 
             const size_t K = Multi ? m.n_outputs : 1;
-            if (Multi && tr == transform::Softmax) {
+            if (tr == transform::Softmax) {
                 for (size_t i = i_begin; i < i_end; i++) softmax<Acc>(&out[i * K], K);
                 return;
             }
@@ -587,22 +585,11 @@ namespace lignum {
         // evaluating all seven speculatively was 2x slower (the kernel is compute bound).
         template <uint8_t Kind>
         LIGNUM_INLINE int32_t bstep(const BNode& b, const BinnedRow& r) {
-        #ifdef LIGNUM_BINNED_BRANCHY
-            // Experimental: branch on every level like compiled code, so a well-predicted path
-            // lets the CPU run ahead to the next comparisons and node loads.
-            if (bdir<Kind>(b, 0, r)) {
-                if (bdir<Kind>(b, 2, r)) return b.children[6 | bdir<Kind>(b, 6, r)];
-                return b.children[4 | bdir<Kind>(b, 5, r)];
-            }
-            if (bdir<Kind>(b, 1, r)) return b.children[2 | bdir<Kind>(b, 4, r)];
-            return b.children[bdir<Kind>(b, 3, r)];
-        #else
             const int32_t d0 = bdir<Kind>(b, 0, r);
             const int32_t d1 = bdir<Kind>(b, 1 + d0, r);
             const int32_t g = (d0 << 1) | d1;
             const int32_t d2 = bdir<Kind>(b, 3 + g, r);
             return b.children[(g << 1) | d2];
-        #endif
         }
 
         template <uint8_t Kind>
@@ -821,8 +808,9 @@ namespace lignum {
         template <typename Acc, bool Multi>
         void run_binned(const Model& model, const double* X, size_t n_samples, size_t n_features, double* out,
                         int n_jobs, Strategy strategy, bool raw_score, const ColumnSource* columns) {
-            // Compiled trees from compiled_min_rows rows on (see Model::compiled_min_rows).
-            const CompiledForest* compiled = n_samples >= model.compiled_min_rows ? model.compiled.get() : nullptr;
+            // Hold a local copy of compiled across the call so decompile() cannot unload it mid-run.
+            const auto compiled_guard = get_compiled(model);
+            const CompiledForest* compiled = n_samples >= model.compiled_min_rows ? compiled_guard.get() : nullptr;
             const BinnedKernel<Acc, Multi> kernel(model, *model.binned, compiled, X, n_features, raw_score, columns);
             const int n_threads = resolve_threads(n_jobs);
             if (strategy == Strategy::Auto) strategy = choose_strategy(n_samples, n_threads);
@@ -874,6 +862,9 @@ namespace lignum {
 
         void dispatch(const Model& model, const double* X, size_t n_samples, size_t n_features, double* out,
                       int n_jobs, Strategy strategy, bool raw_score) {
+            if (!model.oblivious && !model.base_scores) {
+                throw std::logic_error("Model is empty (not loaded).");
+            }
             if (n_features < model.n_features) {
                 throw std::invalid_argument("Input has " + std::to_string(n_features) + " features, but the model requires at least " +
                                             std::to_string(model.n_features) + ".");
@@ -904,6 +895,7 @@ namespace lignum {
 
     void predict_columns(const Model& model, const ColumnSource& source, size_t n_rows, size_t n_columns, double* out,
                          bool raw_score, int n_jobs, Strategy strategy) {
+        if (!model.oblivious && !model.base_scores) throw std::logic_error("Model is empty (not loaded).");
         if (!model.binned) throw std::logic_error("predict_columns needs the binned kernel.");
         if (n_columns < model.n_features) {
             throw std::invalid_argument("Input has " + std::to_string(n_columns) + " features, but the model requires at least " +
@@ -915,12 +907,12 @@ namespace lignum {
         });
     }
 
-    void Model::predict(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds,
+    void Model::predict(const double* LIGNUM_RESTRICT X, size_t n_samples, size_t n_features, double* LIGNUM_RESTRICT out_preds,
                         int n_jobs, Strategy strategy) const {
         dispatch(*this, X, n_samples, n_features, out_preds, n_jobs, strategy, false);
     }
 
-    void Model::predict_raw(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds,
+    void Model::predict_raw(const double* LIGNUM_RESTRICT X, size_t n_samples, size_t n_features, double* LIGNUM_RESTRICT out_preds,
                             int n_jobs, Strategy strategy) const {
         dispatch(*this, X, n_samples, n_features, out_preds, n_jobs, strategy, true);
     }

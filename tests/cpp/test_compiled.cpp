@@ -1,11 +1,14 @@
 #include "test_util.hpp"
 #include "compiled.hpp"
 
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <stdexcept>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
@@ -323,3 +326,93 @@ TEST(Compiled, FallbackCacheInTheTempFolderMustBePrivate) {
     std::filesystem::remove_all(tmp);
 }
 #endif
+
+TEST(Compiled, PathsWithSpacesAndShellMetacharactersDoNotExecuteShellCommands) {
+    auto model = load_model("shell_src.json");
+    const auto base = std::filesystem::path(temp_path("shell_meta $(id) test"));
+    std::filesystem::remove_all(base);
+    const auto marker = base / "pwned";
+    const auto weird_dir = base / ("cache ; touch '" + marker.string() + "' $(touch '" + marker.string() + "')");
+    auto o = options();
+    o.cache_dir = weird_dir.string();
+    model.compiled = lignum::compile_forest(model, o, nullptr);
+    EXPECT_FALSE(std::filesystem::exists(marker));
+    EXPECT_EQ(predict_raw(model, kRows, 2), predict_raw(load_model("shell_ref.json"), kRows, 2));
+
+    o.cache_dir.clear();
+    o.flags = "\"unclosed";
+    EXPECT_THROW(lignum::compile_forest(model, o, nullptr), std::invalid_argument);
+    model.compiled = nullptr;
+    std::filesystem::remove_all(base);
+}
+
+TEST(Compiled, HandlesNaNLeavesAndZeroTreeModels) {
+    const std::string nan_leaf = R"({"objective": "regression", "tree_info": [
+        {"tree_structure": {"split_feature": 0, "threshold": 0.5, "decision_type": "<=", "default_left": true,
+                            "missing_type": "NaN", "left_child": {"leaf_value": null}, "right_child": {"leaf_value": 2.0}}}]})";
+    // LightGBM JSON leaf_value cannot be null directly, so patch the KNode/Model leaves via save/load or test 0-tree model:
+    const std::string zero_trees = R"({"objective": "regression", "tree_info": []})";
+    auto empty_model = lignum::load(write_temp("zero_trees.json", zero_trees), "lightgbm");
+    empty_model.compiled = lignum::compile_forest(empty_model, cache_options("cache_zero_trees"), nullptr);
+    std::vector<double> out(3);
+    empty_model.predict_raw(kRows.data(), 3, 2, out.data(), 1);
+    EXPECT_EQ(out, (std::vector<double>{0.0, 0.0, 0.0}));
+    (void)nan_leaf;
+
+    // Synthesize a 1-tree model with a NaN leaf to test NAN codegen literal.
+    auto m = load_model("nan_leaf_src.json");
+    auto bin_path = temp_path("nan_leaf.bin");
+    m.save(bin_path);
+    std::ifstream in(bin_path, std::ios::binary);
+    std::vector<char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    // Overwrite first leaf value with NaN in the .bin file.
+    uint64_t n_cat_words = 0, n_nodes = 0, n_offsets = 0, n_leaves = 0, names_bytes = 0;
+    uint32_t objective_bytes = 0, categories_bytes = 0;
+    std::memcpy(&n_cat_words, bytes.data() + 16, 8);
+    std::memcpy(&n_nodes, bytes.data() + 24, 8);
+    std::memcpy(&n_offsets, bytes.data() + 32, 8);
+    std::memcpy(&n_leaves, bytes.data() + 40, 8);
+    std::memcpy(&names_bytes, bytes.data() + 64 + 24, 8);
+    std::memcpy(&objective_bytes, bytes.data() + 64 + 40, 4);
+    std::memcpy(&categories_bytes, bytes.data() + 64 + 44, 4);
+    auto a64 = [](size_t v) { return (v + 63) & ~size_t{63}; };
+    const size_t leaves_pos = 128 + a64(names_bytes + objective_bytes + categories_bytes) + a64(n_nodes * 64) + a64(n_offsets * 4);
+    const double nan_val = std::numeric_limits<double>::quiet_NaN();
+    ASSERT_GT(n_leaves, 0u);
+    std::memcpy(bytes.data() + leaves_pos, &nan_val, sizeof(nan_val));
+    std::ofstream(bin_path, std::ios::binary).write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+
+    auto nan_model = lignum::load(bin_path);
+    const auto interp = predict_raw(nan_model, kRows, 2);
+    nan_model.compiled = lignum::compile_forest(nan_model, cache_options("cache_nan_leaf"), nullptr);
+    const auto comp = predict_raw(nan_model, kRows, 2);
+    ASSERT_EQ(interp.size(), comp.size());
+    for (size_t i = 0; i < interp.size(); i++) {
+        if (std::isnan(interp[i])) EXPECT_TRUE(std::isnan(comp[i]));
+        else EXPECT_EQ(interp[i], comp[i]);
+    }
+}
+
+TEST(Compiled, ConcurrentPredictAndCompileDecompileIsSafe) {
+    auto model = load_model("race_src.json");
+    const auto lib = temp_path("race.lib_out");
+    std::filesystem::remove(lib);
+    const auto compiled = lignum::compile_forest(model, options(lib), nullptr);
+    const auto expected = predict_raw(model, kRows, 2);
+
+    std::atomic<bool> stop{false};
+    std::thread mutator([&] {
+        for (int i = 0; i < 2000; i++) {
+            lignum::set_compiled(model, (i & 1) ? compiled : nullptr);
+        }
+        stop.store(true, std::memory_order_release);
+    });
+    std::vector<double> out(kRows.size() / 2);
+    while (!stop.load(std::memory_order_acquire)) {
+        model.predict_raw(kRows.data(), out.size(), 2, out.data(), 1);
+        EXPECT_EQ(out, expected);
+    }
+    mutator.join();
+    std::filesystem::remove(lib);
+}

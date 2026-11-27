@@ -1,6 +1,7 @@
 #include "parsers.hpp"
 #include "simdjson.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -19,7 +20,8 @@ namespace lignum {
             // the shortest decimal that parses back to the same double, so values stay exact.
             class Converter {
                 public:
-                    explicit Converter(std::string_view in) : in_(in) {}
+                    explicit Converter(std::string_view in)
+                        : in_(in), zero_byte_budget_(std::max<size_t>(in.size(), 65536)) {}
 
                     std::string run() {
                         out_.reserve(in_.size() * 2);
@@ -31,6 +33,7 @@ namespace lignum {
                     static constexpr int kMaxDepth = 256;
                     std::string_view in_;
                     size_t pos_ = 0;
+                    size_t zero_byte_budget_ = 0;
                     std::string out_;
                     bool skipping_ = false;  // inside a value that is dropped: no number formatting
 
@@ -132,6 +135,7 @@ namespace lignum {
                         if (peek() == '$') {
                             pos_++;
                             type = next_byte();
+                            if (type == 'N') fail("no-op cannot be a container element type");
                             if (peek() != '#') fail("typed container without a count");
                         }
                         if (peek() == '#') {
@@ -139,12 +143,17 @@ namespace lignum {
                             count = length();
                             const size_t size = type ? fixed_size(type) : 0;
                             if (size && count > (in_.size() - pos_) / size) fail("container larger than the file");
+                            if ((type == 'Z' || type == 'T' || type == 'F') && count > zero_byte_budget_) {
+                                fail("container larger than the file");
+                            }
+                            if (type == 'Z' || type == 'T' || type == 'F') zero_byte_budget_ -= count;
                         }
                         return {type, count};
                     }
 
                     void value(uint8_t marker, int depth) {
                         if (depth > kMaxDepth) fail("nested too deeply");
+                        while (marker == 'N') marker = next_byte();  // no-op marker (bounded by file size, no stack growth)
                         switch (marker) {
                             case 'Z': out_ += "null"; return;
                             case 'T': out_ += "true"; return;
@@ -163,7 +172,6 @@ namespace lignum {
                             }
                             case '[': array(depth); return;
                             case '{': object(depth); return;
-                            case 'N': value(next_byte(), depth); return;  // no-op marker
                             default:  fail("unknown marker '" + std::string(1, static_cast<char>(marker)) + "'");
                         }
                     }

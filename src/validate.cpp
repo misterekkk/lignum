@@ -2,6 +2,7 @@
 #include "binned.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -41,18 +42,21 @@ namespace lignum {
                 const char* what_;
         };
 
+        constexpr int kMaxTreeDepth = 1024;
+
         void validate_knodes(const Model& m) {
             if (m.n_outputs == 0) fail("no outputs");
             if (m.transform > transform::Last) fail("unknown transform");
             // Each transform is implemented for its library's arithmetic only (Hinge: XGBoost,
-            // float32; SignedSquare: LightGBM, double).
-            if ((m.transform == transform::Hinge && !m.float32) || (m.transform == transform::SignedSquare && m.float32)) {
+            // float32; SignedSquare, Log1pExp: LightGBM, double).
+            if ((m.transform == transform::Hinge && !m.float32) ||
+                ((m.transform == transform::SignedSquare || m.transform == transform::Log1pExp) && m.float32)) {
                 fail("transform does not match the model's precision");
             }
             if (m.n_nodes > 0 && m.n_features == 0) fail("splits without features");
             // Word 0 of the bitsets is the zero target of branch-free categorical lookups (the
             // builder always writes it), so the kernel may read it for any categorical slot.
-            if (m.n_cat_words == 0) fail("no categorical bitset words");
+            if (m.n_cat_words == 0 || m.cat_bitsets[0] != 0) fail("invalid categorical bitset words");
 
             for (size_t i = 0; i < m.n_nodes; i++) {
                 const KNode& kn = m.k_nodes[i];
@@ -60,23 +64,44 @@ namespace lignum {
                 for (int s = 0; s < 3; s++) {
                     if (kn.features[s] >= m.n_features) fail("node feature out of range");
                     if (kn.kinds[s] > slot_kind::CatBitset) fail("unknown slot kind");
+                    if (!m.has_special_trees &&
+                        (kn.kinds[s] != slot_kind::Numeric || (kn.dirs[s] & dir_bits::ZeroIsMissing) != 0)) {
+                        fail("special split without special-trees flag");
+                    }
+                    if (kn.kinds[s] == slot_kind::Numeric && std::isnan(kn.thresholds[s])) {
+                        fail("NaN split threshold");
+                    }
                     if (kn.kinds[s] == slot_kind::CatBitset) {
                         uint64_t payload;
                         std::memcpy(&payload, &kn.thresholds[s], sizeof(payload));
                         const uint64_t lo = payload & 0xFFFFFFFFu, words = payload >> 32;
-                        if (lo + words > m.n_cat_words) fail("categorical bitset out of range");
+                        if (lo > m.n_cat_words || words > m.n_cat_words - lo) fail("categorical bitset out of range");
                     }
                 }
             }
             for (size_t t = 0; t < m.n_offsets; t++) {
                 check_child(-1, m.tree_offsets[t], m.n_nodes, m.n_leaves, "tree root");
+                if (m.tree_kinds[t] > (tree_kind::ZeroMissing | tree_kind::Categorical)) fail("unknown tree kind");
+                if (!m.has_special_trees && m.tree_kinds[t] != tree_kind::Numeric) fail("special tree without special-trees flag");
                 if (m.n_outputs > 1 && m.tree_outputs[t] >= m.n_outputs) fail("tree output out of range");
             }
             // In range now (checked above).
             SingleReferences refs(m.n_nodes, "a node");
-            for (size_t t = 0; t < m.n_offsets; t++) refs.add(m.tree_offsets[t]);
+            std::vector<int> depth(m.n_nodes, 0);
+            for (size_t t = 0; t < m.n_offsets; t++) {
+                refs.add(m.tree_offsets[t]);
+                if (m.tree_offsets[t] >= 0) depth[static_cast<size_t>(m.tree_offsets[t])] = 1;
+            }
             for (size_t i = 0; i < m.n_nodes; i++) {
-                for (int c = 0; c < 4; c++) refs.add(m.k_nodes[i].children[c]);
+                const int d = depth[i];
+                if (d > kMaxTreeDepth) fail("tree deeper than " + std::to_string(kMaxTreeDepth) + " KNodes");
+                for (int c = 0; c < 4; c++) {
+                    const int32_t child = m.k_nodes[i].children[c];
+                    refs.add(child);
+                    if (child >= 0) {
+                        depth[static_cast<size_t>(child)] = std::max(depth[static_cast<size_t>(child)], d + 1);
+                    }
+                }
             }
         }
 
@@ -93,6 +118,10 @@ namespace lignum {
             for (size_t j = 0; j < f.n_features; j++) {
                 if (f.cut_offsets[j + 1] < f.cut_offsets[j]) fail("binned cut offsets");
                 if (f.cut_offsets[j + 1] - f.cut_offsets[j] >= kInvalidCat - 1) fail("too many cuts for a feature");
+                for (uint32_t k = f.cut_offsets[j]; k < f.cut_offsets[j + 1]; k++) {
+                    if (std::isnan(f.cuts[k])) fail("NaN binned cut");
+                    if (k > f.cut_offsets[j] && !(f.cuts[k - 1] < f.cuts[k])) fail("binned cuts are not strictly increasing");
+                }
             }
             for (size_t k = 0; k < f.n_cat_features; k++) {
                 const BinnedCatFeature& cf = f.cat_features[k];
@@ -104,6 +133,12 @@ namespace lignum {
                     fail("categorical table out of range");
                 }
             }
+            bool any_cat_tree = false;
+            for (size_t t = 0; t < f.n_trees; t++) {
+                check_child(-1, f.roots[t], f.n_nodes, m.n_leaves, "binned tree root");
+                if (f.tree_kind[t] & tree_kind::Categorical) any_cat_tree = true;
+            }
+            if (any_cat_tree && f.decision_words == 0) fail("categorical trees require decision words");
             for (size_t i = 0; i < f.n_nodes; i++) {
                 const BNode& b = f.nodes[i];
                 for (int c = 0; c < 8; c++) check_child(static_cast<int64_t>(i), b.children[c], f.n_nodes, m.n_leaves, "binned node");
@@ -112,11 +147,22 @@ namespace lignum {
                     if (((b.cat_slots >> s) & 1) && b.thresholds[s] >= uint32_t{f.decision_words} * 64) fail("decision bit out of range");
                 }
             }
-            for (size_t t = 0; t < f.n_trees; t++) check_child(-1, f.roots[t], f.n_nodes, m.n_leaves, "binned tree root");
             SingleReferences refs(f.n_nodes, "a binned node");
-            for (size_t t = 0; t < f.n_trees; t++) refs.add(f.roots[t]);
+            std::vector<int> depth(f.n_nodes, 0);
+            for (size_t t = 0; t < f.n_trees; t++) {
+                refs.add(f.roots[t]);
+                if (f.roots[t] >= 0) depth[static_cast<size_t>(f.roots[t])] = 1;
+            }
             for (size_t i = 0; i < f.n_nodes; i++) {
-                for (int c = 0; c < 8; c++) refs.add(f.nodes[i].children[c]);
+                const int d = depth[i];
+                if (d > kMaxTreeDepth) fail("binned tree deeper than " + std::to_string(kMaxTreeDepth) + " BNodes");
+                for (int c = 0; c < 8; c++) {
+                    const int32_t child = f.nodes[i].children[c];
+                    refs.add(child);
+                    if (child >= 0) {
+                        depth[static_cast<size_t>(child)] = std::max(depth[static_cast<size_t>(child)], d + 1);
+                    }
+                }
             }
         }
 

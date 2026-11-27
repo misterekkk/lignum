@@ -106,24 +106,24 @@ int LignumModelCompile(LignumModelHandle handle, const char* compiler, const cha
         options.flags = or_default(flags, "");
         options.cache_dir = or_default(cache_dir, "");
         options.library = or_default(library, "");
-        as_model(handle)->compiled = lignum::compile_forest(*as_model(handle), options, nullptr);
+        lignum::set_compiled(*as_model(handle), lignum::compile_forest(*as_model(handle), options, nullptr));
     });
 }
 
 int LignumModelLoadCompiled(LignumModelHandle handle, const char* library) {
     if (!handle || !library) return fail("LignumModelLoadCompiled: null argument.");
-    return guarded([&] { as_model(handle)->compiled = lignum::load_compiled(*as_model(handle), library); });
+    return guarded([&] { lignum::set_compiled(*as_model(handle), lignum::load_compiled(*as_model(handle), library)); });
 }
 
 int LignumModelDecompile(LignumModelHandle handle) {
     if (!handle) return fail("LignumModelDecompile: null handle.");
-    as_model(handle)->compiled = nullptr;
+    lignum::set_compiled(*as_model(handle), nullptr);
     return 0;
 }
 
 int LignumModelUsesCompiled(LignumModelHandle handle, int* out_compiled) {
     if (!handle || !out_compiled) return fail("LignumModelUsesCompiled: null argument.");
-    *out_compiled = as_model(handle)->compiled != nullptr;
+    *out_compiled = lignum::get_compiled(*as_model(handle)) != nullptr;
     return 0;
 }
 

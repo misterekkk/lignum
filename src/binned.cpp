@@ -269,7 +269,10 @@ namespace lignum {
             } else if (forest->feature_kind[it->second] != kind) {
                 return nullptr;  // the same column used with different semantics
             }
-            if (kind == feature_kind::Numeric) cuts[it->second].push_back(n.threshold);
+            if (kind == feature_kind::Numeric) {
+                if (std::isnan(n.threshold)) return nullptr;
+                cuts[it->second].push_back(n.threshold);
+            }
             if (n.dirs & dir_bits::ZeroIsMissing) zero_feature[it->second] = true;
         }
         // LightGBM zeroes |x| <= kZero; parsers never place a threshold inside (-kZero, kZero], so

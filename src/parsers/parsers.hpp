@@ -32,6 +32,7 @@ namespace lignum {
 
         std::string ubjson_to_json(std::string_view data);
         std::string read_file(const std::string& filepath);
+        double parse_double(std::string_view token, const char* format_name = nullptr);
 
     } // namespace parsers
 

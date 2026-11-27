@@ -257,4 +257,65 @@ TEST(Arrow, DictionaryColumnsGetTheCodesOfTraining) {
     Batch two({&c2, &c1}, 3);
     std::vector<double> out(3);
     EXPECT_THROW(lignum::predict_arrow(model, two.schema, two.array, out.data()), std::invalid_argument);
+
+    // K5: an unused trailing dictionary column (at column >= n_features) matches LightGBM's
+    // pandas_categorical list count when the model kept both training categories.
+    const char* kTrailingCatModel =
+        "tree\nversion=v4\nnum_class=1\nnum_tree_per_iteration=1\nobjective=regression\nfeature_names=x s extra_cat\n\n"
+        "Tree=0\nnum_leaves=2\nnum_cat=1\nsplit_feature=1\nthreshold=0\ndecision_type=1\nleft_child=-1\nright_child=-2\n"
+        "leaf_value=1 2\ncat_boundaries=0 1\ncat_threshold=2\nis_linear=0\n\nend of trees\n\n"
+        "pandas_categorical:[[\"a\", \"b\", \"c\"], [\"u\", \"v\"]]\n";
+    const auto trail_model = lignum::load(write_temp("arrow_trail_cat.txt", kTrailingCatModel), "lightgbm");
+    ASSERT_EQ(trail_model.n_features, 2u);
+    Col c_extra("c", indices, 4);
+    c_extra.schema.name = "extra_cat";
+    c_extra.schema.dictionary = &dict.schema;
+    c_extra.array.dictionary = &dict.array;
+    c0.schema.name = "x";
+    c1.schema.name = "s";
+    c1.schema.dictionary = &dict.schema;
+    c1.array.dictionary = &dict.array;
+    Batch trail_batch({&c0, &c1, &c_extra}, 4);
+    EXPECT_EQ(predict(trail_model, trail_batch), (std::vector<double>{1.0, 2.0, 2.0, 2.0}));
+}
+
+TEST(Arrow, RejectsNegativeMetadataAndNullCatBoostIntDict) {
+    // W2: negative n_children / length / offset must throw cleanly.
+    auto model = lignum::load(write_temp("arrow_bad_meta.json", kModel), "lightgbm");
+    const double d[] = {1.0, 2.0};
+    Col c0("g", d, 2), c1("g", d, 2);
+    Batch batch({&c0, &c1}, 2);
+    std::vector<double> out(2);
+    batch.array.offset = -1;
+    EXPECT_THROW(lignum::predict_arrow(model, batch.schema, batch.array, out.data()), std::invalid_argument);
+    batch.array.offset = 0;
+    batch.array.length = -1;
+    EXPECT_THROW(lignum::predict_arrow(model, batch.schema, batch.array, out.data()), std::invalid_argument);
+    batch.array.length = 2;
+    batch.array.n_children = -1;
+    batch.schema.n_children = -1;
+    EXPECT_THROW(lignum::predict_arrow(model, batch.schema, batch.array, out.data()), std::invalid_argument);
+
+    // K4: null value inside a CatBoost integer dictionary throws instead of hashing uninitialized value.
+    const std::string cb_json =
+        R"({"features_info": {"categorical_features": [{"feature_index": 0, "flat_feature_index": 0}]},
+            "oblivious_trees": [], "scale_and_bias": [1.0, [0.0]]})";
+    const auto cb_model = lignum::load(write_temp("arrow_cb_null_intdict.json", cb_json), "catboost");
+    const int8_t idx[] = {0, 1};
+    const int32_t dict_ints[] = {10, 20};
+    const uint8_t dict_valid = 0b01;  // entry 1 is null
+    Col cb_col("c", idx, 2);
+    ArrowSchema dschema{};
+    dschema.format = "i";
+    ArrowArray darr{};
+    const void* dbufs[] = {&dict_valid, dict_ints};
+    darr.length = 2;
+    darr.null_count = 1;
+    darr.n_buffers = 2;
+    darr.buffers = dbufs;
+    darr.release = no_release;
+    cb_col.schema.dictionary = &dschema;
+    cb_col.array.dictionary = &darr;
+    Batch cb_batch({&cb_col}, 2);
+    EXPECT_THROW(lignum::predict_arrow(cb_model, cb_batch.schema, cb_batch.array, out.data()), std::invalid_argument);
 }

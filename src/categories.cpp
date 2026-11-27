@@ -62,19 +62,27 @@ namespace lignum {
                 return it == li.text.end() ? -1 : it->second;
             }
             case CategoryValue::Kind::Integer: {
-                if (const auto it = li.integer.find(value.integer); it != li.integer.end()) return it->second;
+                int32_t best = -1;
+                if (const auto it = li.integer.find(value.integer); it != li.integer.end()) best = it->second;
                 const double d = static_cast<double>(value.integer);
                 int64_t back = 0;
-                if (!as_integer(d, back) || back != value.integer) return -1;  // not exact as a double
-                const auto it = li.number.find(d);
-                return it == li.number.end() ? -1 : it->second;
+                if (as_integer(d, back) && back == value.integer) {
+                    if (const auto it = li.number.find(d); it != li.number.end()) {
+                        best = best < 0 ? it->second : std::min(best, it->second);
+                    }
+                }
+                return best;
             }
             case CategoryValue::Kind::Number: {
-                if (const auto it = li.number.find(value.number); it != li.number.end()) return it->second;
+                int32_t best = -1;
+                if (const auto it = li.number.find(value.number); it != li.number.end()) best = it->second;
                 int64_t i = 0;
-                if (!as_integer(value.number, i)) return -1;
-                const auto it = li.integer.find(i);
-                return it == li.integer.end() ? -1 : it->second;
+                if (as_integer(value.number, i)) {
+                    if (const auto it = li.integer.find(i); it != li.integer.end()) {
+                        best = best < 0 ? it->second : std::min(best, it->second);
+                    }
+                }
+                return best;
             }
             case CategoryValue::Kind::Boolean:
                 return li.boolean[value.integer != 0];

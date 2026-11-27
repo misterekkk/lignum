@@ -1,7 +1,11 @@
 #pragma once
 
-#if defined(_MSC_VER) && !defined(__restrict__)
-    #define __restrict__ __restrict
+#if defined(_MSC_VER)
+    #define LIGNUM_RESTRICT __restrict
+#elif defined(__GNUC__) || defined(__clang__)
+    #define LIGNUM_RESTRICT __restrict__
+#else
+    #define LIGNUM_RESTRICT
 #endif
 
 #include <vector>
@@ -168,9 +172,9 @@ namespace lignum {
             }
 
             // Throws std::invalid_argument if n_features is smaller than the model requires.
-            void predict(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds,
+            void predict(const double* LIGNUM_RESTRICT X, size_t n_samples, size_t n_features, double* LIGNUM_RESTRICT out_preds,
                          int n_jobs = -1, Strategy strategy = Strategy::Auto) const;
-            void predict_raw(const double* __restrict__ X, size_t n_samples, size_t n_features, double* __restrict__ out_preds,
+            void predict_raw(const double* LIGNUM_RESTRICT X, size_t n_samples, size_t n_features, double* LIGNUM_RESTRICT out_preds,
                              int n_jobs = -1, Strategy strategy = Strategy::Auto) const;
             void save(const std::string& filepath) const;
 

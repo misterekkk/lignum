@@ -307,3 +307,67 @@ TEST(Fuzz, UbjsonKeysSurviveTheOutputGrowing) {
         EXPECT_EQ(lignum::parsers::ubjson_to_json(ubj), json) << n;
     }
 }
+
+TEST(Fuzz, UbjsonNoOpsAndZeroByteContainersAreBounded) {
+    // K2: 50k consecutive 'N' no-op markers must not overflow the stack.
+    std::string noops(50000, 'N');
+    noops += "Z";
+    EXPECT_EQ(lignum::parsers::ubjson_to_json(noops), "null");
+
+    // 'N' as typed container element type must be rejected.
+    EXPECT_THROW(lignum::parsers::ubjson_to_json("[$N#i\x05"), std::runtime_error);
+
+    // K3: 0-byte typed container with huge count in a tiny file must fail before allocating GBs.
+    std::string zero_oom = "[$Z#l";
+    const uint32_t big = 1000000000u;
+    for (int b = 3; b >= 0; b--) zero_oom += static_cast<char>((big >> (8 * b)) & 0xFF);
+    EXPECT_THROW(lignum::parsers::ubjson_to_json(zero_oom), std::runtime_error);
+}
+
+TEST(Fuzz, ParserRejectsFeatureOverflowNaNAndUnknownTypes) {
+    // W12: split_feature >= 65536 rejected cleanly in both LightGBM and XGBoost JSON.
+    const std::string lgb_wide = R"({"objective": "regression", "tree_info": [{"tree_structure": {
+        "split_feature": 70000, "threshold": 0.5, "decision_type": "<=", "default_left": true,
+        "missing_type": "NaN", "left_child": {"leaf_value": 1.0}, "right_child": {"leaf_value": 2.0}}}]})";
+    EXPECT_THROW(lignum::load(write_temp("lgb_fid_overflow.json", lgb_wide), "lightgbm"), std::runtime_error);
+
+    const std::string xgb_wide = R"({"learner": {
+        "learner_model_param": {"base_score": "[5E-1]", "num_class": "0", "num_target": "1"},
+        "objective": {"name": "reg:squarederror"},
+        "gradient_booster": {"name": "gbtree", "model": {"trees": [{
+            "left_children": [1, -1, -1], "right_children": [2, -1, -1],
+            "split_indices": [4294967296, 0, 0], "split_conditions": [0.5, 0.1, 1.0],
+            "default_left": [0, 0, 0]}]}}}})";
+    EXPECT_THROW(lignum::load(write_temp("xgb_fid_overflow.json", xgb_wide), "xgboost"), std::runtime_error);
+
+    // W16: unknown decision_type / missing_type rejected.
+    const std::string lgb_dec = R"({"objective": "regression", "tree_info": [{"tree_structure": {
+        "split_feature": 0, "threshold": 0.5, "decision_type": ">", "default_left": true,
+        "missing_type": "NaN", "left_child": {"leaf_value": 1.0}, "right_child": {"leaf_value": 2.0}}}]})";
+    EXPECT_THROW(lignum::load(write_temp("lgb_bad_dec.json", lgb_dec), "lightgbm"), std::runtime_error);
+
+    const std::string lgb_miss = R"({"objective": "regression", "tree_info": [{"tree_structure": {
+        "split_feature": 0, "threshold": 0.5, "decision_type": "<=", "default_left": true,
+        "missing_type": "Bogus", "left_child": {"leaf_value": 1.0}, "right_child": {"leaf_value": 2.0}}}]})";
+    EXPECT_THROW(lignum::load(write_temp("lgb_bad_miss.json", lgb_miss), "lightgbm"), std::runtime_error);
+}
+
+TEST(Fuzz, EmptyDefaultModelThrowsAndSingleClassSoftmaxIsOne) {
+    // W11: default-constructed Model must throw cleanly instead of dereferencing nullptr.
+    lignum::Model empty;
+    const double x = 1.0;
+    double out = 0.0;
+    EXPECT_THROW(empty.predict(&x, 1, 0, &out), std::logic_error);
+    EXPECT_THROW(empty.predict_raw(&x, 1, 0, &out), std::logic_error);
+    EXPECT_THROW(empty.save(write_temp("should_not_exist.bin", "")), std::logic_error);
+
+    // W16: 1-class Softmax outputs 1.0.
+    const std::string json = R"({"objective": "multiclass", "num_class": 1, "num_tree_per_iteration": 1,
+        "tree_info": [{"tree_structure": {"leaf_value": 2.5}}]})";
+    for (bool binned : {true, false}) {
+        const auto m = lignum::load(write_temp("one_class_softmax.json", json), "lightgbm", binned);
+        double prob = 0.0;
+        m.predict(&x, 1, 0, &prob, 1);
+        EXPECT_EQ(prob, 1.0) << "binned=" << binned;
+    }
+}

@@ -351,10 +351,7 @@ namespace lignum {
             for (size_t s = 0; s < n_sources; s++) f.condition_begin.push_back(f.condition_begin.back() + count[s]);
             f.split_condition.resize(f.split_source.size());
             for (size_t k = 0; k < f.split_source.size(); k++) {
-                // A threshold of 0 (`bucket >= 0`, always true) has no byte: it can only come from a
-                // damaged file; byte 0 of an empty model keeps it in range.
-                const uint16_t t = f.split_threshold[k];
-                f.split_condition[k] = t ? f.condition_begin[f.split_source[k]] + t - 1 : 0;
+                f.split_condition[k] = f.condition_begin[f.split_source[k]] + f.split_threshold[k] - 1;
             }
             f.split_range.resize(f.split_source.size());
             for (size_t k = 0; k < f.split_source.size(); k++) {
@@ -375,6 +372,7 @@ namespace lignum {
             for (const auto& c : f.ctrs) {
                 for (uint16_t b : c.entry_buckets) f.small_buckets &= b <= 255;
             }
+            for (uint16_t t : f.split_threshold) f.small_buckets &= t <= 255;
             f.run_end.clear();
             f.run_depth.clear();
             f.max_depth = 0;
@@ -434,6 +432,7 @@ namespace lignum {
         std::vector<float> float_list(simdjson::dom::array array, const char* what) {
             std::vector<float> values;
             for (simdjson::dom::element e : array) values.push_back(static_cast<float>(get_number(e)));
+            if (!values.empty() && std::isnan(values[0])) malformed(std::string(what) + " contain NaN");
             for (size_t i = 1; i < values.size(); i++) {
                 if (!(values[i - 1] < values[i])) malformed(std::string(what) + " are not strictly increasing");
             }
@@ -608,6 +607,7 @@ namespace lignum {
 
         void check_borders(const std::vector<float>& borders, const char* what) {
             if (borders.size() > 65534) malformed(std::string("too many ") + what);
+            if (!borders.empty() && std::isnan(borders[0])) malformed(std::string(what) + " contain NaN");
             for (size_t i = 1; i < borders.size(); i++) {
                 if (!(borders[i - 1] < borders[i])) malformed(std::string(what) + " are not strictly increasing");
             }
@@ -1227,9 +1227,10 @@ namespace lignum {
     namespace parsers {
 
         Model load_catboost_json(const std::string& filepath) {
+            const simdjson::padded_string padded(read_file(filepath));
             simdjson::dom::parser parser;
             simdjson::dom::element doc;
-            if (auto error = parser.load(filepath).get(doc)) {
+            if (auto error = parser.parse(padded).get(doc)) {
                 throw std::runtime_error("Cannot parse CatBoost JSON " + filepath + ": " + simdjson::error_message(error));
             }
             try {
@@ -1503,7 +1504,7 @@ namespace lignum {
             return;
         }
         const size_t n_blocks = (n_samples + kBlock - 1) / kBlock;
-        const bool serial = strategy == Strategy::Serial || n_threads <= 1 || n_samples < 8;
+        const bool serial = strategy == Strategy::Serial || n_threads <= 1;
         if (serial || n_blocks == 1) {
             Scratch& s = thread_scratch();
             for (size_t b = 0; b < n_blocks; b++) {
@@ -1704,7 +1705,7 @@ namespace lignum {
             const size_t F = f.floats.size(), C = f.cat_columns.size(), H = f.one_hots.size();
             if (f.n_sources() > 65535) bad();
             for (const auto& x : f.floats) {
-                if (x.column >= f.n_columns || x.borders.empty() || x.borders.size() > 65534) bad();
+                if (x.column >= f.n_columns || x.borders.empty() || x.borders.size() > 65534 || std::isnan(x.borders[0])) bad();
                 for (size_t i = 1; i < x.borders.size(); i++) if (!(x.borders[i - 1] < x.borders[i])) bad();
             }
             for (uint32_t c : f.cat_columns) if (c >= f.n_columns) bad();
@@ -1744,6 +1745,23 @@ namespace lignum {
             if (leaf != f.leaves.size()) bad();
             for (uint16_t s : f.split_source) if (s >= f.n_sources()) bad();
             for (uint8_t e : f.split_equal) if (e > 1) bad();
+            std::vector<uint16_t> max_t(f.n_sources(), 0);
+            for (size_t k = 0; k < f.split_source.size(); k++) {
+                const uint16_t s = f.split_source[k], t = f.split_threshold[k];
+                const uint8_t eq = f.split_equal[k];
+                if (t == 0) bad();
+                if (s < F) {
+                    if (eq != 0 || t > f.floats[s].borders.size()) bad();
+                } else if (s < F + H) {
+                    if (eq != 1 || t > f.one_hots[s - F].values.size()) bad();
+                } else {
+                    if (eq != 0 || t > 65534) bad();
+                }
+                if (t > max_t[s]) max_t[s] = t;
+            }
+            uint64_t cond_sum = 0;
+            for (uint16_t mt : max_t) cond_sum += mt;
+            if (cond_sum > (uint64_t{64} << 20)) bad();
         }
 
     } // namespace

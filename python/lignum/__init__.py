@@ -139,10 +139,13 @@ class Model:
     def _catboost_frame(self, X) -> np.ndarray:
         """float64 matrix of a pandas DataFrame, column by column: categorical columns as the
         hashes of their categories (cached per categories object) indexed by their codes."""
-        out = np.empty(X.shape, dtype=np.float64)
+        out_cols = min(X.shape[1], self.n_features)
+        out = np.empty((X.shape[0], out_cols), dtype=np.float64)
         iter_arrays = getattr(X, "_iter_column_arrays", None)  # pandas internals: ~1 µs per column
-        arrays = iter_arrays() if iter_arrays is not None else (X.iloc[:, j].array for j in range(X.shape[1]))
+        arrays = iter_arrays() if iter_arrays is not None else (X.iloc[:, j].array for j in range(out_cols))
         for j, a in enumerate(arrays):
+            if j >= out_cols:
+                break
             if j not in self._categorical:
                 out[:, j] = a if isinstance(a, np.ndarray) else a.to_numpy(dtype=np.float64, na_value=np.nan)
             elif hasattr(a, "codes") and hasattr(a, "categories"):  # pandas Categorical
@@ -156,8 +159,8 @@ class Model:
         return out
 
     def _category_table(self, categories) -> np.ndarray:
-        """Hashes of a pandas categories Index. Kept while the Index lives (frames sliced from one
-        frame share it), so small frames do not hash every category again."""
+        """Hashes of a pandas categories Index. Cached (bounded to 256 entries, holding references to
+        the cached Index objects for fast identity hits), so small frames do not rehash categories."""
         cache = self._category_cache
         entry = cache.get(id(categories))
         if entry is not None and entry[0] is categories:
@@ -171,7 +174,7 @@ class Model:
     def _recode_table(self, categories, k: int, name) -> np.ndarray | None:
         """Codes of training of a column's categories (an Index), as float64 with NaN for missing and
         one trailing NaN (code -1, a missing value, indexes it); None when every category keeps its
-        code. Cached while the categories object lives (frames sliced from one frame share it)."""
+        code. Cached (bounded to 256 entries, holding references to the cached Index objects)."""
         cache = self._recode_cache
         key = (id(categories), k)
         entry = cache.get(key)
@@ -207,28 +210,34 @@ class Model:
         from pandas import CategoricalDtype
 
         tc = self._training_categories
-        n = min(X.shape[1], self.n_features)
+        out_cols = min(X.shape[1], self.n_features)
         dtypes = X.dtypes
-        categorical = [j for j in range(n) if isinstance(dtypes.iloc[j], CategoricalDtype)]
+        all_categorical = [j for j in range(X.shape[1]) if isinstance(dtypes.iloc[j], CategoricalDtype)]
         lists: dict[int, int] = {}
-        if tc is not None and categorical:
+        if tc is not None and all_categorical:
             if tc["by_position"]:
-                if len(categorical) != len(tc["lists"]):
-                    raise ValueError(f"The input has {len(categorical)} category columns, but the model was trained on "
+                if len(all_categorical) != len(tc["lists"]):
+                    raise ValueError(f"The input has {len(all_categorical)} category columns, but the model was trained on "
                                      f"{len(tc['lists'])} pandas category columns (LightGBM rejects this too: \"train and "
                                      "valid dataset categorical_feature do not match\").")
-                lists = dict(zip(categorical, range(len(categorical))))
+                for k, j in enumerate(all_categorical):
+                    if j < out_cols:
+                        lists[j] = k
             else:
                 where = {feature: k for k, feature in enumerate(tc["features"])}
-                for j in categorical:
+                for j in all_categorical:
+                    if j >= out_cols:
+                        continue
                     if j not in where:
                         raise ValueError(f"Column {X.columns[j]!r} is categorical, but feature {j} of the model is numeric "
                                          "(XGBoost rejects this too).")
                     lists[j] = where[j]
-        out = np.empty(X.shape, dtype=np.float64)
+        out = np.empty((X.shape[0], out_cols), dtype=np.float64)
         iter_arrays = getattr(X, "_iter_column_arrays", None)  # pandas internals: ~1 µs per column
-        arrays = iter_arrays() if iter_arrays is not None else (X.iloc[:, j].array for j in range(X.shape[1]))
+        arrays = iter_arrays() if iter_arrays is not None else (X.iloc[:, j].array for j in range(out_cols))
         for j, a in enumerate(arrays):
+            if j >= out_cols:
+                break
             if not isinstance(a.dtype, CategoricalDtype):
                 out[:, j] = a if isinstance(a, np.ndarray) else a.to_numpy(dtype=np.float64, na_value=np.nan)
                 continue
@@ -331,8 +340,11 @@ class Model:
                 return self._c_model.predict_arrow(schema, array, raw_score, n_jobs, strategy, validate)
             if hasattr(X, "__arrow_c_stream__"):
                 return self._c_model.predict_arrow_stream(X.__arrow_c_stream__(), raw_score, n_jobs, strategy, validate)
-        if validate and _is_pandas(X) and X.ndim == 2:
-            self._check_columns(X.columns)
+        if validate and _is_pandas(X):
+            if X.ndim == 2:
+                self._check_columns(X.columns)
+            elif X.ndim == 1 and hasattr(X, "index"):
+                self._check_columns(X.index)
         if self._categorical:
             if _is_pandas(X) and X.ndim == 2 and len(X) >= _ARROW_MIN_ROWS:
                 table = _arrow_table(X)
@@ -344,6 +356,8 @@ class Model:
             return self._c_model.predict(self._catboost_matrix(X), raw_score, n_jobs, strategy)
         if self._codes_from_frames and _is_pandas(X) and X.ndim == 2 and _has_category_columns(X):
             return self._c_model.predict(self._frame_with_training_codes(X), raw_score, n_jobs, strategy)
+        if _is_pandas(X) and X.ndim == 2 and X.shape[1] > self.n_features:
+            X = X.iloc[:, :self.n_features]
         X_arr = np.ascontiguousarray(X, dtype=np.float64)
         if X_arr.ndim == 1:  # one row
             X_arr = X_arr.reshape(1, -1)
@@ -431,7 +445,7 @@ class Model:
             stats["autotune"] = self.autotune(autotune)
         return stats
 
-    def autotune(self, X: np.ndarray, n_jobs: int = -1, budget: float = 1.0) -> dict:
+    def autotune(self, X: Any, n_jobs: int = -1, budget: float = 1.0) -> dict:
         """
         Measure the interpreter and the compiled trees on a sample and use each where it is faster.
 
@@ -444,7 +458,7 @@ class Model:
 
         Parameters
         ----------
-        X : array-like, shape (n_samples, n_features)
+        X : array-like or Arrow data, shape (n_samples, n_features)
             Representative rows (a few thousand are enough).
         n_jobs : int, default=-1
             Threads, as in `predict`.
@@ -458,13 +472,40 @@ class Model:
         """
         if not self.uses_compiled:
             raise RuntimeError("autotune needs compiled trees: call compile() or load(..., compiled=...) first.")
-        X = np.ascontiguousarray(X, dtype=np.float64)
+        budget = max(float(budget), 0.0)
+        is_arrow = (not isinstance(X, np.ndarray) and not _is_pandas(X) and
+                    (hasattr(X, "__arrow_c_array__") or hasattr(X, "__arrow_c_stream__")))
+        if is_arrow:
+            if not hasattr(X, "slice") or not hasattr(X, "__len__"):
+                import pyarrow as pa
+
+                X = pa.Table.from_batches(X) if hasattr(X, "read_next_batch") else pa.table(X)
+            n_rows = len(X)
+            batch_of = lambda rows: X.slice(0, rows)
+        else:
+            if self.validate_features and self._feature_names and _is_pandas(X):
+                if X.ndim == 2:
+                    self._check_columns(X.columns)
+                elif X.ndim == 1 and hasattr(X, "index"):
+                    self._check_columns(X.index)
+            if self._codes_from_frames and _is_pandas(X) and X.ndim == 2 and _has_category_columns(X):
+                X_mat = self._frame_with_training_codes(X)
+            else:
+                if _is_pandas(X) and X.ndim == 2 and X.shape[1] > self.n_features:
+                    X = X.iloc[:, :self.n_features]
+                X_mat = np.ascontiguousarray(X, dtype=np.float64)
+                if X_mat.ndim == 1:
+                    X_mat = X_mat.reshape(1, -1)
+            n_rows = len(X_mat)
+            batch_of = lambda rows: X_mat[:rows]
+        if n_rows == 0:
+            raise ValueError("autotune needs at least one row.")
         sizes = []
         n = 1
-        while n < len(X):
+        while n < n_rows:
             sizes.append(n)
             n *= 4
-        sizes.append(len(X))
+        sizes.append(n_rows)
         per_measurement = budget / (2 * len(sizes))
 
         def median_us(batch, min_rows):
@@ -479,12 +520,13 @@ class Model:
             return statistics.median(times) * 1e6
 
         timings = {}
+        prev_min_rows = self._c_model.compiled_min_rows
         try:
             for rows in sizes:
-                batch = X[:rows]
+                batch = batch_of(rows)
                 timings[rows] = (median_us(batch, sys.maxsize), median_us(batch, 0))
         finally:
-            self._c_model.compiled_min_rows = 0
+            self._c_model.compiled_min_rows = prev_min_rows
         threshold = sys.maxsize
         for rows in reversed(sizes):
             interpreter, compiled = timings[rows]
@@ -602,7 +644,7 @@ class Model:
             "written_by": c.written_by or None,
         }
 
-    def save(self, filepath: str) -> None:
+    def save(self, filepath: str | os.PathLike) -> None:
         """
         Save the model in lignum's binary format (`.bin`), which loads by memory mapping in well
         under a millisecond. The compiled trees are not part of it: ship the library written by
@@ -610,7 +652,7 @@ class Model:
 
         Parameters
         ----------
-        filepath : str
+        filepath : path-like
             Destination path of the `.bin` file.
 
         Examples
@@ -619,17 +661,17 @@ class Model:
         model.save("optimized_model.bin")
         ```
         """
-        self._c_model.save(str(filepath))
+        self._c_model.save(os.fspath(filepath))
 
 
-def load(filepath: str, format: str = "auto", binned: bool = True,
+def load(filepath: str | os.PathLike, format: str = "auto", binned: bool = True,
          compiled: str | os.PathLike | None = None, validate_features: bool = True) -> Model:
     """
     Load a trained model: LightGBM, XGBoost or CatBoost files, or a lignum `.bin`.
 
     Parameters
     ----------
-    filepath : str
+    filepath : path-like
         Path to the model file on disk.
     format : {'auto', 'lignum', 'lightgbm', 'xgboost', 'catboost'}, default='auto'
         Library of the model. The file's own bytes tell which of its formats it is, so 'auto'
@@ -670,10 +712,11 @@ def load(filepath: str, format: str = "auto", binned: bool = True,
     model = lignum.load("xgboost_model.json", format="xgboost")
     ```
     """
-    if not os.path.exists(filepath):
-        raise FileNotFoundError(f"File not found: {filepath}")
+    path = os.fspath(filepath)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"File not found: {path}")
 
-    model = Model(_core.load(str(filepath), format, binned), validate_features)
+    model = Model(_core.load(path, format, binned), validate_features)
     if compiled is not None:
         model.load_compiled(compiled)
     return model

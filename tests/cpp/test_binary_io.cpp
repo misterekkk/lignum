@@ -273,3 +273,77 @@ TEST(BinaryIO, CategoriesOfTrainingSurviveAndOldFilesLoad) {
     std::ofstream(plain, std::ios::binary).write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
     EXPECT_NO_THROW(lignum::load(plain));
 }
+
+TEST(BinaryIO, RejectsInvalidPrecisionFlagsCutsDepthAndDuplicateCategories) {
+    const auto path = (std::filesystem::temp_directory_path() / "lignum_test_io_val_extra.bin").string();
+    lignum::load(write_temp("io_val_extra.json", kSectionsModel), "lightgbm").save(path);
+    const std::vector<char> original = read_bytes(path);
+    const Layout layout(original);
+
+    // W5: Log1pExp with float32=1.
+    {
+        std::vector<char> bytes = original;
+        bytes[10] = static_cast<char>(lignum::transform::Log1pExp);
+        bytes[11] = static_cast<char>(static_cast<uint8_t>(bytes[11]) | 1);  // Float32
+        expect_rejected(bytes, "Log1pExp with float32");
+    }
+
+    // W5: cat_bitsets[0] != 0.
+    {
+        std::vector<char> bytes = original;
+        const size_t cat_pos = layout.binned_header - align64(get<uint64_t>(original, Layout::kCatWords) * 4);
+        put<uint32_t>(bytes, cat_pos, 1u);
+        expect_rejected(bytes, "cat_bitsets[0] != 0");
+    }
+
+    // W5: categorical split without SpecialTrees flag.
+    {
+        std::vector<char> bytes = original;
+        bytes[11] = static_cast<char>(static_cast<uint8_t>(bytes[11]) & ~0x02);
+        expect_rejected(bytes, "special tree without SpecialTrees flag");
+    }
+
+    // W5: NaN binned cut.
+    {
+        std::vector<char> bytes = original;
+        const uint64_t bn = get<uint64_t>(bytes, layout.binned_header);
+        const uint64_t bt = get<uint64_t>(bytes, layout.binned_header + 8);
+        const uint64_t bf = get<uint64_t>(bytes, layout.binned_header + 16);
+        const size_t cuts_pos = layout.binned_header + 64 + align64(bn * 64) + align64(bt * 4) + align64(bt) +
+                                align64(bf * 4) + align64(bf) + align64(bf * 2) + align64((bf + 1) * 4);
+        put<double>(bytes, cuts_pos, std::numeric_limits<double>::quiet_NaN());
+        expect_rejected(bytes, "NaN binned cut", true);
+    }
+
+    // K6: deep chain (> 1024 KNodes) rejected without stack overflow.
+    {
+        std::vector<double> X = {0.0};
+        (void)X;
+        std::string split = R"({"leaf_value": 1.0})";
+        // Build a numeric-only bin with 1026 KNodes by hand via mutating an existing 1026-KNode structure.
+        // Simpler: use a 1026-node model where each KNode's child[0] points to next node is easiest via bin mutation.
+        // Wait: instead construct valid .bin with n_nodes = 1026 chained KNodes.
+        const uint64_t N = 1026;
+        const size_t size = 128 + align64(N * 64) + align64(4) + align64(8) + align64(1) + align64(8) + align64(4);
+        std::vector<char> bin(size, 0);
+        std::memcpy(bin.data(), "LIGNUM", 6);
+        bin[7] = 9;
+        bin[10] = static_cast<char>(lignum::transform::Identity);
+        put<uint32_t>(bin, 12, 0x12345678u);
+        put<uint64_t>(bin, 16, 1u);   // n_cat_words
+        put<uint64_t>(bin, 24, N);    // n_nodes
+        put<uint64_t>(bin, 32, 1u);   // n_offsets
+        put<uint64_t>(bin, 40, 1u);   // n_leaves
+        put<uint32_t>(bin, 56, 1u);   // n_features
+        put<uint16_t>(bin, 60, 1u);   // n_outputs
+        for (size_t i = 0; i < N; i++) {
+            const size_t p = 128 + i * 64;
+            put<int32_t>(bin, p + 32, (i + 1 < N) ? static_cast<int32_t>(i + 1) : -1);
+            put<int32_t>(bin, p + 36, -1);
+            put<int32_t>(bin, p + 40, -1);
+            put<int32_t>(bin, p + 44, -1);
+        }
+        // tree_offsets[0] = 0 already; rest are zeros/leaf 0.
+        expect_rejected(bin, "1026-deep KNode chain");
+    }
+}

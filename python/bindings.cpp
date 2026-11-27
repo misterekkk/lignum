@@ -206,7 +206,7 @@ NB_MODULE(_core, m) {
             CompileStats stats;
             {
                 nb::gil_scoped_release release;
-                self.compiled = compile_forest(self, options, &stats);
+                set_compiled(self, compile_forest(self, options, &stats));
             }
             nb::dict result;
             result["codegen_ms"] = stats.codegen_ms;
@@ -225,18 +225,19 @@ NB_MODULE(_core, m) {
                 nb::gil_scoped_release release;
                 compiled = load_compiled(self, library);
             }
-            self.compiled = compiled;
+            set_compiled(self, std::move(compiled));
         }, nb::arg("library"), "Attaches a library built earlier by compile() for this model.")
-        .def("decompile", [](Model& self) { self.compiled = nullptr; }, "Drops the compiled trees.")
-        .def_prop_ro("uses_compiled", [](const Model& self) { return self.compiled != nullptr; })
+        .def("decompile", [](Model& self) { set_compiled(self, nullptr); }, "Drops the compiled trees.")
+        .def_prop_ro("uses_compiled", [](const Model& self) { return get_compiled(self) != nullptr; })
         .def_prop_ro("compiled_library", [](const Model& self) -> std::optional<std::string> {
-            if (!self.compiled) return std::nullopt;
-            return self.compiled->library;
+            const auto compiled = get_compiled(self);
+            if (!compiled) return std::nullopt;
+            return compiled->library;
         }, "Path of the compiled library in use, or None.")
         .def_prop_rw("compiled_min_rows", [](const Model& self) { return self.compiled_min_rows; },
                      [](Model& self, size_t rows) { self.compiled_min_rows = rows; },
                      "Batches with fewer rows use the interpreter even when compiled.")
-        .def("save", &Model::save, nb::arg("filepath"), "Saves lignum format model to binary.")
+        .def("save", &Model::save, nb::arg("filepath"), nb::call_guard<nb::gil_scoped_release>(), "Saves lignum format model to binary.")
         .def_prop_ro("n_outputs", [](const Model& self) { return self.n_outputs; }, "Number of outputs (classes for multiclass models).")
         .def_prop_ro("uses_binned", [](const Model& self) { return self.binned != nullptr; },
                      "Whether batches use the binned kernel (False when disabled or unsupported by the model).")
@@ -283,6 +284,7 @@ NB_MODULE(_core, m) {
                            : n_rows > 0 && PyUnicode_Check(PyList_GetItem(outer.ptr(), 0));
         if (one_row) {
             nb::object wrapped = nb::steal(PyList_New(1));
+            if (!wrapped.is_valid()) throw nb::python_error();
             PyList_SetItem(wrapped.ptr(), 0, outer.release().ptr());
             outer = wrapped;
             n_rows = 1;
@@ -316,5 +318,5 @@ NB_MODULE(_core, m) {
     }, nb::arg("rows"), nb::arg("categorical"), "Rows with categories as a float64 matrix of CatBoost hashes.");
 
     m.def("load", &lignum::load, nb::arg("filepath"), nb::arg("format") = "auto", nb::arg("binned") = true,
-          "Loads the JSON or binary file format.");
+          nb::call_guard<nb::gil_scoped_release>(), "Loads the JSON or binary file format.");
 }

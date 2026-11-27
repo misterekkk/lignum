@@ -1,5 +1,6 @@
 #include "compiled.hpp"
 #include "binned.hpp"
+#include "paths.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -13,6 +14,7 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -32,6 +34,7 @@
 #else
     #include <cerrno>
     #include <dlfcn.h>
+    #include <fcntl.h>
     #include <spawn.h>
     #include <sys/stat.h>
     #include <sys/wait.h>
@@ -55,6 +58,7 @@ namespace lignum {
 
         // Exact C literal for a double (hex float).
         std::string literal(double v) {
+            if (std::isnan(v)) return "NAN";
             if (std::isinf(v)) return v > 0 ? "INFINITY" : "-INFINITY";
             char text[64];
             std::snprintf(text, sizeof(text), "%a", v);
@@ -274,22 +278,133 @@ namespace lignum {
             "#if defined(_WIN32)\n#define LIGNUM_EXPORT __declspec(dllexport)\n"
             "#else\n#define LIGNUM_EXPORT __attribute__((visibility(\"default\")))\n#endif\n\n";
 
-        int run(const std::string& command) {
+        // Splits compiler flags cleanly without invoking a shell; supports quotes and backslash escapes.
+        std::vector<std::string> split_flags(const std::string& flags) {
+            std::vector<std::string> out;
+            std::string current;
+            bool in_token = false;
+            char quote_char = '\0';
+            for (size_t i = 0; i < flags.size(); i++) {
+                const char ch = flags[i];
+                if (quote_char) {
+                    if (ch == quote_char) {
+                        quote_char = '\0';
+                    } else if (ch == '\\' && quote_char == '"' && i + 1 < flags.size() &&
+                               (flags[i + 1] == '"' || flags[i + 1] == '\\')) {
+                        current += flags[++i];
+                    } else {
+                        current += ch;
+                    }
+                    in_token = true;
+                } else if (ch == '"' || ch == '\'') {
+                    quote_char = ch;
+                    in_token = true;
+                } else if (ch == '\\' && i + 1 < flags.size()) {
+                    current += flags[++i];
+                    in_token = true;
+                } else if (std::isspace(static_cast<unsigned char>(ch))) {
+                    if (in_token) {
+                        out.push_back(std::move(current));
+                        current.clear();
+                        in_token = false;
+                    }
+                } else {
+                    current += ch;
+                    in_token = true;
+                }
+            }
+            if (quote_char) throw std::invalid_argument("Unclosed quote in compiler flags.");
+            if (in_token) out.push_back(std::move(current));
+            return out;
+        }
+
+    #if defined(_WIN32)
+        std::wstring quote_win32_arg(const std::wstring& arg) {
+            if (!arg.empty() && arg.find_first_of(L" \t\n\v\"") == std::wstring::npos) return arg;
+            std::wstring out = L"\"";
+            for (auto it = arg.begin();; ++it) {
+                size_t backslashes = 0;
+                while (it != arg.end() && *it == L'\\') {
+                    ++it;
+                    ++backslashes;
+                }
+                if (it == arg.end()) {
+                    out.append(backslashes * 2, L'\\');
+                    break;
+                }
+                if (*it == L'"') {
+                    out.append(backslashes * 2 + 1, L'\\');
+                    out.push_back(L'"');
+                } else {
+                    out.append(backslashes, L'\\');
+                    out.push_back(*it);
+                }
+            }
+            out.push_back(L'"');
+            return out;
+        }
+
+        std::wstring utf8_to_wide(const std::string& s) {
+            return utf8_path(s).wstring();
+        }
+    #endif
+
+        // Runs `argv` directly without invoking a shell (`/bin/sh` or `cmd.exe`), redirecting
+        // stdout and stderr to `log_path` (or /dev/null / NUL when empty).
+        int run_process(const std::vector<std::string>& argv, const std::filesystem::path& log_path = {}) {
+            if (argv.empty()) return -1;
         #if defined(_WIN32)
-            // cmd /c drops the first and last quote of the line; wrap it so quoted paths survive.
-            return std::system(("\"" + command + "\"").c_str());
+            std::wstring cmdline;
+            for (size_t i = 0; i < argv.size(); i++) {
+                if (i) cmdline += L' ';
+                cmdline += quote_win32_arg(utf8_to_wide(argv[i]));
+            }
+            SECURITY_ATTRIBUTES sa{};
+            sa.nLength = sizeof(sa);
+            sa.bInheritHandle = TRUE;
+            const std::wstring target = log_path.empty() ? std::wstring(L"NUL") : log_path.wstring();
+            HANDLE hLog = CreateFileW(target.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                                      CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (hLog == INVALID_HANDLE_VALUE) return -1;
+            STARTUPINFOW si{};
+            si.cb = sizeof(si);
+            si.dwFlags = STARTF_USESTDHANDLES;
+            si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+            si.hStdOutput = hLog;
+            si.hStdError = hLog;
+            PROCESS_INFORMATION pi{};
+            const BOOL ok = CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+            CloseHandle(hLog);
+            if (!ok) return -1;
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            DWORD code = 1;
+            GetExitCodeProcess(pi.hProcess, &code);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            return static_cast<int>(code);
         #else
-            // /bin/sh -c through posix_spawn, not std::system: macOS' system() holds a global lock
-            // until the child exits, so the parallel compiles ran one after another (M4, California:
-            // 8.3 s instead of 1.6 s).
+            posix_spawn_file_actions_t actions;
+            if (posix_spawn_file_actions_init(&actions) != 0) return -1;
+            const std::string target = log_path.empty() ? std::string("/dev/null") : log_path.string();
+            const int open_rc = posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, target.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            const int dup_rc = open_rc == 0 ? posix_spawn_file_actions_adddup2(&actions, STDOUT_FILENO, STDERR_FILENO) : -1;
+            if (open_rc != 0 || dup_rc != 0) {
+                posix_spawn_file_actions_destroy(&actions);
+                return -1;
+            }
+            std::vector<char*> c_argv;
+            c_argv.reserve(argv.size() + 1);
+            for (const auto& a : argv) c_argv.push_back(const_cast<char*>(a.c_str()));
+            c_argv.push_back(nullptr);
             #if defined(__APPLE__)
             char** env = *_NSGetEnviron();
             #else
             char** env = environ;
             #endif
-            const char* argv[] = {"sh", "-c", command.c_str(), nullptr};
-            pid_t pid;
-            if (posix_spawn(&pid, "/bin/sh", nullptr, nullptr, const_cast<char* const*>(argv), env) != 0) return -1;
+            pid_t pid = 0;
+            const int spawn_rc = posix_spawnp(&pid, argv[0].c_str(), &actions, nullptr, c_argv.data(), env);
+            posix_spawn_file_actions_destroy(&actions);
+            if (spawn_rc != 0) return -1;
             int status = 0;
             while (waitpid(pid, &status, 0) < 0) {
                 if (errno != EINTR) return -1;
@@ -298,13 +413,9 @@ namespace lignum {
         #endif
         }
 
-        std::string quote(const std::string& s) { return "\"" + s + "\""; }
-
     #if defined(_WIN32)
-        constexpr const char* kNull = "NUL";
         constexpr const char* kLibraryExtension = ".dll";
     #else
-        constexpr const char* kNull = "/dev/null";
         constexpr const char* kLibraryExtension = ".so";
     #endif
 
@@ -367,44 +478,52 @@ namespace lignum {
         // The C compiler and how to drive it.
         struct Toolchain {
             std::string compiler;
-            bool msvc = false;     // cl / clang-cl command line; otherwise gcc / clang
-            std::string prefix;    // Windows: sets up the Visual Studio environment first
-            std::string name() const { return prefix.empty() ? compiler : compiler + " (Visual Studio)"; }
+            bool msvc = false;          // cl / clang-cl command line; otherwise gcc / clang
+            std::filesystem::path vcvars;  // Windows: vcvarsall.bat path when discovered via vswhere
+            std::string name() const { return vcvars.empty() ? compiler : compiler + " (Visual Studio)"; }
         };
 
         bool msvc_style(const std::string& compiler) {
-            std::string base = std::filesystem::path(compiler).filename().string();
+            std::string base = utf8_path(compiler).filename().string();
             std::transform(base.begin(), base.end(), base.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
             return base == "cl" || base == "cl.exe" || base == "clang-cl" || base == "clang-cl.exe";
         }
 
         bool responds(const Toolchain& t) {
-            const std::string probe = t.msvc ? t.compiler + " /?" : t.compiler + " --version";
-            return run(t.prefix + probe + " > " + kNull + " 2>&1") == 0;
+            if (!t.vcvars.empty()) return std::filesystem::exists(t.vcvars);
+            return run_process({t.compiler, t.msvc ? "/?" : "--version"}) == 0;
         }
 
     #if defined(_WIN32)
         // vcvarsall.bat of the newest Visual Studio with the C++ tools, found with vswhere.
-        std::string visual_studio_environment() {
+        std::filesystem::path visual_studio_vcvars() {
             const char* root = std::getenv("ProgramFiles(x86)");
-            if (!root) return "";
+            if (!root) return {};
             const std::filesystem::path vswhere = std::filesystem::path(root) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe";
-            if (!std::filesystem::exists(vswhere)) return "";
-            const auto out = std::filesystem::temp_directory_path() / "lignum_vswhere.txt";
-            const std::string command = quote(vswhere.string()) + " -latest -products * -property installationPath > " + quote(out.string());
-            if (run(command) != 0) return "";
+            if (!std::filesystem::exists(vswhere)) return {};
+            const auto out = std::filesystem::temp_directory_path() / ("lignum_vswhere_" + unique_suffix() + ".txt");
+            const int rc = run_process({vswhere.string(), "-latest", "-products", "*", "-property", "installationPath"}, out);
             std::string path;
-            std::getline(std::ifstream(out), path);
-            std::filesystem::remove(out);
-            while (!path.empty() && (path.back() == '\r' || path.back() == ' ')) path.pop_back();
-            const auto vcvars = std::filesystem::path(path) / "VC" / "Auxiliary" / "Build" / "vcvarsall.bat";
-            if (path.empty() || !std::filesystem::exists(vcvars)) return "";
-        #if defined(_M_ARM64)
-            const char* arch = "arm64";
-        #else
-            const char* arch = "x64";
-        #endif
-            return "call " + quote(vcvars.string()) + " " + arch + " > NUL && ";
+            if (rc == 0) {
+                std::ifstream in(out);
+                std::getline(in, path);
+            }
+            std::error_code ec;
+            std::filesystem::remove(out, ec);
+            while (!path.empty() && (path.back() == '\r' || path.back() == ' ' || path.back() == '\n')) path.pop_back();
+            if (path.empty()) return {};
+            const auto vcvars = utf8_path(path) / "VC" / "Auxiliary" / "Build" / "vcvarsall.bat";
+            return std::filesystem::exists(vcvars) ? vcvars : std::filesystem::path{};
+        }
+
+        std::string quote_rsp_arg(const std::string& arg) {
+            std::string out = "\"";
+            for (char c : arg) {
+                if (c == '"' || c == '\\') out += '\\';
+                out += c;
+            }
+            out += '"';
+            return out;
         }
     #endif
 
@@ -412,16 +531,16 @@ namespace lignum {
         Toolchain find_toolchain(const std::string& requested) {
             std::vector<Toolchain> candidates;
             if (!requested.empty() && requested != "auto") {
-                candidates.push_back({requested, msvc_style(requested), ""});
+                candidates.push_back({requested, msvc_style(requested), {}});
             } else {
             #if defined(_WIN32)
-                candidates.push_back({"cl", true, ""});
-                const std::string vs = visual_studio_environment();
-                if (!vs.empty()) candidates.push_back({"cl", true, vs});
-                candidates.push_back({"gcc", false, ""});
-                candidates.push_back({"clang", false, ""});
+                candidates.push_back({"cl", true, {}});
+                const auto vcvars = visual_studio_vcvars();
+                if (!vcvars.empty()) candidates.push_back({"cl", true, vcvars});
+                candidates.push_back({"gcc", false, {}});
+                candidates.push_back({"clang", false, {}});
             #else
-                candidates.push_back({"cc", false, ""});
+                candidates.push_back({"cc", false, {}});
             #endif
             }
             for (const auto& t : candidates) {
@@ -436,33 +555,73 @@ namespace lignum {
         void build(const Toolchain& t, const std::string& flags, const std::vector<std::filesystem::path>& c_files,
                    const std::filesystem::path& dir, const std::filesystem::path& library) {
             const std::filesystem::path log = dir / "build.log";
+            const std::vector<std::string> parsed_flags = split_flags(flags);
             if (t.msvc) {
                 // One command: /MP compiles the files in parallel, /LD links the DLL.
-                std::string command = t.prefix + t.compiler + " /nologo " + (flags.empty() ? "/O2" : flags) + " /LD /MP /Fo" +
-                                      quote(dir.string() + "\\\\") + " /Fe" + quote(library.string());  // "dir\\": a lone \ would escape the quote
-                for (const auto& c : c_files) command += " " + quote(c.string());
-                if (run(command + " > " + quote(log.string()) + " 2>&1") != 0) build_failed("Compiling the generated code failed", log);
+                std::vector<std::string> args = {"/nologo"};
+                if (parsed_flags.empty()) args.push_back("/O2");
+                else args.insert(args.end(), parsed_flags.begin(), parsed_flags.end());
+                args.push_back("/LD");
+                args.push_back("/MP");
+                args.push_back("/Fo" + dir.string() + "\\");
+                args.push_back("/Fe" + library.string());
+                for (const auto& c : c_files) args.push_back(c.string());
+            #if defined(_WIN32)
+                if (!t.vcvars.empty()) {
+                    const std::filesystem::path rsp = dir / "cl.rsp";
+                    {
+                        std::ofstream rsp_out(rsp, std::ios::binary);
+                        for (const auto& a : args) rsp_out << quote_rsp_arg(a) << "\n";
+                        if (!rsp_out) build_failed("Writing response file failed", log);
+                    }
+                    const std::filesystem::path bat = dir / "run_vs.bat";
+                    {
+                        #if defined(_M_ARM64)
+                        const char* arch = "arm64";
+                        #else
+                        const char* arch = "x64";
+                        #endif
+                        std::ofstream bat_out(bat, std::ios::binary);
+                        bat_out << "@echo off\r\ncall \"" << t.vcvars.string() << "\" " << arch << " > NUL || exit /b 1\r\n\""
+                                << t.compiler << "\" @\"" << rsp.string() << "\"\r\n";
+                        if (!bat_out) build_failed("Writing Visual Studio wrapper failed", log);
+                    }
+                    if (run_process({"cmd.exe", "/d", "/c", bat.string()}, log) != 0) {
+                        build_failed("Compiling the generated code failed", log);
+                    }
+                    return;
+                }
+            #endif
+                std::vector<std::string> argv = {t.compiler};
+                argv.insert(argv.end(), args.begin(), args.end());
+                if (run_process(argv, log) != 0) build_failed("Compiling the generated code failed", log);
                 return;
             }
-        #if defined(_WIN32)
-            const std::string pic;
-        #else
-            const std::string pic = " -fPIC";
-        #endif
-            std::vector<std::string> objects(c_files.size()), commands(c_files.size());
+            std::vector<std::string> objects(c_files.size());
+            std::vector<std::vector<std::string>> argvs(c_files.size());
             std::vector<int> status(c_files.size(), 0);
             for (size_t p = 0; p < c_files.size(); p++) {
                 objects[p] = (dir / (c_files[p].stem().string() + ".o")).string();
-                commands[p] = t.prefix + t.compiler + " " + (flags.empty() ? "-O2" : flags) + pic + " -c " + quote(c_files[p].string()) +
-                              " -o " + quote(objects[p]) + " > " + quote(objects[p] + ".log") + " 2>&1";
+                auto& argv = argvs[p];
+                argv.push_back(t.compiler);
+                if (parsed_flags.empty()) argv.push_back("-O2");
+                else argv.insert(argv.end(), parsed_flags.begin(), parsed_flags.end());
+            #if !defined(_WIN32)
+                argv.push_back("-fPIC");
+            #endif
+                argv.push_back("-c");
+                argv.push_back(c_files[p].string());
+                argv.push_back("-o");
+                argv.push_back(objects[p]);
             }
             std::vector<std::thread> workers;
             workers.reserve(c_files.size());
             for (size_t p = 0; p < c_files.size(); p++) {
+                const std::filesystem::path obj_log = objects[p] + ".log";
                 // An exception escaping a thread would end the process (std::terminate): a failure.
-                workers.emplace_back([&status, &commands, p] {
+                workers.emplace_back([&status, &argvs, obj_log, p] {
                     try {
-                        status[p] = run(commands[p]);
+                        status[p] = run_process(argvs[p], obj_log);
                     } catch (...) {
                         status[p] = -1;
                     }
@@ -477,9 +636,9 @@ namespace lignum {
                 out.close();
                 build_failed("Compiling the generated code failed", log);
             }
-            std::string link = t.prefix + t.compiler + " -shared -o " + quote(library.string());
-            for (const auto& o : objects) link += " " + quote(o);
-            if (run(link + " > " + quote(log.string()) + " 2>&1") != 0) build_failed("Linking the generated code failed", log);
+            std::vector<std::string> link = {t.compiler, "-shared", "-o", library.string()};
+            link.insert(link.end(), objects.begin(), objects.end());
+            if (run_process(link, log) != 0) build_failed("Linking the generated code failed", log);
         }
 
         // Version of the generated functions' interface and semantics; bump on any change to the
@@ -538,8 +697,9 @@ namespace lignum {
         void* open_handle(const std::string& library) {
         #if defined(_WIN32)
             // LoadLibrary appends ".dll" to a name without an extension; a trailing dot prevents it.
-            std::wstring name = std::filesystem::path(library).wstring();
-            if (!std::filesystem::path(library).has_extension()) name += L".";
+            const std::filesystem::path p = utf8_path(library);
+            std::wstring name = p.wstring();
+            if (!p.has_extension()) name += L".";
             void* handle = static_cast<void*>(LoadLibraryW(name.c_str()));
             if (!handle) {
                 throw std::runtime_error("LoadLibrary failed for " + library + " (error " + std::to_string(GetLastError()) +
@@ -641,22 +801,33 @@ namespace lignum {
             return "";
         }
 
-        // The fallback cache lives in the temporary folder, which other users can write to: a
-        // library someone else put there under the expected name would be loaded and run. So it is
-        // used only when it is a real folder owned by this user that nobody else can write.
-        void require_private(const fs::path& dir) {
+        // Creates and locks the fallback cache in the temporary folder without TOCTOU races on
+        // POSIX: mkdir(0700) then open(O_NOFOLLOW) + fstat + fchmod on the opened descriptor.
+        void create_private_dir(const fs::path& dir) {
         #if !defined(_WIN32)  // %TEMP% is per user on Windows
-            struct stat st;
-            if (lstat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == geteuid()) {
+            if (dir.has_parent_path()) {
                 std::error_code ec;
-                fs::permissions(dir, fs::perms::owner_all, fs::perm_options::replace, ec);
-                if (!ec && lstat(dir.c_str(), &st) == 0 && (st.st_mode & (S_IWGRP | S_IWOTH)) == 0) return;
+                fs::create_directories(dir.parent_path(), ec);
             }
-            throw std::runtime_error("The compiled-library cache " + dir.string() + " is in the shared temporary folder (HOME and "
-                                     "LIGNUM_CACHE_DIR are not set) and is not a folder only this user can write; set "
-                                     "LIGNUM_CACHE_DIR, or pass library= to write the library to a chosen path.");
+            if (mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) {
+                throw std::runtime_error("Cannot create private compiled-library cache " + dir.string() + ".");
+            }
+            const int fd = open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+            auto bad = [&] {
+                if (fd >= 0) close(fd);
+                throw std::runtime_error("The compiled-library cache " + dir.string() + " is in the shared temporary folder (HOME and "
+                                         "LIGNUM_CACHE_DIR are not set) and is not a folder only this user can write; set "
+                                         "LIGNUM_CACHE_DIR, or pass library= to write the library to a chosen path.");
+            };
+            if (fd < 0) bad();
+            struct stat st{};
+            if (fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid()) bad();
+            if ((st.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+                if (fchmod(fd, 0700) != 0 || fstat(fd, &st) != 0 || (st.st_mode & (S_IWGRP | S_IWOTH)) != 0) bad();
+            }
+            close(fd);
         #else
-            (void)dir;
+            fs::create_directories(dir);
         #endif
         }
 
@@ -669,15 +840,16 @@ namespace lignum {
 
     std::shared_ptr<const CompiledForest> load_compiled(const Model& model, const std::string& library) {
         require_compilable(model);
-        if (std::filesystem::is_directory(library)) {
-            const std::string file = (std::filesystem::path(library) / compiled_library_name(model)).string();
+        const auto lib_path = utf8_path(library);
+        if (std::filesystem::is_directory(lib_path)) {
+            const auto file = lib_path / compiled_library_name(model);
             if (!std::filesystem::exists(file)) {
                 throw std::runtime_error("Compiled library not found: no " + compiled_library_name(model) + " (this model on " +
                                          compiled_platform() + ") in " + library);
             }
-            return open_library(model, file);
+            return open_library(model, file.string());
         }
-        if (!std::filesystem::exists(library)) throw std::runtime_error("Compiled library not found: " + library);
+        if (!std::filesystem::exists(lib_path)) throw std::runtime_error("Compiled library not found: " + library);
         return open_library(model, library);
     }
 
@@ -734,7 +906,11 @@ namespace lignum {
                 // Bank 51.8 -> 46.8 ms. The empty asm hides the contents, so the compiler loads
                 // the leaves instead of folding them back into constants.
                 src << "static const " << acc << " leaves_" << b << "[" << std::max<size_t>(1, gen.table().size()) << "] = {";
-                for (size_t k = 0; k < gen.table().size(); k++) src << (k ? ", " : "") << (model.float32 ? "(float)" : "") << literal(gen.table()[k]);
+                if (gen.table().empty()) {
+                    src << "0.0";
+                } else {
+                    for (size_t k = 0; k < gen.table().size(); k++) src << (k ? ", " : "") << (model.float32 ? "(float)" : "") << literal(gen.table()[k]);
+                }
                 src << "};\n"
                     << "LIGNUM_EXPORT void lignum_block_" << b << "(const uint16_t* restrict codes, const uint64_t* restrict decisions, size_t n, double* restrict out) {\n"
                     << "  const " << acc << "* restrict L = leaves_" << b << "; LIGNUM_KEEP(L);\n";
@@ -774,7 +950,7 @@ namespace lignum {
         const bool requested = !options.library.empty();
         fs::path target;
         if (requested) {
-            target = options.library;
+            target = utf8_path(options.library);
             const char last = options.library.back();
             if (fs::is_directory(target) || last == '/' || last == '\\') {
                 fs::create_directories(target);
@@ -784,9 +960,9 @@ namespace lignum {
                 fs::create_directories(target.parent_path());
             }
         } else {
-            const fs::path dir = options.cache_dir.empty() ? fs::path(default_cache_dir()) : fs::path(options.cache_dir);
-            fs::create_directories(dir);
-            if (options.cache_dir.empty() && user_cache_dir().empty()) require_private(dir);
+            const fs::path dir = options.cache_dir.empty() ? utf8_path(default_cache_dir()) : utf8_path(options.cache_dir);
+            if (options.cache_dir.empty() && user_cache_dir().empty()) create_private_dir(dir);
+            else fs::create_directories(dir);
             target = dir / ("lignum_" + hex16(key.get()) + "_" + compiled_platform() + kLibraryExtension);
         }
         st.library = target.string();
@@ -811,7 +987,10 @@ namespace lignum {
             std::vector<fs::path> c_files(sources.size());
             for (size_t p = 0; p < sources.size(); p++) {
                 c_files[p] = dir.path / ("lignum_" + std::to_string(p) + ".c");
-                std::ofstream(c_files[p], std::ios::binary) << sources[p];
+                std::ofstream out(c_files[p], std::ios::binary);
+                out.write(sources[p].data(), static_cast<std::streamsize>(sources[p].size()));
+                out.close();
+                if (!out) throw std::runtime_error("Failed to write generated C source: " + c_files[p].string());
             }
             const fs::path built = dir.path / (std::string("lignum") + kLibraryExtension);
             build(toolchain, options.flags, c_files, dir.path, built);
@@ -841,7 +1020,7 @@ namespace lignum {
 
     size_t clear_compiled_cache(const std::string& cache_dir) {
         namespace fs = std::filesystem;
-        const fs::path dir = cache_dir.empty() ? fs::path(default_cache_dir()) : fs::path(cache_dir);
+        const fs::path dir = cache_dir.empty() ? utf8_path(default_cache_dir()) : utf8_path(cache_dir);
         std::error_code ec;
         if (!fs::is_directory(dir, ec)) return 0;
         std::vector<fs::path> files;
@@ -858,5 +1037,24 @@ namespace lignum {
     }
 
     const char* compiled_platform() { return LIGNUM_OS "-" LIGNUM_ARCH; }
+
+    namespace {
+        constexpr size_t kCompiledLockStripes = 64;
+        std::mutex g_compiled_locks[kCompiledLockStripes];
+
+        std::mutex& compiled_lock_for(const Model& model) {
+            return g_compiled_locks[(reinterpret_cast<uintptr_t>(&model) >> 4) % kCompiledLockStripes];
+        }
+    } // namespace
+
+    std::shared_ptr<const CompiledForest> get_compiled(const Model& model) {
+        std::lock_guard<std::mutex> lock(compiled_lock_for(model));
+        return model.compiled;
+    }
+
+    void set_compiled(Model& model, std::shared_ptr<const CompiledForest> compiled) {
+        std::lock_guard<std::mutex> lock(compiled_lock_for(model));
+        model.compiled = std::move(compiled);
+    }
 
 } // namespace lignum

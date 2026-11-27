@@ -145,3 +145,16 @@ def test_checked_columns_are_remembered(tmp_path, frame):
     with pytest.raises(ValueError):
         model.predict(swapped)
     np.testing.assert_array_equal(model.predict(X[:5]), reference(X[:5]))
+
+
+def test_series_1d_validates_feature_names(tmp_path, frame):
+    # N7: 1D pandas.Series validates feature names from its index.
+    X, y = frame
+    path, reference = xgboost_json(tmp_path, X, y)
+    model = lg.load(str(path))
+    row = X.iloc[0]
+    np.testing.assert_array_equal(model.predict(row), reference(X.iloc[[0]]))
+    swapped_row = row[["my income", "age", "zł/mies", "debt"]]
+    with pytest.raises(ValueError, match="Column 0 is 'my income'"):
+        model.predict(swapped_row)
+    np.testing.assert_array_equal(model.predict(swapped_row, validate_features=False), model.predict(swapped_row.to_numpy()))

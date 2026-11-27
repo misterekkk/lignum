@@ -294,3 +294,39 @@ TEST(CatBoost, BinaryFilesWithGapsBetweenTreeLeavesAreRejected) {
     const auto damaged = write_temp("catboost_leaf_gap.bin", bytes);
     EXPECT_THROW(lignum::load(damaged), std::runtime_error);
 }
+
+TEST(CatBoost, RejectsSingleNaNBorderZeroThresholdAndAcceptsReorderedJsonKeys) {
+    // W4: 1-element [NaN] / null border rejected.
+    const std::string nan_border =
+        R"({"features_info": {"float_features": [{"feature_index": 0, "flat_feature_index": 0, "borders": [null]}]},
+            "oblivious_trees": [], "scale_and_bias": [1.0, [0.0]]})";
+    EXPECT_THROW(lignum::load(write_temp("catboost_nan_border.json", nan_border), "catboost"), std::runtime_error);
+
+    // W4: split_threshold == 0 in .bin rejected.
+    const std::string ok_json =
+        R"({"features_info": {"float_features": [{"feature_index": 0, "flat_feature_index": 0, "borders": [0.5], "nan_value_treatment": "AsIs"}]},
+            "oblivious_trees": [{"splits": [{"split_index": 0}], "leaf_values": [10.0, 20.0]}],
+            "scale_and_bias": [1.0, [0.0]]})";
+    const auto saved = (std::filesystem::temp_directory_path() / "lignum_cb_t0.bin").string();
+    lignum::load(write_temp("catboost_t0.json", ok_json), "catboost").save(saved);
+    std::ifstream in(saved, std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    // split_threshold array has count=1 followed by uint16_t(1); locate count=1, uint16=1 before split_equal(0).
+    // Easiest: find the ObliviousForest object via save/mutate: look for uint64(1), uint16(1) inside split_threshold.
+    // Specifically: split_source={0}, split_threshold={1}, split_equal={0} -> 64-byte padded blocks!
+    uint8_t pattern[16] = {1,0,0,0,0,0,0,0, 1,0};  // count=1 (8B), value=1 (2B)
+    const size_t hit = bytes.rfind(std::string(reinterpret_cast<const char*>(pattern), 10));
+    ASSERT_NE(hit, std::string::npos);
+    bytes[hit + 8] = 0;  // corrupt threshold 1 -> 0
+    EXPECT_THROW(lignum::load(write_temp("catboost_t0_bad.bin", bytes)), std::runtime_error);
+
+    // W13: reordered JSON keys accepted by both format="auto" and format="catboost".
+    const std::string reordered =
+        R"({"scale_and_bias": [1.0, [0.0]],
+            "oblivious_trees": [{"splits": [{"split_index": 0}], "leaf_values": [10.0, 20.0]}],
+            "features_info": {"float_features": [{"feature_index": 0, "flat_feature_index": 0, "borders": [0.5]}]}})";
+    const auto rpath = write_temp("catboost_reordered.json", reordered);
+    EXPECT_EQ(lignum::test::predict_raw(lignum::load(rpath, "auto"), {1.0}, 1), std::vector<double>{20.0});
+    EXPECT_EQ(lignum::test::predict_raw(lignum::load(rpath, "catboost"), {1.0}, 1), std::vector<double>{20.0});
+}

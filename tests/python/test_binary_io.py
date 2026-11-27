@@ -62,3 +62,18 @@ def test_binned_sections_round_trip(tmp_path, save_binned, load_binned):
 
     assert restored.uses_binned == load_binned
     np.testing.assert_array_equal(restored.predict(X), booster.predict(X))
+
+
+def test_pathlike_load_and_save(tmp_path):
+    # N5: pathlib.Path accepted directly by save() and load().
+    rng = np.random.default_rng(11)
+    X = rng.normal(size=(50, 3))
+    y = (X[:, 0] > 0).astype(int)
+    booster = lgb.train({"objective": "binary", "verbose": -1}, lgb.Dataset(X, y), num_boost_round=5)
+    json_path = tmp_path / "p.json"
+    json_path.write_text(json.dumps(booster.dump_model()))
+    model = lg.load(json_path)
+    bin_path = tmp_path / "p.bin"
+    model.save(bin_path)
+    restored = lg.load(bin_path)
+    np.testing.assert_array_equal(restored.predict(X), booster.predict(X))

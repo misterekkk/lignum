@@ -187,16 +187,27 @@ namespace lignum {
 
             std::string_view at(int64_t i) const {
                 const int64_t k = offset + i;
-                if (kind == 'u') return {data + offsets32[k], static_cast<size_t>(offsets32[k + 1] - offsets32[k])};
-                if (kind == 'U') return {data + offsets64[k], static_cast<size_t>(offsets64[k + 1] - offsets64[k])};
+                if (kind == 'u') {
+                    const int32_t begin = offsets32[k], end = offsets32[k + 1];
+                    if (begin < 0 || end < begin || (end > begin && !data)) throw std::invalid_argument("Malformed Arrow string offsets.");
+                    return {data + begin, static_cast<size_t>(end - begin)};
+                }
+                if (kind == 'U') {
+                    const int64_t begin = offsets64[k], end = offsets64[k + 1];
+                    if (begin < 0 || end < begin || (end > begin && !data)) throw std::invalid_argument("Malformed Arrow large string offsets.");
+                    return {data + begin, static_cast<size_t>(end - begin)};
+                }
                 // View: int32 length; up to 12 bytes inline, else prefix, buffer index, offset.
                 const uint8_t* view = views + 16 * k;
                 int32_t length, buffer, start;
                 std::memcpy(&length, view, 4);
+                if (length < 0) throw std::invalid_argument("Malformed Arrow string view.");
                 if (length <= 12) return {reinterpret_cast<const char*>(view + 4), static_cast<size_t>(length)};
                 std::memcpy(&buffer, view + 8, 4);
                 std::memcpy(&start, view + 12, 4);
-                if (buffer < 0 || 2 + buffer >= array->n_buffers - 1) throw std::invalid_argument("Malformed Arrow string view.");
+                if (buffer < 0 || start < 0 || 2 + buffer >= array->n_buffers - 1 || !array->buffers[2 + buffer]) {
+                    throw std::invalid_argument("Malformed Arrow string view.");
+                }
                 return {static_cast<const char*>(array->buffers[2 + buffer]) + start, static_cast<size_t>(length)};
             }
         };
@@ -208,7 +219,10 @@ namespace lignum {
             else if (f == "U" || f == "Z") s.kind = 'U';
             else if (f == "vu" || f == "vz") s.kind = 'v';
             else return false;
-            if (array.n_buffers < (s.kind == 'v' ? 2 : 3)) throw std::invalid_argument("Malformed Arrow string array.");
+            if (array.offset < 0 || array.length < 0 || array.n_buffers < (s.kind == 'v' ? 2 : 3) || !array.buffers) {
+                throw std::invalid_argument("Malformed Arrow string array.");
+            }
+            if (array.length > 0 && !array.buffers[1]) throw std::invalid_argument("Malformed Arrow string array.");
             s.offset = batch_offset + array.offset;
             s.validity = array.null_count == 0 ? nullptr : static_cast<const uint8_t*>(array.buffers[0]);
             s.array = &array;
@@ -291,23 +305,28 @@ namespace lignum {
             if (schema.dictionary) {
                 if (!array.dictionary) throw std::invalid_argument("Missing Arrow dictionary in " + c.name + ".");
                 if (!kind_of(schema.format, c.integers.kind) || !is_integer(c.integers.kind)) throw unsupported();
-                if (array.n_buffers < 2) throw std::invalid_argument("Malformed Arrow array in " + c.name + ".");
+                if (array.n_buffers < 2 || !array.buffers) throw std::invalid_argument("Malformed Arrow array in " + c.name + ".");
                 c.integers.offset = batch_offset + array.offset;
                 c.integers.validity = array.null_count == 0 ? nullptr : static_cast<const uint8_t*>(array.buffers[0]);
                 c.integers.data = array.buffers[1];
+                if (!c.integers.data && array.length > 0) throw std::invalid_argument("Missing data buffer in " + c.name + ".");
                 const ArrowArray& dict = *array.dictionary;
+                if (dict.offset < 0 || dict.length < 0) throw std::invalid_argument("Malformed Arrow dictionary in " + c.name + ".");
                 Strings values;
                 Column ints;
-                c.dictionary.resize(static_cast<size_t>(std::max<int64_t>(dict.length, 0)));
+                c.dictionary.resize(static_cast<size_t>(dict.length));
                 if (strings_of(schema.dictionary->format, dict, 0, values)) {
                     for (int64_t k = 0; k < dict.length; k++) {
                         c.dictionary[static_cast<size_t>(k)] = values.valid(k) ? static_cast<double>(catboost_hash(values.at(k))) : -1.0;
                     }
-                } else if (kind_of(schema.dictionary->format, ints.kind) && is_integer(ints.kind) && dict.n_buffers >= 2) {
+                } else if (kind_of(schema.dictionary->format, ints.kind) && is_integer(ints.kind) && dict.n_buffers >= 2 && dict.buffers) {
                     ints.offset = dict.offset;
                     ints.validity = dict.null_count == 0 ? nullptr : static_cast<const uint8_t*>(dict.buffers[0]);
                     ints.data = dict.buffers[1];
-                    for (int64_t k = 0; k < dict.length; k++) c.dictionary[static_cast<size_t>(k)] = static_cast<double>(integer_hash_at(ints, k));
+                    if (!ints.data && dict.length > 0) throw std::invalid_argument("Missing dictionary buffer in " + c.name + ".");
+                    for (int64_t k = 0; k < dict.length; k++) {
+                        c.dictionary[static_cast<size_t>(k)] = ints.valid(ints.offset + k) ? static_cast<double>(integer_hash_at(ints, k)) : -1.0;
+                    }
                 } else {
                     throw unsupported();
                 }
@@ -369,18 +388,20 @@ namespace lignum {
             if (!schema.dictionary || !array.dictionary) throw std::invalid_argument("Missing Arrow dictionary in " + name + ".");
             const ArrowSchema& dict_schema = *schema.dictionary;
             const ArrowArray& dict = *array.dictionary;
-            const int64_t n = std::max<int64_t>(dict.length, 0);
+            if (dict.offset < 0 || dict.length < 0) throw std::invalid_argument("Malformed Arrow dictionary in " + name + ".");
+            const int64_t n = dict.length;
             Strings strings;
             Column values;
             const bool text = strings_of(dict_schema.format, dict, 0, strings);
             if (!text) {
-                if (!kind_of(dict_schema.format, values.kind) || values.kind == Kind::Null || dict.n_buffers < 2) {
+                if (!kind_of(dict_schema.format, values.kind) || values.kind == Kind::Null || dict.n_buffers < 2 || !dict.buffers) {
                     throw std::invalid_argument("Unsupported dictionary values (Arrow type '" + std::string(dict_schema.format ? dict_schema.format : "") +
                                                 "') in " + name + "; expected strings, integers, numbers or booleans.");
                 }
                 values.offset = dict.offset;
                 values.validity = dict.null_count == 0 ? nullptr : static_cast<const uint8_t*>(dict.buffers[0]);
                 values.data = dict.buffers[1];
+                if (!values.data && dict.length > 0) throw std::invalid_argument("Missing dictionary buffer in " + name + ".");
             }
             std::vector<double> table(static_cast<size_t>(n), std::numeric_limits<double>::quiet_NaN());
             bool identity = n <= static_cast<int64_t>(tc.lists[list].size());
@@ -415,12 +436,24 @@ namespace lignum {
         // the input; XGBoost's lists belong to columns. A mismatch is an error, as in the libraries.
         void recode_dictionaries(const TrainingCategories& tc, const ArrowSchema& schema, const ArrowArray& batch, size_t nf,
                                  std::vector<Column>& columns, std::vector<std::vector<double>>& tables) {
-            std::vector<size_t> categorical;
-            for (size_t j = 0; j < nf; j++) {
-                if (schema.children[j]->dictionary) categorical.push_back(j);
+            std::vector<std::pair<size_t, size_t>> used_categorical;
+            size_t total_categorical = 0;
+            const size_t total_cols = static_cast<size_t>(schema.n_children);
+            for (size_t j = 0; j < total_cols; j++) {
+                if (!schema.children[j]) continue;
+                if (schema.children[j]->dictionary) {
+                    if (j < nf) used_categorical.emplace_back(j, total_categorical);
+                    total_categorical++;
+                }
             }
-            if (categorical.empty()) return;  // codes (numbers) as they are
-            tables.reserve(categorical.size());
+            if (total_categorical == 0) return;  // codes (numbers) as they are
+            if (tc.by_position && total_categorical != tc.lists.size()) {
+                throw std::invalid_argument("The input has " + std::to_string(total_categorical) + " categorical (dictionary) columns, but the " +
+                                            "model was trained on " + std::to_string(tc.lists.size()) + " pandas category columns " +
+                                            "(LightGBM rejects this too: \"train and valid dataset categorical_feature do not match\").");
+            }
+            if (used_categorical.empty()) return;
+            tables.reserve(used_categorical.size());
             auto apply = [&](size_t j, size_t list) {
                 std::vector<double> table = recode_table(tc, list, *schema.children[j], *batch.children[j], j);
                 if (table.empty()) return;
@@ -429,15 +462,10 @@ namespace lignum {
                 columns[j].remap_size = static_cast<int64_t>(tables.back().size());
             };
             if (tc.by_position) {
-                if (categorical.size() != tc.lists.size()) {
-                    throw std::invalid_argument("The input has " + std::to_string(categorical.size()) + " categorical (dictionary) columns, but the " +
-                                                "model was trained on " + std::to_string(tc.lists.size()) + " pandas category columns " +
-                                                "(LightGBM rejects this too: \"train and valid dataset categorical_feature do not match\").");
-                }
-                for (size_t k = 0; k < categorical.size(); k++) apply(categorical[k], k);
+                for (const auto& [j, k] : used_categorical) apply(j, k);
                 return;
             }
-            for (size_t j : categorical) {
+            for (const auto& [j, _] : used_categorical) {
                 const auto it = std::find(tc.features.begin(), tc.features.end(), static_cast<uint32_t>(j));
                 if (it == tc.features.end()) {
                     throw std::invalid_argument(column_name(*schema.children[j], j) + " is categorical (a dictionary), but feature " + std::to_string(j) +
@@ -449,7 +477,8 @@ namespace lignum {
 
         int threads_for(int n_jobs) {
         #ifdef _OPENMP
-            return n_jobs > 0 ? n_jobs : omp_get_max_threads();
+            const int max_threads = omp_get_max_threads();
+            return (n_jobs <= 0 || n_jobs > max_threads) ? max_threads : n_jobs;
         #else
             (void)n_jobs;
             return 1;
@@ -497,11 +526,17 @@ namespace lignum {
                 check_feature_names(model, names);
             }
         }
+        if (schema.n_children < 0 || batch.n_children < 0 || batch.offset < 0 || batch.length < 0) {
+            throw std::invalid_argument("Malformed Arrow record batch (negative dimensions or offset).");
+        }
         if (schema.n_children != batch.n_children) throw std::invalid_argument("Arrow schema and array disagree on the number of columns.");
         const size_t nf = model.n_features;
         if (static_cast<size_t>(batch.n_children) < nf) {
             throw std::invalid_argument("Input has " + std::to_string(batch.n_children) + " columns, but the model requires at least " +
                                         std::to_string(nf) + ".");
+        }
+        if (batch.n_children > 0 && (!schema.children || !batch.children)) {
+            throw std::invalid_argument("Malformed Arrow record batch: null children array.");
         }
         const int64_t n = batch.length;
         if (n <= 0) return;
@@ -514,11 +549,12 @@ namespace lignum {
         std::vector<CatColumn> cats(nf);
         for (size_t j = 0; j < nf; j++) {
             if (!schema.children[j] || !batch.children[j]) throw std::invalid_argument("Missing Arrow column " + std::to_string(j) + ".");
-            if (batch.children[j]->length < batch.offset + n) {
+            const ArrowArray& col = *batch.children[j];
+            if (col.offset < 0 || col.length < 0 || batch.offset > col.length || n > col.length - batch.offset) {
                 throw std::invalid_argument("Arrow " + column_name(*schema.children[j], j) + " is shorter than the batch.");
             }
-            if (is_cat[j]) cats[j] = cat_column(*schema.children[j], *batch.children[j], batch.offset, j);
-            else           columns[j] = column(*schema.children[j], *batch.children[j], batch.offset, j);
+            if (is_cat[j]) cats[j] = cat_column(*schema.children[j], col, batch.offset, j);
+            else           columns[j] = column(*schema.children[j], col, batch.offset, j);
         }
         // Categories of training: dictionary columns get the codes they had in training.
         std::vector<std::vector<double>> recode_tables;  // owns the tables the columns point to
@@ -528,7 +564,7 @@ namespace lignum {
         Column rows;
         rows.kind = Kind::Float64;
         rows.offset = batch.offset;
-        rows.validity = (batch.null_count != 0 && batch.n_buffers > 0) ? static_cast<const uint8_t*>(batch.buffers[0]) : nullptr;
+        rows.validity = (batch.null_count != 0 && batch.n_buffers > 0 && batch.buffers) ? static_cast<const uint8_t*>(batch.buffers[0]) : nullptr;
 
         // Binned kernel: bins straight from the columns, no row-major copy.
         if (model.binned) {
@@ -622,6 +658,7 @@ namespace lignum {
                 ArrowArray& a;
                 ~ArrayGuard() { if (a.release) a.release(&a); }
             } array_guard{batch};
+            if (batch.length < 0) throw std::invalid_argument("Malformed Arrow batch: negative length.");
             out.resize((total + static_cast<size_t>(batch.length)) * width);
             predict_arrow(model, schema, batch, out.data() + total * width, raw_score, n_jobs, strategy, validate_features);
             validate_features = false;  // one schema for the whole stream
