@@ -4,6 +4,7 @@
 #include "columns.hpp"
 #include "compiled.hpp"
 #include "catboost.hpp"
+#include "ir.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -51,8 +52,6 @@
 namespace lignum {
 
     namespace {
-
-        constexpr double kZeroThreshold = static_cast<double>(1e-35f);
 
         template <bool ZeroMissing>
         inline int32_t cmp_dir(double x, double threshold, uint8_t dirs) {
@@ -937,18 +936,11 @@ namespace lignum {
                                 for (size_t r = 0; r < count; r++) {
                                     const double* row = &X_[(i_begin + r) * n_features_];
                                     uint16_t* rc = &codes[r * nd];
-                                    uint64_t* rd = &decisions[r * nw];
                                     for (size_t k = 0; k < f_.n_cat_features; k++) {
-                                        const BinnedCatFeature& cf = f_.cat_features[k];
-                                        const uint32_t j = cf.dense;
-                                        const uint16_t code = category_code(row[f_.feature_of[j]], f_.feature_kind[j] == feature_kind::XGBoostCategory);
-                                        rc[j] = code;
-                                        if (code < cf.n_categories) {
-                                            std::memcpy(rd + cf.row_offset, &f_.cat_tables[cf.table_offset + uint64_t{code} * cf.words], cf.words * sizeof(uint64_t));
-                                        } else {
-                                            std::memset(rd + cf.row_offset, 0, cf.words * sizeof(uint64_t));
-                                        }
+                                        const uint32_t j = f_.cat_features[k].dense;
+                                        rc[j] = category_code(row[f_.feature_of[j]], f_.feature_kind[j] == feature_kind::XGBoostCategory);
                                     }
+                                    copy_decisions(rc, &decisions[r * nw]);
                                 }
                             }
                         }
@@ -973,17 +965,7 @@ namespace lignum {
                         if constexpr (sizeof(CodeT) == 2) {
                             if (f_.n_cat_features > 0) {
                                 for (size_t r = 0; r < count; r++) {
-                                    const uint16_t* rc = &codes[r * nd];
-                                    uint64_t* rd = &decisions[r * nw];
-                                    for (size_t k = 0; k < f_.n_cat_features; k++) {
-                                        const BinnedCatFeature& cf = f_.cat_features[k];
-                                        const uint16_t code = rc[cf.dense];
-                                        if (code < cf.n_categories) {
-                                            std::memcpy(rd + cf.row_offset, &f_.cat_tables[cf.table_offset + uint64_t{code} * cf.words], cf.words * sizeof(uint64_t));
-                                        } else {
-                                            std::memset(rd + cf.row_offset, 0, cf.words * sizeof(uint64_t));
-                                        }
-                                    }
+                                    copy_decisions(&codes[r * nd], &decisions[r * nw]);
                                 }
                             }
                         }
@@ -1003,16 +985,7 @@ namespace lignum {
                             }
                             if constexpr (sizeof(CodeT) == 2) {
                                 if (f_.n_cat_features > 0) {
-                                    uint64_t* rd = &decisions[(i - i_begin) * nw];
-                                    for (size_t k = 0; k < f_.n_cat_features; k++) {
-                                        const BinnedCatFeature& cf = f_.cat_features[k];
-                                        const uint16_t code = rc[cf.dense];
-                                        if (code < cf.n_categories) {
-                                            std::memcpy(rd + cf.row_offset, &f_.cat_tables[cf.table_offset + uint64_t{code} * cf.words], cf.words * sizeof(uint64_t));
-                                        } else {
-                                            std::memset(rd + cf.row_offset, 0, cf.words * sizeof(uint64_t));
-                                        }
-                                    }
+                                    copy_decisions(rc, &decisions[(i - i_begin) * nw]);
                                 }
                             }
                         }
@@ -1089,22 +1062,23 @@ namespace lignum {
                     }
                     if constexpr (sizeof(CodeT) == 2) {
                         if (f_.n_cat_features > 0) {
-                            for (size_t i = 0; i < count; i++) {
-                                const uint16_t* rc = &codes[i * nd];
-                                uint64_t* rd = &decisions[i * nw];
-                                for (size_t k = 0; k < f_.n_cat_features; k++) {
-                                    const BinnedCatFeature& cf = f_.cat_features[k];
-                                    const uint16_t code = rc[cf.dense];
-                                    if (code < cf.n_categories) {
-                                        std::memcpy(rd + cf.row_offset, &f_.cat_tables[cf.table_offset + uint64_t{code} * cf.words], cf.words * sizeof(uint64_t));
-                                    } else {
-                                        std::memset(rd + cf.row_offset, 0, cf.words * sizeof(uint64_t));
-                                    }
-                                }
-                            }
+                            for (size_t i = 0; i < count; i++) copy_decisions(&codes[i * nd], &decisions[i * nw]);
                         }
                     } else {
                         (void)nw; (void)decisions;
+                    }
+                }
+
+                // Copies precomputed categorical decision bits for every categorical feature of one row.
+                LIGNUM_INLINE void copy_decisions(const uint16_t* LIGNUM_RESTRICT rc, uint64_t* LIGNUM_RESTRICT rd) const {
+                    for (size_t k = 0; k < f_.n_cat_features; k++) {
+                        const BinnedCatFeature& cf = f_.cat_features[k];
+                        const uint16_t code = rc[cf.dense];
+                        if (code < cf.n_categories) {
+                            std::memcpy(rd + cf.row_offset, &f_.cat_tables[cf.table_offset + uint64_t{code} * cf.words], cf.words * sizeof(uint64_t));
+                        } else {
+                            std::memset(rd + cf.row_offset, 0, cf.words * sizeof(uint64_t));
+                        }
                     }
                 }
 

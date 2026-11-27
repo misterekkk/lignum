@@ -37,11 +37,15 @@ add_library(lignum STATIC
     src/builder.cpp
     src/categories.cpp
     src/catboost.cpp
+    src/catboost_hash.cpp
+    src/catboost_io.cpp
+    src/catboost_parsers.cpp
     src/c_api.cpp
     src/compiled.cpp
     src/io.cpp
     src/load.cpp
     src/model.cpp
+    src/parsers/common.cpp
     src/parsers/lightgbm.cpp
     src/parsers/lightgbm_text.cpp
     src/parsers/ubjson.cpp

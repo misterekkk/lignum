@@ -1,4 +1,5 @@
 #include "binned.hpp"
+#include "ir.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -334,22 +335,21 @@ namespace lignum {
             }
             if (n.dirs & dir_bits::ZeroIsMissing) zero_feature[slot] = true;
         }
-        // LightGBM zeroes |x| <= kZero; parsers never place a threshold inside (-kZero, kZero], so
-        // with both band edges as cuts the band is exactly one bin.
-        constexpr double kZero = static_cast<double>(1e-35f);
+        // LightGBM zeroes |x| <= kZeroThreshold; parsers never place a threshold inside (-kZeroThreshold, kZeroThreshold],
+        // so with both band edges as cuts the band is exactly one bin.
         forest->zero_bin.assign(cuts.size(), kNanBin);
         for (size_t j = 0; j < cuts.size(); j++) {
             auto& c = cuts[j];
             if (zero_feature[j]) {
-                c.push_back(-kZero);
-                c.push_back(std::nextafter(kZero, INFINITY));
+                c.push_back(-kZeroThreshold);
+                c.push_back(std::nextafter(kZeroThreshold, INFINITY));
             }
             std::sort(c.begin(), c.end());
             c.erase(std::unique(c.begin(), c.end()), c.end());
             if (c.size() >= kInvalidCat - 1) return nullptr;  // bin + 1 must stay below kInvalidCat
             if (zero_feature[j]) {
-                const auto lo = std::lower_bound(c.begin(), c.end(), -kZero) - c.begin();
-                const auto hi = std::lower_bound(c.begin(), c.end(), std::nextafter(kZero, INFINITY)) - c.begin();
+                const auto lo = std::lower_bound(c.begin(), c.end(), -kZeroThreshold) - c.begin();
+                const auto hi = std::lower_bound(c.begin(), c.end(), std::nextafter(kZeroThreshold, INFINITY)) - c.begin();
                 if (hi != lo + 1) return nullptr;  // a threshold inside the band: not representable
                 forest->zero_bin[j] = static_cast<uint16_t>(lo + 1);
             }

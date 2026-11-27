@@ -17,10 +17,7 @@ namespace lignum {
 
         namespace {
 
-            // LightGBM drops |x| <= kZeroThreshold from dense input, so such values behave as 0.0.
-            constexpr double kZeroThreshold = static_cast<double>(1e-35f);
-
-            // LightGBM goes right iff z(x) > t, where z zeroes the band [-kZero, kZero].
+            // LightGBM goes right iff z(x) > t, where z zeroes the band [-kZeroThreshold, kZeroThreshold].
             // Returns the smallest double `thr` such that (x >= thr) gives the same answer.
             double lightgbm_threshold(double t) {
                 if (t >= kZeroThreshold || t < -kZeroThreshold) return std::nextafter(t, INFINITY);

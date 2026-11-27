@@ -9,6 +9,9 @@
 
 namespace lignum {
 
+    // LightGBM treats values in [-kZeroThreshold, kZeroThreshold] as 0.0 when missing_type=Zero.
+    inline constexpr double kZeroThreshold = static_cast<double>(1e-35f);
+
     // Library-neutral binary tree produced by the parsers.
     //
     // Parsers translate every library's split semantics into a single rule, so the
