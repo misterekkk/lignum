@@ -93,6 +93,9 @@ namespace lignum {
                 if (depth > kMaxDepth) {
                     throw std::runtime_error("Malformed XGBoost tree: deeper than " + std::to_string(kMaxDepth) + " levels.");
                 }
+                if (node_id >= visited.size()) {
+                    throw std::runtime_error("Malformed XGBoost tree: empty tree or node out of range.");
+                }
                 if (visited.at(node_id)) throw std::runtime_error("Malformed XGBoost tree: a node has two parents.");
                 visited[node_id] = 1;
                 auto node = std::make_unique<TempBinNode>();
@@ -122,8 +125,9 @@ namespace lignum {
                 }
                 // XGBoost numbers children after their parent; anything else would be a cycle.
                 const int64_t left = t.left[node_id], right = t.right.at(node_id);
-                if (left <= static_cast<int64_t>(node_id) || right <= static_cast<int64_t>(node_id)) {
-                    throw std::runtime_error("Malformed XGBoost tree: child index does not follow its parent.");
+                if (left <= static_cast<int64_t>(node_id) || right <= static_cast<int64_t>(node_id) ||
+                    static_cast<size_t>(left) >= t.left.size() || static_cast<size_t>(right) >= t.left.size()) {
+                    throw std::runtime_error("Malformed XGBoost tree: child index out of range or does not follow its parent.");
                 }
                 node->left = build_tree(t, static_cast<size_t>(left), depth + 1, visited);
                 node->right = build_tree(t, static_cast<size_t>(right), depth + 1, visited);

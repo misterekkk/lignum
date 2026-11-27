@@ -2,6 +2,7 @@
 #include "simdjson.h"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -59,12 +60,22 @@ namespace lignum {
                     template <typename T>
                     T big_endian() {
                         if (in_.size() - pos_ < sizeof(T)) fail("truncated number");
-                        unsigned char bytes[sizeof(T)];
-                        for (size_t i = 0; i < sizeof(T); i++) bytes[i] = static_cast<unsigned char>(in_[pos_ + sizeof(T) - 1 - i]);
+                        const auto* p = reinterpret_cast<const unsigned char*>(in_.data() + pos_);
                         pos_ += sizeof(T);
-                        T v;
-                        std::memcpy(&v, bytes, sizeof(T));
-                        return v;
+                        if constexpr (sizeof(T) == 1) {
+                            return static_cast<T>(p[0]);
+                        } else if constexpr (sizeof(T) == 2) {
+                            const uint16_t u = static_cast<uint16_t>((uint16_t{p[0]} << 8) | uint16_t{p[1]});
+                            return std::bit_cast<T>(u);
+                        } else if constexpr (sizeof(T) == 4) {
+                            const uint32_t u = (uint32_t{p[0]} << 24) | (uint32_t{p[1]} << 16) | (uint32_t{p[2]} << 8) | uint32_t{p[3]};
+                            return std::bit_cast<T>(u);
+                        } else {
+                            static_assert(sizeof(T) == 8);
+                            const uint64_t u = (uint64_t{p[0]} << 56) | (uint64_t{p[1]} << 48) | (uint64_t{p[2]} << 40) | (uint64_t{p[3]} << 32) |
+                                               (uint64_t{p[4]} << 24) | (uint64_t{p[5]} << 16) | (uint64_t{p[6]} << 8) | uint64_t{p[7]};
+                            return std::bit_cast<T>(u);
+                        }
                     }
 
                     int64_t integer(uint8_t marker) {

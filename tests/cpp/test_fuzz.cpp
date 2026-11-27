@@ -322,6 +322,11 @@ TEST(Fuzz, UbjsonNoOpsAndZeroByteContainersAreBounded) {
     const uint32_t big = 1000000000u;
     for (int b = 3; b >= 0; b--) zero_oom += static_cast<char>((big >> (8 * b)) & 0xFF);
     EXPECT_THROW(lignum::parsers::ubjson_to_json(zero_oom), std::runtime_error);
+
+    // Big-endian decoding must work regardless of compiler optimizer.
+    EXPECT_EQ(lignum::parsers::ubjson_to_json(std::string("l\x00\x00\x00\x01", 5)), "1");
+    EXPECT_EQ(lignum::parsers::ubjson_to_json(std::string("I\x01\x02", 3)), "258");
+    EXPECT_EQ(lignum::parsers::ubjson_to_json(std::string("d\x3f\x00\x00\x00", 5)), "0.5");
 }
 
 TEST(Fuzz, ParserRejectsFeatureOverflowNaNAndUnknownTypes) {

@@ -329,10 +329,17 @@ TEST(Compiled, FallbackCacheInTheTempFolderMustBePrivate) {
 
 TEST(Compiled, PathsWithSpacesAndShellMetacharactersDoNotExecuteShellCommands) {
     auto model = load_model("shell_src.json");
+#if defined(_WIN32)
+    const auto base = std::filesystem::path(temp_path("shell_meta (id) test"));
+    std::filesystem::remove_all(base);
+    const auto marker = base / "pwned";
+    const auto weird_dir = base / "cache & (test) $1";
+#else
     const auto base = std::filesystem::path(temp_path("shell_meta $(id) test"));
     std::filesystem::remove_all(base);
     const auto marker = base / "pwned";
     const auto weird_dir = base / ("cache ; touch '" + marker.string() + "' $(touch '" + marker.string() + "')");
+#endif
     auto o = options();
     o.cache_dir = weird_dir.string();
     model.compiled = lignum::compile_forest(model, o, nullptr);
@@ -342,7 +349,7 @@ TEST(Compiled, PathsWithSpacesAndShellMetacharactersDoNotExecuteShellCommands) {
     o.cache_dir.clear();
     o.flags = "\"unclosed";
     EXPECT_THROW(lignum::compile_forest(model, o, nullptr), std::invalid_argument);
-    model.compiled = nullptr;
+    lignum::set_compiled(model, nullptr);
     std::filesystem::remove_all(base);
 }
 
@@ -398,7 +405,7 @@ TEST(Compiled, ConcurrentPredictAndCompileDecompileIsSafe) {
     auto model = load_model("race_src.json");
     const auto lib = temp_path("race.lib_out");
     std::filesystem::remove(lib);
-    const auto compiled = lignum::compile_forest(model, options(lib), nullptr);
+    auto compiled = lignum::compile_forest(model, options(lib), nullptr);
     const auto expected = predict_raw(model, kRows, 2);
 
     std::atomic<bool> stop{false};
@@ -414,5 +421,7 @@ TEST(Compiled, ConcurrentPredictAndCompileDecompileIsSafe) {
         EXPECT_EQ(out, expected);
     }
     mutator.join();
+    lignum::set_compiled(model, nullptr);
+    compiled.reset();
     std::filesystem::remove(lib);
 }

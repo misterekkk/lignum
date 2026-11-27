@@ -1,8 +1,18 @@
 name: Benchmark Compare
 
-# Manual back-to-back comparison of `base_ref` vs HEAD on the same physical runner VM
+# Back-to-back comparison of `base_ref` (default `main`) vs HEAD on the same physical runner VM
 # (x86-64 and ARM64) to eliminate cross-runner noise when evaluating optimizations.
 on:
+  push:
+    branches: ['perf-and-fixes', 'dev/**']
+    paths:
+      - 'include/**'
+      - 'src/**'
+      - 'python/**'
+      - 'CMakeLists.txt'
+      - 'benchmarks/bench.py'
+      - 'benchmarks/bench_catboost.py'
+      - '.github/workflows/bench-compare.yml'
   workflow_dispatch:
     inputs:
       base_ref:
@@ -13,8 +23,12 @@ on:
       args:
         description: "Arguments for benchmarks/bench.py"
         required: false
-        default: "--rows 300000 --trees 500 --repeats 5"
+        default: "--only lightgbm,xgboost,lightgbm-multi,xgboost-multi,lightgbm-cat,xgboost-cat,lightgbm-real-covtype,lightgbm-real-california,lightgbm-real-adult --rows 300000 --trees 500 --repeats 5 --latency-budget 1"
         type: string
+
+concurrency:
+  group: bench-compare-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -36,7 +50,7 @@ jobs:
       - name: Checkout base ref
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.base_ref }}
+          ref: ${{ inputs.base_ref || 'main' }}
           path: base
 
       - uses: actions/setup-python@v5
@@ -46,10 +60,16 @@ jobs:
       - name: CPU info
         run: lscpu | grep -E "Model name|^CPU\(s\)|Thread|Flags" | cut -c1-200 || true
 
+      - name: Cache datasets
+        uses: actions/cache@v4
+        with:
+          path: shared-cache/datasets
+          key: datasets-v1
+
       - name: Install benchmark dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "./head[test]"
+          python -m pip install "./head[test]" polars
 
       - name: Prepare shared workload cache
         run: |
@@ -58,31 +78,39 @@ jobs:
           ln -s "$PWD/shared-cache" base/benchmarks/.cache
           ln -s "$PWD/shared-cache" head/benchmarks/.cache
 
-      - name: Benchmark base (${{ inputs.base_ref }})
+      - name: Benchmark base (${{ inputs.base_ref || 'main' }})
         env:
-          BENCH_ARGS: ${{ inputs.args }}
+          BENCH_ARGS: ${{ inputs.args || '--only lightgbm,xgboost,lightgbm-multi,xgboost-multi,lightgbm-cat,xgboost-cat,lightgbm-real-covtype,lightgbm-real-california,lightgbm-real-adult --rows 300000 --trees 500 --repeats 5 --latency-budget 1' }}
+          CATBOOST_ARGS: "--datasets adult,california,covtype --rows 300000 --repeats 5 --latency-budget 0.5 --no-capi"
         shell: bash
         run: |
           set -o pipefail
           python -m pip install --force-reinstall --no-deps ./base
-          python base/benchmarks/bench.py --engines lignum $BENCH_ARGS | tee results-out/base.log
-          cp "$(ls -t base/benchmarks/results/*.json | head -1)" results-out/base.json
-          cp "$(ls -t base/benchmarks/results/*.md | head -1)" results-out/base.md
+          python base/benchmarks/bench.py --engines lignum,lignum-compiled $BENCH_ARGS | tee results-out/base.log
+          cp "$(ls -t base/benchmarks/results/2*.json | grep -v -- '-catboost' | head -1)" results-out/base.json
+          cp "$(ls -t base/benchmarks/results/2*.md | grep -v -- '-catboost' | head -1)" results-out/base.md
+          python base/benchmarks/bench_catboost.py $CATBOOST_ARGS | tee results-out/base-catboost.log
+          cp "$(ls -t base/benchmarks/results/2*-catboost.json | head -1)" results-out/base-catboost.json
+          cp "$(ls -t base/benchmarks/results/2*-catboost.md | head -1)" results-out/base-catboost.md
 
       - name: Benchmark HEAD (${{ github.ref_name }})
         env:
-          BENCH_ARGS: ${{ inputs.args }}
+          BENCH_ARGS: ${{ inputs.args || '--only lightgbm,xgboost,lightgbm-multi,xgboost-multi,lightgbm-cat,xgboost-cat,lightgbm-real-covtype,lightgbm-real-california,lightgbm-real-adult --rows 300000 --trees 500 --repeats 5 --latency-budget 1' }}
+          CATBOOST_ARGS: "--datasets adult,california,covtype --rows 300000 --repeats 5 --latency-budget 0.5 --no-capi"
         shell: bash
         run: |
           set -o pipefail
           python -m pip install --force-reinstall --no-deps ./head
-          python head/benchmarks/bench.py --engines lignum $BENCH_ARGS | tee results-out/head.log
-          cp "$(ls -t head/benchmarks/results/*.json | head -1)" results-out/head.json
-          cp "$(ls -t head/benchmarks/results/*.md | head -1)" results-out/head.md
+          python head/benchmarks/bench.py --engines lignum,lignum-compiled $BENCH_ARGS | tee results-out/head.log
+          cp "$(ls -t head/benchmarks/results/2*.json | grep -v -- '-catboost' | head -1)" results-out/head.json
+          cp "$(ls -t head/benchmarks/results/2*.md | grep -v -- '-catboost' | head -1)" results-out/head.md
+          python head/benchmarks/bench_catboost.py $CATBOOST_ARGS | tee results-out/head-catboost.log
+          cp "$(ls -t head/benchmarks/results/2*-catboost.json | head -1)" results-out/head-catboost.json
+          cp "$(ls -t head/benchmarks/results/2*-catboost.md | head -1)" results-out/head-catboost.md
 
       - name: Compare base vs HEAD
         env:
-          BASE_REF: ${{ inputs.base_ref }}
+          BASE_REF: ${{ inputs.base_ref || 'main' }}
           HEAD_REF: ${{ github.ref_name }}
           MATRIX_OS: ${{ matrix.os }}
         run: |
@@ -94,8 +122,8 @@ jobs:
           base = json.loads(Path("results-out/base.json").read_text())
           head = json.loads(Path("results-out/head.json").read_text())
 
-          b_map = {r["model"]: r for r in base["results"] if r["engine"] == "lignum"}
-          h_map = {r["model"]: r for r in head["results"] if r["engine"] == "lignum"}
+          b_map = {(r["model"], r["engine"]): r for r in base["results"]}
+          h_map = {(r["model"], r["engine"]): r for r in head["results"]}
 
           metrics = [
               ("prep [s]", "prep_s", ".3f"),
@@ -112,22 +140,59 @@ jobs:
               f"### `{os.environ['MATRIX_OS']}`: `{os.environ['BASE_REF']}` ({base['env']['commit']}) vs `{os.environ['HEAD_REF']}` ({head['env']['commit']})",
               f"- CPU: {head['env']['cpu']}, threads: {head['env']['threads']}",
               "",
-              "| model | metric | base | head | speedup (base/head) |",
-              "|---|---|---:|---:|---:|",
+              "#### `bench.py` (LightGBM & XGBoost)",
+              "",
+              "| model | engine | metric | base | head | speedup (base/head) |",
+              "|---|---|---|---:|---:|---:|",
           ]
-          for model, br in b_map.items():
-              hr = h_map.get(model)
+          for (model, engine), br in b_map.items():
+              hr = h_map.get((model, engine))
               if not hr or br.get("error") or hr.get("error"):
                   err = (br or {}).get("error") or (hr or {}).get("error") or "missing"
-                  lines.append(f"| {model} | status | {err} | — | — |")
+                  lines.append(f"| {model} | {engine} | status | {err} | — | — |")
                   continue
               for label, key, fmt in metrics:
                   bv, hv = br.get(key), hr.get(key)
                   if bv is None or hv is None or hv == 0:
                       continue
-                  lines.append(f"| {model} | {label} | {bv:{fmt}} | {hv:{fmt}} | {bv / hv:.2f}x |")
+                  lines.append(f"| {model} | {engine} | {label} | {bv:{fmt}} | {hv:{fmt}} | {bv / hv:.2f}x |")
               mm = f"{br.get('mismatch_bench', '?')}/{br.get('mismatch_train', '?')} -> {hr.get('mismatch_bench', '?')}/{hr.get('mismatch_train', '?')}"
-              lines.append(f"| {model} | mismatch (bench/train) | — | — | `{mm}` |")
+              lines.append(f"| {model} | {engine} | mismatch (bench/train) | — | — | `{mm}` |")
+
+          cb_base = json.loads(Path("results-out/base-catboost.json").read_text())
+          cb_head = json.loads(Path("results-out/head-catboost.json").read_text())
+          cb_b = {(r["dataset"], r["front"], r["engine"]): r for r in cb_base["results"] if r["engine"] == "lignum"}
+          cb_h = {(r["dataset"], r["front"], r["engine"]): r for r in cb_head["results"] if r["engine"] == "lignum"}
+          cb_metrics = [
+              ("prep [s]", "prep_s", ".3f"),
+              ("batch best [s]", "batch_best_s", ".3f"),
+              ("batch median [s]", "batch_median_s", ".3f"),
+              ("1 thread [s]", "batch1_s", ".3f"),
+              ("1 row list [us]", "lat1_list_us", ".1f"),
+              ("1 row df [us]", "lat1_frame_us", ".1f"),
+              ("100 rows [us]", "lat100_us", ".1f"),
+          ]
+          lines += [
+              "",
+              "#### `bench_catboost.py` (CatBoost inputs)",
+              "",
+              "| dataset | input | metric | base | head | speedup (base/head) |",
+              "|---|---|---|---:|---:|---:|",
+          ]
+          for key_id, br in cb_b.items():
+              ds, front, _ = key_id
+              hr = cb_h.get(key_id)
+              if not hr or br.get("error") or hr.get("error"):
+                  err = (br or {}).get("error") or (hr or {}).get("error") or "missing"
+                  lines.append(f"| {ds} | {front} | status | {err} | — | — |")
+                  continue
+              for label, key, fmt in cb_metrics:
+                  bv, hv = br.get(key), hr.get(key)
+                  if bv is None or hv is None or hv == 0:
+                      continue
+                  lines.append(f"| {ds} | {front} | {label} | {bv:{fmt}} | {hv:{fmt}} | {bv / hv:.2f}x |")
+              mm = f"{br.get('mismatch', '?')} -> {hr.get('mismatch', '?')}"
+              lines.append(f"| {ds} | {front} | mismatch | — | — | `{mm}` |")
 
           print("\n".join(lines) + "\n")
           PY
