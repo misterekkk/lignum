@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <memory>
 #include <vector>
 
 namespace nb = nanobind;
@@ -67,6 +68,110 @@ namespace {
         const double v = PyFloat_AsDouble(item);
         if (v == -1.0 && PyErr_Occurred()) throw nb::python_error();
         return v;
+    }
+
+    // Copy rows [r0, r1) of a 2-D numeric pandas block (n_bcols x n_rows) into row-major float64 `out`
+    // of width `out_cols`, skipping trailing columns >= out_cols.
+    template <typename T>
+    void copy_block_2d_range(const void* data, int64_t s0, int64_t s1, const int64_t* locs, size_t n_bcols,
+                             size_t r0, size_t r1, size_t out_cols, double* LIGNUM_RESTRICT out) {
+        const auto* src = static_cast<const T*>(data);
+        for (size_t c = 0; c < n_bcols; c++) {
+            const int64_t raw_col = locs[c];
+            if (raw_col < 0 || static_cast<size_t>(raw_col) >= out_cols) continue;
+            const size_t col = static_cast<size_t>(raw_col);
+            const T* col_ptr = src + static_cast<ptrdiff_t>(c) * s0;
+            for (size_t r = r0; r < r1; r++) {
+                out[r * out_cols + col] = static_cast<double>(col_ptr[static_cast<ptrdiff_t>(r) * s1]);
+            }
+        }
+    }
+
+    // Map rows [r0, r1) of a 1-D Categorical codes array through a float64 hash table (CatBoost).
+    // Returns false if any code is negative or out of range (missing value).
+    template <typename T>
+    bool map_cat_codes_range(const void* data, int64_t stride, size_t r0, size_t r1,
+                             const double* LIGNUM_RESTRICT table, size_t table_len,
+                             size_t col, size_t out_cols, double* LIGNUM_RESTRICT out) {
+        const auto* codes = static_cast<const T*>(data);
+        for (size_t r = r0; r < r1; r++) {
+            const int64_t code = static_cast<int64_t>(codes[static_cast<ptrdiff_t>(r) * stride]);
+            if (code < 0 || static_cast<size_t>(code) >= table_len) return false;
+            out[r * out_cols + col] = table[static_cast<size_t>(code)];
+        }
+        return true;
+    }
+
+    // Map rows [r0, r1) of a 1-D Categorical codes array for LightGBM / XGBoost (-1 -> NaN; optional recode table).
+    template <typename T>
+    void map_coded_range(const void* data, int64_t stride, size_t r0, size_t r1,
+                         const double* LIGNUM_RESTRICT table, size_t table_len,
+                         size_t col, size_t out_cols, double* LIGNUM_RESTRICT out) {
+        const auto* codes = static_cast<const T*>(data);
+        const double nan_val = std::numeric_limits<double>::quiet_NaN();
+        if (table) {
+            for (size_t r = r0; r < r1; r++) {
+                const int64_t code = static_cast<int64_t>(codes[static_cast<ptrdiff_t>(r) * stride]);
+                out[r * out_cols + col] = (code < 0 || static_cast<size_t>(code) >= table_len) ? nan_val : table[static_cast<size_t>(code)];
+            }
+        } else {
+            for (size_t r = r0; r < r1; r++) {
+                const int64_t code = static_cast<int64_t>(codes[static_cast<ptrdiff_t>(r) * stride]);
+                out[r * out_cols + col] = code < 0 ? nan_val : static_cast<double>(code);
+            }
+        }
+    }
+
+    struct NumBlockDesc {
+        const void* data;
+        int64_t s0, s1;
+        const int64_t* locs;
+        size_t n_bcols;
+        uint8_t code;
+        uint8_t bits;
+    };
+
+    struct CatColDesc {
+        const void* data;
+        int64_t stride;
+        const double* table;
+        size_t table_len;
+        size_t col;
+        uint8_t bits;
+    };
+
+    bool numeric_dtype_supported(nb::dlpack::dtype dt) {
+        if (dt.code == static_cast<uint8_t>(nb::dlpack::dtype_code::Float)) return dt.bits == 64 || dt.bits == 32;
+        if (dt.code == static_cast<uint8_t>(nb::dlpack::dtype_code::Int))   return dt.bits == 64 || dt.bits == 32 || dt.bits == 16 || dt.bits == 8;
+        if (dt.code == static_cast<uint8_t>(nb::dlpack::dtype_code::UInt))  return dt.bits == 64 || dt.bits == 32 || dt.bits == 16 || dt.bits == 8;
+        if (dt.code == static_cast<uint8_t>(nb::dlpack::dtype_code::Bool))  return dt.bits == 8;
+        return false;
+    }
+
+    void copy_num_desc_range(const NumBlockDesc& nb_desc, size_t r0, size_t r1, size_t out_cols, double* out) {
+        if (nb_desc.code == static_cast<uint8_t>(nb::dlpack::dtype_code::Float)) {
+            if (nb_desc.bits == 64)      copy_block_2d_range<double>(nb_desc.data, nb_desc.s0, nb_desc.s1, nb_desc.locs, nb_desc.n_bcols, r0, r1, out_cols, out);
+            else                         copy_block_2d_range<float>(nb_desc.data, nb_desc.s0, nb_desc.s1, nb_desc.locs, nb_desc.n_bcols, r0, r1, out_cols, out);
+        } else if (nb_desc.code == static_cast<uint8_t>(nb::dlpack::dtype_code::Int)) {
+            if (nb_desc.bits == 64)      copy_block_2d_range<int64_t>(nb_desc.data, nb_desc.s0, nb_desc.s1, nb_desc.locs, nb_desc.n_bcols, r0, r1, out_cols, out);
+            else if (nb_desc.bits == 32) copy_block_2d_range<int32_t>(nb_desc.data, nb_desc.s0, nb_desc.s1, nb_desc.locs, nb_desc.n_bcols, r0, r1, out_cols, out);
+            else if (nb_desc.bits == 16) copy_block_2d_range<int16_t>(nb_desc.data, nb_desc.s0, nb_desc.s1, nb_desc.locs, nb_desc.n_bcols, r0, r1, out_cols, out);
+            else                         copy_block_2d_range<int8_t>(nb_desc.data, nb_desc.s0, nb_desc.s1, nb_desc.locs, nb_desc.n_bcols, r0, r1, out_cols, out);
+        } else if (nb_desc.code == static_cast<uint8_t>(nb::dlpack::dtype_code::UInt)) {
+            if (nb_desc.bits == 64)      copy_block_2d_range<uint64_t>(nb_desc.data, nb_desc.s0, nb_desc.s1, nb_desc.locs, nb_desc.n_bcols, r0, r1, out_cols, out);
+            else if (nb_desc.bits == 32) copy_block_2d_range<uint32_t>(nb_desc.data, nb_desc.s0, nb_desc.s1, nb_desc.locs, nb_desc.n_bcols, r0, r1, out_cols, out);
+            else if (nb_desc.bits == 16) copy_block_2d_range<uint16_t>(nb_desc.data, nb_desc.s0, nb_desc.s1, nb_desc.locs, nb_desc.n_bcols, r0, r1, out_cols, out);
+            else                         copy_block_2d_range<uint8_t>(nb_desc.data, nb_desc.s0, nb_desc.s1, nb_desc.locs, nb_desc.n_bcols, r0, r1, out_cols, out);
+        } else {
+            copy_block_2d_range<uint8_t>(nb_desc.data, nb_desc.s0, nb_desc.s1, nb_desc.locs, nb_desc.n_bcols, r0, r1, out_cols, out);
+        }
+    }
+
+    nb::object wrap_raw_matrix(std::unique_ptr<double[]> out_buf, size_t n_rows, size_t out_cols) {
+        double* raw = out_buf.release();
+        nb::capsule owner(raw, [](void* p) noexcept { delete[] static_cast<double*>(p); });
+        size_t shape[2] = {n_rows, out_cols};
+        return nb::cast(nb::ndarray<nb::numpy, double, nb::c_contig, nb::device::cpu>(raw, 2, shape, owner));
     }
 
     Strategy parse_strategy(const std::string& name) {
@@ -316,6 +421,305 @@ NB_MODULE(_core, m) {
         }();
         return out;
     }, nb::arg("rows"), nb::arg("categorical"), "Rows with categories as a float64 matrix of CatBoost hashes.");
+
+    // Fast path for CatBoost pandas DataFrames: collects all numeric and Categorical block
+    // descriptors, allocates uninitialized float64 output, and fills all columns <= out_cols in a
+    // single L1D-resident 64-row tiled pass. Trailing columns >= out_cols are ignored.
+    // Returns None if any needed block has an unsupported dtype.
+    m.def("_catboost_blocks", [](nb::handle blocks_obj, size_t n_rows, size_t n_cols, size_t n_features,
+                                 const std::vector<uint8_t>& is_cat, nb::dict category_cache,
+                                 nb::callable get_table, nb::handle columns_obj) -> nb::object {
+        nb::object blks = nb::steal(PySequence_List(blocks_obj.ptr()));
+        if (!blks.is_valid()) throw nb::python_error();
+        const Py_ssize_t n_blks = PyList_Size(blks.ptr());
+        const size_t out_cols = std::min(n_cols, n_features);
+
+        std::vector<NumBlockDesc> num_blks;
+        std::vector<CatColDesc> cat_cols;
+        std::vector<nb::object> keepalive;
+        num_blks.reserve(static_cast<size_t>(n_blks));
+        cat_cols.reserve(static_cast<size_t>(n_blks));
+        keepalive.reserve(static_cast<size_t>(n_blks) * 3);
+
+        for (Py_ssize_t b = 0; b < n_blks; b++) {
+            nb::handle blk(PyList_GetItem(blks.ptr(), b));
+            nb::object locs_obj = blk.attr("mgr_locs").attr("as_array");
+            nb::ndarray<const int64_t, nb::ndim<1>, nb::c_contig, nb::device::cpu> locs;
+            if (!nb::try_cast(locs_obj, locs)) return nb::none();
+            const size_t n_bcols = locs.shape(0);
+            const int64_t* loc_ptr = locs.data();
+            bool any_needed = false;
+            for (size_t c = 0; c < n_bcols; c++) {
+                if (loc_ptr[c] < 0) throw std::invalid_argument("Invalid negative block column index.");
+                const size_t col = static_cast<size_t>(loc_ptr[c]);
+                if (col >= n_cols) return nb::none();
+                if (col < out_cols) any_needed = true;
+            }
+            if (!any_needed) continue;  // W10: ignore trailing unused columns regardless of dtype
+
+            nb::object vals = blk.attr("values");
+
+            if (n_bcols == 1 && nb::hasattr(vals, "_codes") && nb::hasattr(vals, "categories")) {
+                const size_t col = static_cast<size_t>(loc_ptr[0]);
+                if (col >= is_cat.size() || !is_cat[col]) return nb::none();
+                nb::object cats = vals.attr("categories");
+                nb::object key = nb::steal(PyLong_FromVoidPtr(cats.ptr()));
+                if (!key.is_valid()) throw nb::python_error();
+                nb::object table_obj;
+                if (PyObject* entry = PyDict_GetItem(category_cache.ptr(), key.ptr());
+                    entry && PyTuple_Check(entry) && PyTuple_Size(entry) == 2 && PyTuple_GetItem(entry, 0) == cats.ptr()) {
+                    table_obj = nb::borrow(PyTuple_GetItem(entry, 1));
+                } else {
+                    table_obj = get_table(cats);
+                }
+                nb::ndarray<const double, nb::ndim<1>, nb::c_contig, nb::device::cpu> table;
+                if (!nb::try_cast(table_obj, table)) return nb::none();
+                nb::object codes_obj = vals.attr("_codes");
+                nb::ndarray<nb::ro, nb::ndim<1>, nb::device::cpu> codes;
+                if (!nb::try_cast(codes_obj, codes) || codes.shape(0) != n_rows) return nb::none();
+                const auto dt = codes.dtype();
+                if (dt.code != static_cast<uint8_t>(nb::dlpack::dtype_code::Int) ||
+                    (dt.bits != 8 && dt.bits != 16 && dt.bits != 32 && dt.bits != 64)) return nb::none();
+                cat_cols.push_back({codes.data(), codes.stride(0), table.data(), table.shape(0), col, dt.bits});
+                keepalive.push_back(std::move(codes_obj));
+                keepalive.push_back(std::move(table_obj));
+                continue;
+            }
+
+            nb::ndarray<nb::ro, nb::ndim<2>, nb::device::cpu> arr;
+            if (!nb::try_cast(vals, arr) || arr.shape(0) != n_bcols || arr.shape(1) != n_rows) return nb::none();
+            for (size_t c = 0; c < n_bcols; c++) {
+                const size_t col = static_cast<size_t>(loc_ptr[c]);
+                if (col < out_cols && col < is_cat.size() && is_cat[col]) return nb::none();
+            }
+            const auto dt = arr.dtype();
+            if (!numeric_dtype_supported(dt)) return nb::none();
+            num_blks.push_back({arr.data(), arr.stride(0), arr.stride(1), loc_ptr, n_bcols, dt.code, dt.bits});
+            keepalive.push_back(std::move(locs_obj));
+            keepalive.push_back(std::move(vals));
+        }
+
+        std::unique_ptr<double[]> out_buf(new double[n_rows * out_cols]);
+        double* out = out_buf.get();
+        constexpr size_t kTile = 64;
+        for (size_t r0 = 0; r0 < n_rows; r0 += kTile) {
+            const size_t r1 = std::min(r0 + kTile, n_rows);
+            for (const auto& nd : num_blks) copy_num_desc_range(nd, r0, r1, out_cols, out);
+            for (const auto& cc : cat_cols) {
+                bool ok = false;
+                if (cc.bits == 8)       ok = map_cat_codes_range<int8_t>(cc.data, cc.stride, r0, r1, cc.table, cc.table_len, cc.col, out_cols, out);
+                else if (cc.bits == 16) ok = map_cat_codes_range<int16_t>(cc.data, cc.stride, r0, r1, cc.table, cc.table_len, cc.col, out_cols, out);
+                else if (cc.bits == 32) ok = map_cat_codes_range<int32_t>(cc.data, cc.stride, r0, r1, cc.table, cc.table_len, cc.col, out_cols, out);
+                else                    ok = map_cat_codes_range<int64_t>(cc.data, cc.stride, r0, r1, cc.table, cc.table_len, cc.col, out_cols, out);
+                if (!ok) {
+                    nb::object col_name = columns_obj[nb::int_(cc.col)];
+                    nb::str r = nb::repr(col_name);
+                    throw std::invalid_argument(std::string("Categorical column ") + r.c_str() +
+                                                " has missing values; CatBoost needs a category (e.g. the string 'nan') in every row.");
+                }
+            }
+        }
+        return wrap_raw_matrix(std::move(out_buf), n_rows, out_cols);
+    }, nb::arg("blocks"), nb::arg("n_rows"), nb::arg("n_cols"), nb::arg("n_features"), nb::arg("is_cat"),
+       nb::arg("category_cache"), nb::arg("get_table"), nb::arg("columns"),
+       "Fast extraction of a pandas DataFrame into a float64 matrix for CatBoost.");
+
+    // Fast path for purely numeric pandas DataFrames (LightGBM, XGBoost, numeric CatBoost):
+    // avoids DataFrame.__array__() consolidation overhead (~15-20 us on small batches),
+    // ignores trailing columns >= n_features, and fills needed blocks in one 64-row tiled pass.
+    m.def("_numeric_blocks", [](nb::handle blocks_obj, size_t n_rows, size_t n_cols, size_t n_features) -> nb::object {
+        nb::object blks = nb::steal(PySequence_List(blocks_obj.ptr()));
+        if (!blks.is_valid()) throw nb::python_error();
+        const Py_ssize_t n_blks = PyList_Size(blks.ptr());
+        const size_t out_cols = std::min(n_cols, n_features);
+
+        // Single already row-major float64 block matching out_cols on large batches: let numpy take a zero-copy view.
+        if (n_cols == out_cols && out_cols > 0 && n_blks == 1 && n_rows >= 2048) {
+            nb::handle blk(PyList_GetItem(blks.ptr(), 0));
+            nb::object vals = blk.attr("values");
+            nb::ndarray<nb::ro, nb::ndim<2>, nb::device::cpu> arr;
+            if (nb::try_cast(vals, arr) &&
+                arr.dtype().code == static_cast<uint8_t>(nb::dlpack::dtype_code::Float) &&
+                arr.dtype().bits == 64 && arr.stride(0) == 1 && arr.stride(1) == static_cast<int64_t>(n_cols)) {
+                return nb::none();
+            }
+        }
+
+        std::vector<NumBlockDesc> num_blks;
+        std::vector<nb::object> keepalive;
+        num_blks.reserve(static_cast<size_t>(n_blks));
+        keepalive.reserve(static_cast<size_t>(n_blks) * 2);
+
+        for (Py_ssize_t b = 0; b < n_blks; b++) {
+            nb::handle blk(PyList_GetItem(blks.ptr(), b));
+            nb::object locs_obj = blk.attr("mgr_locs").attr("as_array");
+            nb::ndarray<const int64_t, nb::ndim<1>, nb::c_contig, nb::device::cpu> locs;
+            if (!nb::try_cast(locs_obj, locs)) return nb::none();
+            const size_t n_bcols = locs.shape(0);
+            const int64_t* loc_ptr = locs.data();
+            bool any_needed = false;
+            for (size_t c = 0; c < n_bcols; c++) {
+                if (loc_ptr[c] < 0) throw std::invalid_argument("Invalid negative block column index.");
+                const size_t col = static_cast<size_t>(loc_ptr[c]);
+                if (col >= n_cols) return nb::none();
+                if (col < out_cols) any_needed = true;
+            }
+            if (!any_needed) continue;  // W10: ignore trailing unused columns regardless of dtype
+
+            nb::object vals = blk.attr("values");
+            nb::ndarray<nb::ro, nb::ndim<2>, nb::device::cpu> arr;
+            if (!nb::try_cast(vals, arr) || arr.shape(0) != n_bcols || arr.shape(1) != n_rows) return nb::none();
+            const auto dt = arr.dtype();
+            if (!numeric_dtype_supported(dt)) return nb::none();
+            num_blks.push_back({arr.data(), arr.stride(0), arr.stride(1), loc_ptr, n_bcols, dt.code, dt.bits});
+            keepalive.push_back(std::move(locs_obj));
+            keepalive.push_back(std::move(vals));
+        }
+
+        std::unique_ptr<double[]> out_buf(new double[n_rows * out_cols]);
+        double* out = out_buf.get();
+        constexpr size_t kTile = 64;
+        for (size_t r0 = 0; r0 < n_rows; r0 += kTile) {
+            const size_t r1 = std::min(r0 + kTile, n_rows);
+            for (const auto& nd : num_blks) copy_num_desc_range(nd, r0, r1, out_cols, out);
+        }
+        return wrap_raw_matrix(std::move(out_buf), n_rows, out_cols);
+    }, nb::arg("blocks"), nb::arg("n_rows"), nb::arg("n_cols"), nb::arg("n_features"),
+       "Fast extraction of a purely numeric pandas DataFrame into a float64 matrix.");
+
+    // Fast path for LightGBM / XGBoost pandas DataFrames with Categorical columns:
+    // counts all categorical columns (K5) while ignoring trailing non-categorical or >= out_cols data (W10),
+    // allocates uninitialized output of width out_cols, and fills all columns in one 64-row tiled pass.
+    m.def("_coded_blocks", [](nb::handle blocks_obj, size_t n_rows, size_t n_cols, size_t n_features,
+                              bool has_tc, bool by_position, size_t n_lists, nb::dict where_dict,
+                              nb::dict recode_cache, nb::callable get_recode, nb::handle columns_obj) -> nb::object {
+        nb::object blks = nb::steal(PySequence_List(blocks_obj.ptr()));
+        if (!blks.is_valid()) throw nb::python_error();
+        const Py_ssize_t n_blks = PyList_Size(blks.ptr());
+        const size_t out_cols = std::min(n_cols, n_features);
+
+        std::vector<std::pair<size_t, Py_ssize_t>> cat_order;
+        cat_order.reserve(static_cast<size_t>(n_blks));
+        for (Py_ssize_t b = 0; b < n_blks; b++) {
+            nb::handle blk(PyList_GetItem(blks.ptr(), b));
+            nb::object locs_obj = blk.attr("mgr_locs").attr("as_array");
+            nb::ndarray<const int64_t, nb::ndim<1>, nb::c_contig, nb::device::cpu> locs;
+            if (!nb::try_cast(locs_obj, locs)) return nb::none();
+            const size_t n_bcols = locs.shape(0);
+            const int64_t* loc_ptr = locs.data();
+            for (size_t c = 0; c < n_bcols; c++) {
+                if (loc_ptr[c] < 0) throw std::invalid_argument("Invalid negative block column index.");
+                if (static_cast<size_t>(loc_ptr[c]) >= n_cols) return nb::none();
+            }
+            nb::object vals = blk.attr("values");
+            if (nb::hasattr(vals, "_codes") && nb::hasattr(vals, "categories")) {
+                if (n_bcols != 1) return nb::none();
+                cat_order.emplace_back(static_cast<size_t>(loc_ptr[0]), b);  // K5: count all category cols 0..n_cols-1
+            }
+        }
+        std::sort(cat_order.begin(), cat_order.end());
+        if (has_tc && !cat_order.empty() && by_position && cat_order.size() != n_lists) return nb::none();
+
+        std::vector<int64_t> col_list(out_cols, -1);
+        if (has_tc && !cat_order.empty()) {
+            if (by_position) {
+                for (size_t k = 0; k < cat_order.size(); k++) {
+                    const size_t col = cat_order[k].first;
+                    if (col < out_cols) col_list[col] = static_cast<int64_t>(k);
+                }
+            } else {
+                for (const auto& [col, _] : cat_order) {
+                    if (col >= out_cols) continue;
+                    nb::object key = nb::int_(col);
+                    PyObject* v = PyDict_GetItem(where_dict.ptr(), key.ptr());
+                    if (!v) return nb::none();
+                    col_list[col] = PyLong_AsLongLong(v);
+                }
+            }
+        }
+
+        std::vector<NumBlockDesc> num_blks;
+        std::vector<CatColDesc> cat_cols;
+        std::vector<nb::object> keepalive;
+        num_blks.reserve(static_cast<size_t>(n_blks));
+        cat_cols.reserve(static_cast<size_t>(n_blks));
+        keepalive.reserve(static_cast<size_t>(n_blks) * 3);
+
+        for (Py_ssize_t b = 0; b < n_blks; b++) {
+            nb::handle blk(PyList_GetItem(blks.ptr(), b));
+            nb::object locs_obj = blk.attr("mgr_locs").attr("as_array");
+            nb::ndarray<const int64_t, nb::ndim<1>, nb::c_contig, nb::device::cpu> locs;
+            if (!nb::try_cast(locs_obj, locs)) return nb::none();
+            const size_t n_bcols = locs.shape(0);
+            const int64_t* loc_ptr = locs.data();
+            bool any_needed = false;
+            for (size_t c = 0; c < n_bcols; c++) {
+                if (static_cast<size_t>(loc_ptr[c]) < out_cols) { any_needed = true; break; }
+            }
+            if (!any_needed) continue;  // W10: ignore trailing unused columns regardless of dtype
+
+            nb::object vals = blk.attr("values");
+
+            if (n_bcols == 1 && nb::hasattr(vals, "_codes") && nb::hasattr(vals, "categories")) {
+                const size_t col = static_cast<size_t>(loc_ptr[0]);
+                nb::object codes_obj = vals.attr("_codes");
+                nb::ndarray<nb::ro, nb::ndim<1>, nb::device::cpu> codes;
+                if (!nb::try_cast(codes_obj, codes) || codes.shape(0) != n_rows) return nb::none();
+                const auto dt = codes.dtype();
+                if (dt.code != static_cast<uint8_t>(nb::dlpack::dtype_code::Int) ||
+                    (dt.bits != 8 && dt.bits != 16 && dt.bits != 32 && dt.bits != 64)) return nb::none();
+                const double* table_ptr = nullptr;
+                size_t table_len = 0;
+                if (col_list[col] >= 0) {
+                    nb::object cats = vals.attr("categories");
+                    nb::tuple key = nb::make_tuple(nb::steal(PyLong_FromVoidPtr(cats.ptr())), nb::int_(col_list[col]));
+                    nb::object table_holder;
+                    if (PyObject* entry = PyDict_GetItem(recode_cache.ptr(), key.ptr());
+                        entry && PyTuple_Check(entry) && PyTuple_Size(entry) == 2 && PyTuple_GetItem(entry, 0) == cats.ptr()) {
+                        table_holder = nb::borrow(PyTuple_GetItem(entry, 1));
+                    } else {
+                        table_holder = get_recode(cats, nb::int_(col_list[col]), columns_obj[nb::int_(col)]);
+                    }
+                    if (!table_holder.is_none()) {
+                        nb::ndarray<const double, nb::ndim<1>, nb::c_contig, nb::device::cpu> table_arr;
+                        if (!nb::try_cast(table_holder, table_arr)) return nb::none();
+                        table_ptr = table_arr.data();
+                        table_len = table_arr.shape(0);
+                        keepalive.push_back(std::move(table_holder));
+                    }
+                }
+                cat_cols.push_back({codes.data(), codes.stride(0), table_ptr, table_len, col, dt.bits});
+                keepalive.push_back(std::move(codes_obj));
+                continue;
+            }
+
+            nb::ndarray<nb::ro, nb::ndim<2>, nb::device::cpu> arr;
+            if (!nb::try_cast(vals, arr) || arr.shape(0) != n_bcols || arr.shape(1) != n_rows) return nb::none();
+            const auto dt = arr.dtype();
+            if (!numeric_dtype_supported(dt)) return nb::none();
+            num_blks.push_back({arr.data(), arr.stride(0), arr.stride(1), loc_ptr, n_bcols, dt.code, dt.bits});
+            keepalive.push_back(std::move(locs_obj));
+            keepalive.push_back(std::move(vals));
+        }
+
+        std::unique_ptr<double[]> out_buf(new double[n_rows * out_cols]);
+        double* out = out_buf.get();
+        constexpr size_t kTile = 64;
+        for (size_t r0 = 0; r0 < n_rows; r0 += kTile) {
+            const size_t r1 = std::min(r0 + kTile, n_rows);
+            for (const auto& nd : num_blks) copy_num_desc_range(nd, r0, r1, out_cols, out);
+            for (const auto& cc : cat_cols) {
+                if (cc.bits == 8)       map_coded_range<int8_t>(cc.data, cc.stride, r0, r1, cc.table, cc.table_len, cc.col, out_cols, out);
+                else if (cc.bits == 16) map_coded_range<int16_t>(cc.data, cc.stride, r0, r1, cc.table, cc.table_len, cc.col, out_cols, out);
+                else if (cc.bits == 32) map_coded_range<int32_t>(cc.data, cc.stride, r0, r1, cc.table, cc.table_len, cc.col, out_cols, out);
+                else                    map_coded_range<int64_t>(cc.data, cc.stride, r0, r1, cc.table, cc.table_len, cc.col, out_cols, out);
+            }
+        }
+        return wrap_raw_matrix(std::move(out_buf), n_rows, out_cols);
+    }, nb::arg("blocks"), nb::arg("n_rows"), nb::arg("n_cols"), nb::arg("n_features"),
+       nb::arg("has_tc"), nb::arg("by_position"), nb::arg("n_lists"), nb::arg("where_dict"),
+       nb::arg("recode_cache"), nb::arg("get_recode"), nb::arg("columns"),
+       "Fast extraction of a pandas DataFrame with Categorical columns for LightGBM / XGBoost.");
 
     m.def("load", &lignum::load, nb::arg("filepath"), nb::arg("format") = "auto", nb::arg("binned") = true,
           nb::call_guard<nb::gil_scoped_release>(), "Loads the JSON or binary file format.");

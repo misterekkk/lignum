@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <bit>
+#include <cstring>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 
 namespace lignum {
@@ -89,7 +91,7 @@ namespace lignum {
 
         class Packer {
             public:
-                Packer(const std::vector<BTNode>& bt, BinnedStorage& out, const std::unordered_map<uint32_t, uint16_t>& dense,
+                Packer(const std::vector<BTNode>& bt, BinnedStorage& out, const std::vector<uint16_t>& dense,
                        const std::vector<std::vector<double>>& cuts)
                     : bt_(bt), out_(out), dense_(dense), cuts_(cuts) {}
 
@@ -110,12 +112,12 @@ namespace lignum {
             private:
                 const std::vector<BTNode>& bt_;
                 BinnedStorage& out_;
-                const std::unordered_map<uint32_t, uint16_t>& dense_;
+                const std::vector<uint16_t>& dense_;
                 const std::vector<std::vector<double>>& cuts_;
 
                 void fill(BNode& b, int slot, int32_t i) {
                     const BTNode& n = bt_[i];
-                    const uint16_t j = dense_.at(n.feature);
+                    const uint16_t j = dense_[n.feature];
                     b.features[slot] = j;
                     const bool nan_right = (n.dirs & dir_bits::DefaultRight) != 0;
 
@@ -193,22 +195,75 @@ namespace lignum {
             }
         }
 
-        // Per categorical feature, a table category -> decision bits of all its slots; the slots'
-        // BNode thresholds become bit indices into a row's decision bits.
+        // Per categorical feature, a table category -> decision bits of all its unique slot sets;
+        // duplicate sets on the same feature share one bit, shrinking decision_words and cat_tables.
         bool build_decision_tables(const Model& model, BinnedStorage& f) {
             std::vector<std::vector<uint32_t>> slots_of(f.feature_of.size());
             for (uint32_t id = 0; id < f.cat_slots.size(); id++) slots_of[f.cat_slots[id].dense].push_back(id);
 
             std::vector<uint32_t> bit_of(f.cat_slots.size());
             uint32_t row_words = 0;
+            std::vector<uint32_t> unique_ids;
+            std::vector<uint32_t> tmp_words;
+            std::unordered_map<uint64_t, uint32_t> mask_bit;
+            std::unordered_map<std::string, uint32_t> wide_bit;
+            std::string key_buf;
+
             for (size_t j = 0; j < slots_of.size(); j++) {  // at most 0xFFFF dense features (see build)
                 const auto& ids = slots_of[j];
                 if (ids.empty()) continue;
+                unique_ids.clear();
+                mask_bit.clear();
+                wide_bit.clear();
+
+                auto register_mask = [&](uint64_t m, uint32_t id) {
+                    auto [it, ins] = mask_bit.try_emplace(m, static_cast<uint32_t>(unique_ids.size()));
+                    if (ins) unique_ids.push_back(id);
+                    bit_of[id] = row_words * 64 + it->second;
+                };
+
+                for (uint32_t id : ids) {
+                    const BinnedCatSlot& slot = f.cat_slots[id];
+                    const uint32_t lo = static_cast<uint32_t>(slot.payload);
+                    const uint32_t hi = static_cast<uint32_t>(slot.payload >> 32);
+                    if (slot.kind == slot_kind::CatMask) {
+                        register_mask(slot.payload, id);
+                    } else if (slot.kind == slot_kind::CatRange && uint64_t{lo} + hi < 64) {
+                        const uint64_t width = uint64_t{hi} + 1;
+                        const uint64_t m = (width == 64 ? ~uint64_t{0} : ((uint64_t{1} << width) - 1)) << lo;
+                        register_mask(m, id);
+                    } else if (slot.kind == slot_kind::CatBitset) {
+                        uint32_t trimmed = hi;
+                        while (trimmed > 0 && model.cat_bitsets[lo + trimmed - 1] == 0) trimmed--;
+                        if (trimmed <= 2) {
+                            uint64_t m = 0;
+                            if (trimmed >= 1) m |= model.cat_bitsets[lo];
+                            if (trimmed == 2) m |= uint64_t{model.cat_bitsets[lo + 1]} << 32;
+                            register_mask(m, id);
+                        } else {
+                            key_buf.assign(reinterpret_cast<const char*>(&model.cat_bitsets[lo]), trimmed * sizeof(uint32_t));
+                            auto [it, ins] = wide_bit.try_emplace(key_buf, static_cast<uint32_t>(unique_ids.size()));
+                            if (ins) unique_ids.push_back(id);
+                            bit_of[id] = row_words * 64 + it->second;
+                        }
+                    } else {
+                        // CatRange extending beyond bit 63: canonical bitset representation.
+                        const uint32_t last = lo + hi;
+                        const uint32_t words32 = last / 32 + 1;
+                        tmp_words.assign(words32, 0);
+                        for (uint32_t c = lo; c <= last; c++) tmp_words[c >> 5] |= uint32_t{1} << (c & 31);
+                        key_buf.assign(reinterpret_cast<const char*>(tmp_words.data()), tmp_words.size() * sizeof(uint32_t));
+                        auto [it, ins] = wide_bit.try_emplace(key_buf, static_cast<uint32_t>(unique_ids.size()));
+                        if (ins) unique_ids.push_back(id);
+                        bit_of[id] = row_words * 64 + it->second;
+                    }
+                }
+
                 BinnedCatFeature cf{};
                 cf.dense = static_cast<uint32_t>(j);
-                cf.words = static_cast<uint32_t>((ids.size() + 63) / 64);
+                cf.words = static_cast<uint32_t>((unique_ids.size() + 63) / 64);
                 cf.row_offset = row_words;
-                for (uint32_t id : ids) {
+                for (uint32_t id : unique_ids) {
                     cf.n_categories = std::max<uint32_t>(cf.n_categories, static_cast<uint32_t>(
                         category_bound(f.cat_slots[id].kind, f.cat_slots[id].payload)));
                 }
@@ -216,9 +271,8 @@ namespace lignum {
                 const uint64_t table_words = uint64_t{cf.n_categories} * cf.words;
                 if (cf.table_offset + table_words > (uint64_t{256} << 20) / 8) return false;  // 256 MB
                 f.cat_tables.resize(cf.table_offset + table_words, 0);
-                for (uint32_t l = 0; l < ids.size(); l++) {
-                    bit_of[ids[l]] = row_words * 64 + l;
-                    for_each_category(f.cat_slots[ids[l]], model.cat_bitsets, [&](uint32_t c) {
+                for (uint32_t l = 0; l < unique_ids.size(); l++) {
+                    for_each_category(f.cat_slots[unique_ids[l]], model.cat_bitsets, [&](uint32_t c) {
                         f.cat_tables[cf.table_offset + uint64_t{c} * cf.words + l / 64] |= uint64_t{1} << (l % 64);
                     });
                 }
@@ -240,15 +294,19 @@ namespace lignum {
 
     std::shared_ptr<const BinnedForest> build_binned(const Model& model) {
         Unpacker unpacker(model);
+        unpacker.nodes.reserve(model.n_nodes * 3 + model.n_leaves);
         std::vector<int32_t> bt_roots;
         bt_roots.reserve(model.n_offsets);
         for (size_t t = 0; t < model.n_offsets; t++) bt_roots.push_back(unpacker.from_ref(model.tree_offsets[t]));
         const auto& bt = unpacker.nodes;
 
         // Dense features with their kind; sorted unique thresholds for numeric ones.
-        std::unordered_map<uint32_t, uint16_t> dense;
+        std::vector<uint16_t> dense(model.n_features, 0xFFFF);
         std::vector<std::vector<double>> cuts;
         auto forest = std::make_shared<BinnedStorage>();
+        forest->nodes.reserve(model.n_nodes);
+        forest->roots.reserve(model.n_offsets);
+        forest->tree_kind.reserve(model.n_offsets);
         std::vector<bool> zero_feature;
         for (const BTNode& n : bt) {
             if (n.leaf) continue;
@@ -259,21 +317,22 @@ namespace lignum {
                 if (category_bound(n.kind, std::bit_cast<uint64_t>(n.threshold)) > kInvalidCat) return nullptr;
             }
 
-            auto [it, inserted] = dense.try_emplace(n.feature, static_cast<uint16_t>(cuts.size()));
-            if (inserted) {
+            uint16_t& slot = dense[n.feature];
+            if (slot == 0xFFFF) {
                 if (cuts.size() >= 0xFFFF) return nullptr;
+                slot = static_cast<uint16_t>(cuts.size());
                 cuts.emplace_back();
                 zero_feature.push_back(false);
                 forest->feature_of.push_back(n.feature);
                 forest->feature_kind.push_back(kind);
-            } else if (forest->feature_kind[it->second] != kind) {
+            } else if (forest->feature_kind[slot] != kind) {
                 return nullptr;  // the same column used with different semantics
             }
             if (kind == feature_kind::Numeric) {
                 if (std::isnan(n.threshold)) return nullptr;
-                cuts[it->second].push_back(n.threshold);
+                cuts[slot].push_back(n.threshold);
             }
-            if (n.dirs & dir_bits::ZeroIsMissing) zero_feature[it->second] = true;
+            if (n.dirs & dir_bits::ZeroIsMissing) zero_feature[slot] = true;
         }
         // LightGBM zeroes |x| <= kZero; parsers never place a threshold inside (-kZero, kZero], so
         // with both band edges as cuts the band is exactly one bin.

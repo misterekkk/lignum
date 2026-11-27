@@ -100,12 +100,20 @@ class Model:
     def __init__(self, _c_model, validate_features: bool = True):
         self._c_model = _c_model
         self._categorical = frozenset(_c_model.categorical_features)
+        self._cat_mask = [1 if j in self._categorical else 0 for j in range(_c_model.n_features)]
         self._category_cache: dict[int, tuple[Any, np.ndarray]] = {}  # id(categories) -> (categories, hashes)
         self._feature_names = list(_c_model.feature_names)
         self._names_index: Any = None     # pandas Index of the feature names, made on first use
         self._checked_columns: Any = None  # the last columns object that passed the check
         # LightGBM's / XGBoost's categories of training (see _frame_with_training_codes), or None.
         self._training_categories: dict | None = _c_model.training_categories
+        self._tc_has = self._training_categories is not None
+        self._tc_by_pos = bool(self._training_categories["by_position"]) if self._tc_has else False
+        self._tc_n_lists = len(self._training_categories["lists"]) if self._tc_has else 0
+        self._tc_where = (
+            {feature: k for k, feature in enumerate(self._training_categories["features"])}
+            if (self._tc_has and not self._tc_by_pos) else {}
+        )
         self._training_index: dict[int, Any] = {}  # list -> pandas Index of its categories, made on first use
         self._recode_cache: dict[tuple[int, int], tuple[Any, np.ndarray | None]] = {}
         # Only models that split on categories read pandas category columns as codes: the others
@@ -139,6 +147,16 @@ class Model:
     def _catboost_frame(self, X) -> np.ndarray:
         """float64 matrix of a pandas DataFrame, column by column: categorical columns as the
         hashes of their categories (cached per categories object) indexed by their codes."""
+        mgr = getattr(X, "_mgr", None)
+        blocks = getattr(mgr, "blocks", None) if mgr is not None else None
+        if blocks is not None:
+            n_rows, n_cols = X.shape
+            fast = _core._catboost_blocks(
+                blocks, n_rows, n_cols, self.n_features,
+                self._cat_mask, self._category_cache, self._category_table, X.columns,
+            )
+            if fast is not None:
+                return fast
         out_cols = min(X.shape[1], self.n_features)
         out = np.empty((X.shape[0], out_cols), dtype=np.float64)
         iter_arrays = getattr(X, "_iter_column_arrays", None)  # pandas internals: ~1 µs per column
@@ -207,6 +225,17 @@ class Model:
         model's lists of categories: LightGBM's k-th list for the k-th category column, XGBoost's
         per column), missing (LightGBM) or an error (XGBoost) for a category not in it, NaN for a
         missing value; without lists of training, the column's own codes."""
+        mgr = getattr(X, "_mgr", None)
+        blocks = getattr(mgr, "blocks", None) if mgr is not None else None
+        if blocks is not None:
+            n_rows, n_cols = X.shape
+            fast = _core._coded_blocks(
+                blocks, n_rows, n_cols, self.n_features,
+                self._tc_has, self._tc_by_pos, self._tc_n_lists, self._tc_where,
+                self._recode_cache, self._recode_table, X.columns,
+            )
+            if fast is not None:
+                return fast
         from pandas import CategoricalDtype
 
         tc = self._training_categories
@@ -356,6 +385,14 @@ class Model:
             return self._c_model.predict(self._catboost_matrix(X), raw_score, n_jobs, strategy)
         if self._codes_from_frames and _is_pandas(X) and X.ndim == 2 and _has_category_columns(X):
             return self._c_model.predict(self._frame_with_training_codes(X), raw_score, n_jobs, strategy)
+        if _is_pandas(X) and X.ndim == 2:
+            mgr = getattr(X, "_mgr", None)
+            blocks = getattr(mgr, "blocks", None) if mgr is not None else None
+            if blocks is not None:
+                n_rows, n_cols = X.shape
+                fast = _core._numeric_blocks(blocks, n_rows, n_cols, self.n_features)
+                if fast is not None:
+                    return self._c_model.predict(fast, raw_score, n_jobs, strategy)
         if _is_pandas(X) and X.ndim == 2 and X.shape[1] > self.n_features:
             X = X.iloc[:, :self.n_features]
         X_arr = np.ascontiguousarray(X, dtype=np.float64)

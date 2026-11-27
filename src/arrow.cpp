@@ -13,6 +13,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #ifdef _OPENMP
@@ -71,6 +72,12 @@ namespace lignum {
         void fill_typed(const Column& c, int64_t begin, int64_t count, double* dst, size_t stride) {
             const T* data = static_cast<const T*>(c.data) + c.offset + begin;
             if (!c.validity) {
+                if constexpr (std::is_same_v<T, double>) {
+                    if (stride == 1) {
+                        std::memcpy(dst, data, static_cast<size_t>(count) * sizeof(double));
+                        return;
+                    }
+                }
                 for (int64_t i = 0; i < count; i++) dst[static_cast<size_t>(i) * stride] = static_cast<double>(data[i]);
                 return;
             }

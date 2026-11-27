@@ -11,6 +11,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <initializer_list>
 #include <map>
@@ -393,6 +394,10 @@ namespace lignum {
             pad_borders(f);
             index_prefixes(f);
             index_conditions(f);
+            size_t table_bytes = 0;
+            for (const auto& t : f.tables) table_bytes += t.keys.size() * (sizeof(uint64_t) + sizeof(uint32_t));
+            const size_t table_weight = table_bytes > (2u << 20) ? 5 : 2;
+            f.row_work = f.n_trees() * std::max<size_t>(1, f.dim) / 8 + f.floats.size() * 3 + f.tables.size() * table_weight;
         }
 
         // -----------------------------------------------------------------------------------------
@@ -1480,7 +1485,6 @@ namespace lignum {
             row_trees_all(f, buckets, bits, out, s);
         }
 
-        // Categorical columns must hold category hashes; checked before any thread starts.
         void check_categories(const ObliviousForest& f, const double* X, size_t n_samples, size_t n_features) {
             for (uint32_t column : f.cat_columns) {
                 for (size_t i = 0; i < n_samples; i++) {
@@ -1493,35 +1497,77 @@ namespace lignum {
             }
         }
 
+        void finish_oblivious_block(double* dst, size_t rows, size_t dim, uint8_t tr, double sigmoid, bool raw_score) {
+            if (raw_score || tr == transform::Identity) return;
+            if (tr == transform::Exp) {
+                catboost_exp(dst, rows * dim);
+            } else if (tr == transform::Softmax) {
+                catboost_softmax(dst, rows, dim);
+            } else if (tr == transform::Sigmoid) {
+                const size_t n = rows * dim;
+                for (size_t i = 0; i < n; i++) dst[i] = 1.0 / (1.0 + std::exp(-sigmoid * dst[i]));
+            }
+        }
+
     } // namespace
 
     void predict_oblivious(const ObliviousForest& f, const double* X, size_t n_samples, size_t n_features, double* out,
-                           int n_threads, Strategy strategy) {
-        check_categories(f, X, n_samples, n_features);
+                           int n_threads, Strategy strategy, uint8_t tr, double sigmoid, bool raw_score) {
         if (n_samples < kRowPathMax) {
+            check_categories(f, X, n_samples, n_features);
             Scratch& s = thread_scratch();
             for (size_t i = 0; i < n_samples; i++) predict_row(f, X + i * n_features, out + i * f.dim, s);
+            finish_oblivious_block(out, n_samples, f.dim, tr, sigmoid, raw_score);
             return;
         }
-        const size_t n_blocks = (n_samples + kBlock - 1) / kBlock;
-        const bool serial = strategy == Strategy::Serial || n_threads <= 1;
-        if (serial || n_blocks == 1) {
+        constexpr size_t kMinAutoParallelRows = 64;
+        constexpr size_t kMinAutoParallelWorkSmall = 200000;
+        constexpr size_t kMinAutoParallelWork = 140000;
+        const size_t min_work = n_samples < kBlock ? kMinAutoParallelWorkSmall : kMinAutoParallelWork;
+        const bool auto_too_small = strategy == Strategy::Auto &&
+                                    (n_samples < kMinAutoParallelRows || n_samples * f.row_work < min_work);
+        const bool serial = strategy == Strategy::Serial || n_threads <= 1 || auto_too_small;
+        if (serial) {
+            const size_t n_blocks = (n_samples + kBlock - 1) / kBlock;
             Scratch& s = thread_scratch();
             for (size_t b = 0; b < n_blocks; b++) {
                 const size_t i = b * kBlock;
-                run_block(f, X + i * n_features, n_features, std::min(kBlock, n_samples - i), out + i * f.dim, s);
+                const size_t count = std::min(kBlock, n_samples - i);
+                check_categories(f, X + i * n_features, count, n_features);
+                run_block(f, X + i * n_features, n_features, count, out + i * f.dim, s);
+                finish_oblivious_block(out + i * f.dim, count, f.dim, tr, sigmoid, raw_score);
             }
             return;
         }
+        const size_t per_thread = (n_samples + 2 * static_cast<size_t>(n_threads) - 1) / (2 * static_cast<size_t>(n_threads));
+        const size_t block = std::clamp<size_t>((per_thread + 3) / 4 * 4, size_t{8}, kBlock);
+        const size_t n_blocks = (n_samples + block - 1) / block;
+        if (n_blocks == 1) {
+            Scratch& s = thread_scratch();
+            check_categories(f, X, n_samples, n_features);
+            run_block(f, X, n_features, n_samples, out, s);
+            finish_oblivious_block(out, n_samples, f.dim, tr, sigmoid, raw_score);
+            return;
+        }
+        std::exception_ptr failure;
         #pragma omp parallel num_threads(n_threads)
         {
             Scratch& s = thread_scratch();
             #pragma omp for schedule(dynamic)
             for (int64_t b = 0; b < static_cast<int64_t>(n_blocks); b++) {
-                const size_t i = static_cast<size_t>(b) * kBlock;
-                run_block(f, X + i * n_features, n_features, std::min(kBlock, n_samples - i), out + i * f.dim, s);
+                try {
+                    const size_t i = static_cast<size_t>(b) * block;
+                    const size_t count = std::min(block, n_samples - i);
+                    check_categories(f, X + i * n_features, count, n_features);
+                    run_block(f, X + i * n_features, n_features, count, out + i * f.dim, s);
+                    finish_oblivious_block(out + i * f.dim, count, f.dim, tr, sigmoid, raw_score);
+                } catch (...) {
+                    #pragma omp critical
+                    if (!failure) failure = std::current_exception();
+                }
             }
         }
+        if (failure) std::rethrow_exception(failure);
     }
 
 } // namespace lignum

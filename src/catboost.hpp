@@ -101,6 +101,7 @@ namespace lignum {
         std::vector<uint32_t> run_end;          // runs of consecutive trees of one depth: last tree + 1
         std::vector<uint8_t> run_depth;         // and their depth
         std::vector<uint8_t> tree_equal;        // derived: 1 when a tree has a one-hot split (bucket == t)
+        size_t row_work = 0;                    // derived: estimated single-thread work per row (~ns)
 
         size_t n_sources() const { return floats.size() + one_hots.size() + ctrs.size(); }
         size_t n_trees() const { return leaf_begin.size(); }
@@ -123,9 +124,11 @@ namespace lignum {
     // CatBoost's softmax of each row of dim values, in place.
     void catboost_softmax(double* out, size_t n_rows, size_t dim);
 
-    // Raw scores (scale * sum + bias) of n_samples rows into out (n_samples x dim). Categorical
-    // columns hold category hashes (catboost_hash) as doubles.
+    // Raw scores (scale * sum + bias) of n_samples rows into out (n_samples x dim), followed by
+    // the output transform when !raw_score. Categorical columns hold category hashes
+    // (catboost_hash) as doubles.
     void predict_oblivious(const ObliviousForest& forest, const double* X, size_t n_samples, size_t n_features,
-                           double* out, int n_threads, Strategy strategy);
+                           double* out, int n_threads, Strategy strategy,
+                           uint8_t transform = transform::Identity, double sigmoid = 1.0, bool raw_score = true);
 
 } // namespace lignum

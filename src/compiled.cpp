@@ -117,37 +117,91 @@ namespace lignum {
             return compare;
         }
 
-        // Binning of the numeric features, specialised per feature: cuts in constant tables, the
-        // binary search unrolled to its known length (a branch-free count for short features).
-        // Gives exactly the kernel's codes: #{cuts <= x}, kNanBin for NaN.
-        void binning(std::ostream& out, const BinnedForest& f) {
+        constexpr size_t kBinGroupFeatures = 32;
+
+        // Emits the numeric feature binning helpers for groups [g_begin, g_end) of `numeric`.
+        // Splitting across translation units parallelises compilation on wide models (hundreds of
+        // features), while keeping each 32-feature group small enough for L1 cache.
+        void binning_groups(std::ostream& out, const BinnedForest& f, const std::vector<size_t>& numeric,
+                            size_t g_begin, size_t g_end) {
             constexpr uint32_t kLinear = 8;
-            for (size_t j = 0; j < f.n_features; j++) {
-                const uint32_t len = n_cuts(f, j);
-                if (f.feature_kind[j] != feature_kind::Numeric || len <= kLinear) continue;
-                out << "static const double cuts_" << j << "[" << len << "] = {";
-                for (uint32_t k = 0; k < len; k++) out << (k ? ", " : "") << literal(f.cuts[f.cut_offsets[j] + k]);
-                out << "};\n";
+            for (size_t g = g_begin; g < g_end; g++) {
+                const size_t begin = g * kBinGroupFeatures;
+                const size_t end = std::min(begin + kBinGroupFeatures, numeric.size());
+                for (size_t idx = begin; idx < end; idx++) {
+                    const size_t j = numeric[idx];
+                    const uint32_t len = n_cuts(f, j);
+                    if (len <= kLinear) continue;
+                    out << "static const double cuts_" << j << "[" << len << "] = {";
+                    for (uint32_t k = 0; k < len; k++) out << (k ? ", " : "") << literal(f.cuts[f.cut_offsets[j] + k]);
+                    out << "};\n";
+                }
+                out << "LIGNUM_HIDDEN LIGNUM_NOINLINE void lignum_bin_g" << g
+                    << "(const double* restrict X, size_t stride, size_t n, uint16_t* restrict codes) {\n"
+                    << "  for (size_t i = 0; i < n; i++) {\n"
+                    << "    const double* restrict x = X + i * stride;\n"
+                    << "    uint16_t* restrict c = codes + i * " << f.n_features << ";\n";
+                for (size_t idx = begin; idx < end; idx++) {
+                    const size_t j = numeric[idx];
+                    const uint32_t len = n_cuts(f, j);
+                    const double* cuts = &f.cuts[f.cut_offsets[j]];
+                    out << "    { const double v = x[" << f.feature_of[j] << "]; unsigned b = 0";
+                    if (len <= kLinear) {
+                        for (uint32_t k = 0; k < len; k++) out << " + (" << literal(cuts[k]) << " <= v)";
+                        out << "; ";
+                    } else {
+                        out << "; ";
+                        for (uint32_t m = len; m > 1; m -= m / 2) out << "b = (cuts_" << j << "[b + " << m / 2 << "] <= v) ? b + " << m / 2 << " : b; ";
+                        out << "b += (cuts_" << j << "[b] <= v); ";
+                    }
+                    out << "c[" << j << "] = (v != v) ? 0xFFFF : (uint16_t)b; }\n";
+                }
+                out << "  }\n}\n";
+            }
+        }
+
+        // Emits lignum_bin: inline loop for <= 32 numeric features, otherwise calls the per-group
+        // helpers (distributed across translation units) over 64-row L2-resident strips.
+        void binning_entry(std::ostream& out, const BinnedForest& f, const std::vector<size_t>& numeric, size_t n_groups) {
+            constexpr uint32_t kLinear = 8;
+            if (numeric.size() <= kBinGroupFeatures) {
+                for (size_t j : numeric) {
+                    const uint32_t len = n_cuts(f, j);
+                    if (len <= kLinear) continue;
+                    out << "static const double cuts_" << j << "[" << len << "] = {";
+                    for (uint32_t k = 0; k < len; k++) out << (k ? ", " : "") << literal(f.cuts[f.cut_offsets[j] + k]);
+                    out << "};\n";
+                }
+                out << "LIGNUM_EXPORT void lignum_bin(const double* restrict X, size_t stride, size_t n, uint16_t* restrict codes) {\n"
+                    << "  for (size_t i = 0; i < n; i++) {\n"
+                    << "    const double* restrict x = X + i * stride;\n"
+                    << "    uint16_t* restrict c = codes + i * " << f.n_features << ";\n";
+                for (size_t j : numeric) {
+                    const uint32_t len = n_cuts(f, j);
+                    const double* cuts = &f.cuts[f.cut_offsets[j]];
+                    out << "    { const double v = x[" << f.feature_of[j] << "]; unsigned b = 0";
+                    if (len <= kLinear) {
+                        for (uint32_t k = 0; k < len; k++) out << " + (" << literal(cuts[k]) << " <= v)";
+                        out << "; ";
+                    } else {
+                        out << "; ";
+                        for (uint32_t m = len; m > 1; m -= m / 2) out << "b = (cuts_" << j << "[b + " << m / 2 << "] <= v) ? b + " << m / 2 << " : b; ";
+                        out << "b += (cuts_" << j << "[b] <= v); ";
+                    }
+                    out << "c[" << j << "] = (v != v) ? 0xFFFF : (uint16_t)b; }\n";
+                }
+                out << "  }\n}\n";
+                return;
+            }
+            for (size_t g = 0; g < n_groups; g++) {
+                out << "LIGNUM_HIDDEN void lignum_bin_g" << g << "(const double* restrict, size_t, size_t, uint16_t* restrict);\n";
             }
             out << "LIGNUM_EXPORT void lignum_bin(const double* restrict X, size_t stride, size_t n, uint16_t* restrict codes) {\n"
-                << "  for (size_t i = 0; i < n; i++) {\n"
-                << "    const double* restrict x = X + i * stride;\n"
-                << "    uint16_t* restrict c = codes + i * " << f.n_features << ";\n";
-            for (size_t j = 0; j < f.n_features; j++) {
-                if (f.feature_kind[j] != feature_kind::Numeric) continue;
-                const uint32_t len = n_cuts(f, j);
-                const double* cuts = &f.cuts[f.cut_offsets[j]];
-                out << "    { const double v = x[" << f.feature_of[j] << "]; unsigned b = 0";
-                if (len <= kLinear) {
-                    for (uint32_t k = 0; k < len; k++) out << " + (" << literal(cuts[k]) << " <= v)";
-                    out << "; ";
-                } else {
-                    out << "; ";
-                    for (uint32_t m = len; m > 1; m -= m / 2) out << "b = (cuts_" << j << "[b + " << m / 2 << "] <= v) ? b + " << m / 2 << " : b; ";
-                    out << "b += (cuts_" << j << "[b] <= v); ";
-                }
-                out << "c[" << j << "] = (v != v) ? 0xFFFF : (uint16_t)b; }\n";
-            }
+                << "  for (size_t b = 0; b < n; b += 64) {\n"
+                << "    const size_t m = (b + 64 <= n) ? 64 : (n - b);\n"
+                << "    const double* restrict Xb = X + b * stride;\n"
+                << "    uint16_t* restrict cb = codes + b * " << f.n_features << ";\n";
+            for (size_t g = 0; g < n_groups; g++) out << "    lignum_bin_g" << g << "(Xb, stride, m, cb);\n";
             out << "  }\n}\n";
         }
 
@@ -163,9 +217,8 @@ namespace lignum {
 
                 void tree(std::ostream& out, size_t t, const std::string& sum) {
                     leaf_ = sum + " += ";
-                    leaf_end_ = "; goto end_" + std::to_string(t) + ";";
+                    leaf_end_ = ";";
                     ref(out, f_.roots[t], 2);
-                    out << "    end_" << t << ":;\n";
                 }
 
                 // Leaves of the current block, read as L[k] (index in the block's table).
@@ -274,9 +327,15 @@ namespace lignum {
             "#include <math.h>\n#include <stddef.h>\n#include <stdint.h>\n"
             "#if defined(__GNUC__) || defined(__clang__)\n"
             "#define restrict __restrict__\n#define LIGNUM_KEEP(v) __asm__(\"\" : \"+r\"(v))\n"
-            "#else\n#define restrict __restrict\n#define LIGNUM_KEEP(v)\n#endif\n"
-            "#if defined(_WIN32)\n#define LIGNUM_EXPORT __declspec(dllexport)\n"
-            "#else\n#define LIGNUM_EXPORT __attribute__((visibility(\"default\")))\n#endif\n\n";
+            "#define LIGNUM_NOINLINE __attribute__((noinline))\n"
+            "#elif defined(_MSC_VER)\n"
+            "#define restrict __restrict\n#define LIGNUM_KEEP(v) ((void)(v))\n"
+            "#define LIGNUM_NOINLINE __declspec(noinline)\n"
+            "#else\n"
+            "#define restrict\n#define LIGNUM_KEEP(v) ((void)(v))\n"
+            "#define LIGNUM_NOINLINE\n#endif\n"
+            "#if defined(_WIN32)\n#define LIGNUM_EXPORT __declspec(dllexport)\n#define LIGNUM_HIDDEN\n"
+            "#else\n#define LIGNUM_EXPORT __attribute__((visibility(\"default\")))\n#define LIGNUM_HIDDEN __attribute__((visibility(\"hidden\")))\n#endif\n\n";
 
         // Splits compiler flags cleanly without invoking a shell; supports quotes and backslash escapes.
         std::vector<std::string> split_flags(const std::string& flags) {
@@ -551,9 +610,10 @@ namespace lignum {
                                      "or load a library compiled elsewhere.");
         }
 
-        // Compiles the sources (in parallel) and links them into `library`, all inside `dir`.
+        // Compiles the sources (in parallel across a dynamic worker pool, largest TU first) and links them into `library`, all inside `dir`.
         void build(const Toolchain& t, const std::string& flags, const std::vector<std::filesystem::path>& c_files,
-                   const std::filesystem::path& dir, const std::filesystem::path& library) {
+                   const std::vector<size_t>& source_sizes,
+                   const std::filesystem::path& dir, const std::filesystem::path& library, size_t max_workers) {
             const std::filesystem::path log = dir / "build.log";
             const std::vector<std::string> parsed_flags = split_flags(flags);
             if (t.msvc) {
@@ -600,12 +660,18 @@ namespace lignum {
             std::vector<std::string> objects(c_files.size());
             std::vector<std::vector<std::string>> argvs(c_files.size());
             std::vector<int> status(c_files.size(), 0);
+            std::vector<size_t> order(c_files.size());
             for (size_t p = 0; p < c_files.size(); p++) {
+                order[p] = p;
                 objects[p] = (dir / (c_files[p].stem().string() + ".o")).string();
                 auto& argv = argvs[p];
                 argv.push_back(t.compiler);
-                if (parsed_flags.empty()) argv.push_back("-O2");
-                else argv.insert(argv.end(), parsed_flags.begin(), parsed_flags.end());
+                if (parsed_flags.empty()) {
+                    argv.push_back("-O2");
+                    argv.push_back("-fno-asynchronous-unwind-tables");
+                } else {
+                    argv.insert(argv.end(), parsed_flags.begin(), parsed_flags.end());
+                }
             #if !defined(_WIN32)
                 argv.push_back("-fPIC");
             #endif
@@ -614,16 +680,23 @@ namespace lignum {
                 argv.push_back("-o");
                 argv.push_back(objects[p]);
             }
+            // Longest-Processing-Time (LPT) order: largest source files start first.
+            std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return source_sizes[a] > source_sizes[b]; });
+            const size_t n_workers = std::clamp<size_t>(max_workers, 1, c_files.size());
+            std::atomic<size_t> next{0};
             std::vector<std::thread> workers;
-            workers.reserve(c_files.size());
-            for (size_t p = 0; p < c_files.size(); p++) {
-                const std::filesystem::path obj_log = objects[p] + ".log";
-                // An exception escaping a thread would end the process (std::terminate): a failure.
-                workers.emplace_back([&status, &argvs, obj_log, p] {
-                    try {
-                        status[p] = run_process(argvs[p], obj_log);
-                    } catch (...) {
-                        status[p] = -1;
+            workers.reserve(n_workers);
+            for (size_t w = 0; w < n_workers; w++) {
+                workers.emplace_back([&next, &order, &argvs, &objects, &status] {
+                    while (true) {
+                        const size_t idx = next.fetch_add(1, std::memory_order_relaxed);
+                        if (idx >= order.size()) break;
+                        const size_t p = order[idx];
+                        try {
+                            status[p] = run_process(argvs[p], std::filesystem::path(objects[p] + ".log"));
+                        } catch (...) {
+                            status[p] = -1;
+                        }
                     }
                 });
             }
@@ -867,19 +940,30 @@ namespace lignum {
         const size_t block_trees = std::max<size_t>(1, options.block_trees);
         const size_t n_blocks = std::max<size_t>(1, (f.n_trees + block_trees - 1) / block_trees);
         const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-        const size_t parts = std::clamp<size_t>(options.jobs > 0 ? options.jobs : hw, 1, n_blocks);
+        const size_t max_jobs = options.jobs > 0 ? static_cast<size_t>(options.jobs) : hw;
+        std::vector<size_t> numeric;
+        numeric.reserve(f.n_features);
+        for (size_t j = 0; j < f.n_features; j++) {
+            if (f.feature_kind[j] == feature_kind::Numeric) numeric.push_back(j);
+        }
+        const size_t n_bin_groups = numeric.size() > kBinGroupFeatures ? (numeric.size() + kBinGroupFeatures - 1) / kBinGroupFeatures : 0;
+        const size_t parts = std::clamp<size_t>(max_jobs, 1, std::max(n_blocks, n_bin_groups));
         const size_t K = model.n_outputs;
-        std::vector<std::string> sources(parts);
+        std::vector<std::string> sources;
+        sources.reserve(parts);
         Generator gen(f, model.leaf_values, model.float32);
         const char* acc = gen.acc();
         for (size_t p = 0; p < parts; p++) {
             std::ostringstream src;
             src << kPrelude;
+            if (n_bin_groups > 0) {
+                binning_groups(src, f, numeric, n_bin_groups * p / parts, n_bin_groups * (p + 1) / parts);
+            }
             if (p == 0) {
                 src << "LIGNUM_EXPORT const uint32_t lignum_abi = " << kAbi << ";\n"
                     << "LIGNUM_EXPORT const uint64_t lignum_fingerprint = " << hex(compiled_fingerprint(model)) << ";\n"
                     << "LIGNUM_EXPORT const uint32_t lignum_n_blocks = " << n_blocks << ";\n";
-                binning(src, f);
+                binning_entry(src, f, numeric, n_bin_groups);
             }
             for (size_t b = n_blocks * p / parts; b < n_blocks * (p + 1) / parts; b++) {
                 const size_t begin = b * block_trees, end = std::min(begin + block_trees, f.n_trees);
@@ -930,7 +1014,7 @@ namespace lignum {
                 }
                 src << "  }\n}\n";
             }
-            sources[p] = src.str();
+            sources.push_back(src.str());
         }
         st.codegen_ms = ms_since(t0);
 
@@ -985,15 +1069,17 @@ namespace lignum {
             const Toolchain toolchain = find_toolchain(options.compiler);
             const BuildDir dir;
             std::vector<fs::path> c_files(sources.size());
+            std::vector<size_t> source_sizes(sources.size());
             for (size_t p = 0; p < sources.size(); p++) {
                 c_files[p] = dir.path / ("lignum_" + std::to_string(p) + ".c");
+                source_sizes[p] = sources[p].size();
                 std::ofstream out(c_files[p], std::ios::binary);
                 out.write(sources[p].data(), static_cast<std::streamsize>(sources[p].size()));
                 out.close();
                 if (!out) throw std::runtime_error("Failed to write generated C source: " + c_files[p].string());
             }
             const fs::path built = dir.path / (std::string("lignum") + kLibraryExtension);
-            build(toolchain, options.flags, c_files, dir.path, built);
+            build(toolchain, options.flags, c_files, source_sizes, dir.path, built, max_jobs);
             if (!install(built, target) && requested) {
                 throw std::runtime_error("Cannot replace " + st.library + "; is it loaded by a running process?");
             }
