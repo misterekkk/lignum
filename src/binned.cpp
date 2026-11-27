@@ -94,7 +94,7 @@ namespace lignum {
 
         class Packer {
             public:
-                Packer(const std::vector<BTNode>& bt, BinnedStorage& out, const std::vector<uint16_t>& dense,
+                Packer(const std::vector<BTNode>& bt, BinnedStorage& out, const std::unordered_map<uint32_t, uint16_t>& dense,
                        const std::vector<uint16_t>& dense_ctr, const std::vector<std::vector<double>>& cuts)
                     : bt_(bt), out_(out), dense_(dense), dense_ctr_(dense_ctr), cuts_(cuts) {}
 
@@ -115,7 +115,7 @@ namespace lignum {
             private:
                 const std::vector<BTNode>& bt_;
                 BinnedStorage& out_;
-                const std::vector<uint16_t>& dense_;
+                const std::unordered_map<uint32_t, uint16_t>& dense_;
                 const std::vector<uint16_t>& dense_ctr_;
                 const std::vector<std::vector<double>>& cuts_;
 
@@ -130,7 +130,7 @@ namespace lignum {
                         tree_kind |= tree_kind::Ctr;
                         return;
                     }
-                    const uint16_t j = dense_[n.feature];
+                    const uint16_t j = dense_.at(n.feature);
                     b.features[slot] = j;
                     const bool nan_right = (n.dirs & dir_bits::DefaultRight) != 0;
 
@@ -194,8 +194,8 @@ namespace lignum {
         class OPacker {
             public:
                 OPacker(const Model& m, const std::vector<BTNode>& bt, BinnedStorage& out,
-                        const std::vector<uint16_t>& dense, const std::vector<uint16_t>& dense_ctr,
-                        const std::vector<std::vector<double>>& cuts, const std::vector<uint16_t>& q16, size_t n_dense)
+                        const std::unordered_map<uint32_t, uint16_t>& dense, const std::vector<uint16_t>& dense_ctr,
+                        const std::vector<std::vector<double>>& cuts, const std::unordered_map<uint32_t, uint16_t>& q16, size_t n_dense)
                     : m_(m), bt_(bt), out_(out), dense_(dense), dense_ctr_(dense_ctr),
                       cuts_(cuts), q16_(q16), n_dense_(n_dense) {}
 
@@ -217,10 +217,10 @@ namespace lignum {
                 const Model& m_;
                 const std::vector<BTNode>& bt_;
                 BinnedStorage& out_;
-                const std::vector<uint16_t>& dense_;
+                const std::unordered_map<uint32_t, uint16_t>& dense_;
                 const std::vector<uint16_t>& dense_ctr_;
                 const std::vector<std::vector<double>>& cuts_;
-                const std::vector<uint16_t>& q16_;
+                const std::unordered_map<uint32_t, uint16_t>& q16_;
                 size_t n_dense_;
 
                 static uint16_t code_index(size_t j) {
@@ -237,14 +237,14 @@ namespace lignum {
                             throw std::domain_error("oblique split without weights");
                         }
                         for (int q = 0; q < 3; q++) {
-                            s.f[q] = code_index(n_dense_ + q16_[o.features[q]]);
+                            s.f[q] = code_index(n_dense_ + q16_.at(o.features[q]));
                             s.w[q] = o.weights[q];
                         }
                         s.thr = o.threshold;
                         tree_kind |= tree_kind::Oblique;
                     } else if (n.kind == slot_kind::Numeric) {
                         if (n.dirs & dir_bits::ZeroIsMissing) throw std::domain_error("zero-as-missing in an oblique tree");
-                        const uint16_t j = code_index(dense_[n.feature]);
+                        const uint16_t j = code_index(dense_.at(n.feature));
                         const auto& c = cuts_[j];
                         const auto k = std::lower_bound(c.begin(), c.end(), n.threshold) - c.begin();
                         s.f[0] = s.f[1] = s.f[2] = j;
@@ -264,7 +264,7 @@ namespace lignum {
                     } else {
                         if (n.dirs & dir_bits::XGBoostCategory) throw std::domain_error("XGBoost categories in an oblique tree");
                         if (out_.cat_slots.size() >= 0xFFFF) throw std::length_error("too many categorical slots");
-                        const uint16_t j = code_index(dense_[n.feature]);
+                        const uint16_t j = code_index(dense_.at(n.feature));
                         BinnedCatSlot c{};
                         c.payload = std::bit_cast<uint64_t>(n.threshold);
                         c.kind = n.kind;
@@ -582,9 +582,10 @@ namespace lignum {
         const auto& bt = unpacker.nodes;
 
         // Dense features with their kind; sorted unique thresholds for numeric and CTR ones.
-        std::vector<uint16_t> dense(model.n_features, 0xFFFF);
+        // Keyed by unordered_map rather than sized by model.n_features so a crafted header cannot trigger OOM.
+        std::unordered_map<uint32_t, uint16_t> dense;
         std::vector<uint16_t> dense_ctr(model.n_ctr_tables, 0xFFFF);
-        std::vector<uint16_t> q16_map(model.n_features, 0xFFFF);
+        std::unordered_map<uint32_t, uint16_t> q16_map;
         std::vector<std::vector<double>> cuts;
         auto forest = std::make_shared<BinnedStorage>();
         forest->nodes.reserve(model.n_nodes);
@@ -596,9 +597,9 @@ namespace lignum {
             if (n.kind == slot_kind::Oblique) {
                 const ObliqueSplit& o = model.oblique_splits[std::bit_cast<uint64_t>(n.threshold)];
                 for (uint32_t col : o.features) {
-                    if (q16_map[col] == 0xFFFF) {
+                    if (q16_map.find(col) == q16_map.end()) {
                         if (forest->q16_columns.size() >= 0x7FFF) return nullptr;
-                        q16_map[col] = static_cast<uint16_t>(forest->q16_columns.size());
+                        q16_map.emplace(col, static_cast<uint16_t>(forest->q16_columns.size()));
                         forest->q16_columns.push_back(col);
                     }
                 }
@@ -624,17 +625,17 @@ namespace lignum {
                 if (category_bound(n.kind, std::bit_cast<uint64_t>(n.threshold)) > kInvalidCat) return nullptr;
             }
 
-            uint16_t& slot = dense[n.feature];
-            if (slot == 0xFFFF) {
+            auto [it, inserted] = dense.try_emplace(n.feature, static_cast<uint16_t>(cuts.size()));
+            if (inserted) {
                 if (cuts.size() >= 0xFFFF) return nullptr;
-                slot = static_cast<uint16_t>(cuts.size());
                 cuts.emplace_back();
                 zero_feature.push_back(false);
                 forest->feature_of.push_back(n.feature);
                 forest->feature_kind.push_back(kind);
-            } else if (forest->feature_kind[slot] != kind) {
+            } else if (forest->feature_kind[it->second] != kind) {
                 return nullptr;  // the same column used with different semantics
             }
+            const uint16_t slot = it->second;
             if (kind == feature_kind::Numeric) {
                 if (std::isnan(n.threshold)) return nullptr;
                 cuts[slot].push_back(n.threshold);

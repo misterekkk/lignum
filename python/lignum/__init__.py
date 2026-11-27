@@ -101,7 +101,7 @@ class Model:
     def __init__(self, _c_model, validate_features: bool = True):
         self._c_model = _c_model
         self._categorical = frozenset(_c_model.categorical_features)
-        self._cat_mask = [1 if j in self._categorical else 0 for j in range(_c_model.n_features)]
+        self._cat_mask = [1 if j in self._categorical else 0 for j in range(_c_model.n_features)] if self._categorical else []
         self._category_cache: dict[int, tuple[Any, np.ndarray]] = {}  # id(categories) -> (categories, hashes)
         self._feature_names = list(_c_model.feature_names)
         self._names_index: Any = None     # pandas Index of the feature names, made on first use

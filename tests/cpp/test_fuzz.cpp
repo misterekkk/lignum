@@ -376,3 +376,34 @@ TEST(Fuzz, EmptyDefaultModelThrowsAndSingleClassSoftmaxIsOne) {
         EXPECT_EQ(prob, 1.0) << "binned=" << binned;
     }
 }
+
+TEST(Fuzz, HugeFeatureCountDoesNotOomBinnedBuild) {
+    // Regression for fuzz crash oom-d2f1c8f7f8c9bea5fc50c9a5ef03ab39f1e08e1b:
+    // a crafted .bin file without feature_names and without a saved binned section (so load() runs
+    // build_binned()) declaring a huge header.n_features must not allocate O(n_features).
+    const auto original = (std::filesystem::temp_directory_path() / "lignum_huge_nf_orig.bin").string();
+    const auto crafted = (std::filesystem::temp_directory_path() / "lignum_huge_nf_crafted.bin").string();
+    lignum::load(write_temp("fuzz_huge_nf.json", xgboost_tree({-1}, {-1}, {1.0})), "xgboost", false).save(original);
+    std::vector<char> bytes = read_file(original);
+    ASSERT_GE(bytes.size(), 64u);
+    const uint32_t huge = 1392508931u;
+    std::memcpy(bytes.data() + 56, &huge, sizeof(huge));
+    std::ofstream(crafted, std::ios::binary).write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+
+    for (bool binned : {true, false}) {
+        const auto m = lignum::load(crafted, "auto", binned);
+        EXPECT_EQ(m.n_features, huge);
+        EXPECT_EQ(m.binned != nullptr, binned);
+    }
+
+    const auto repro = std::filesystem::path(__FILE__).parent_path().parent_path() /
+                       "fuzz" / "regressions" / "lignum" / "oom-d2f1c8f7f8c9bea5fc50c9a5ef03ab39f1e08e1b";
+    ASSERT_TRUE(std::filesystem::exists(repro));
+    for (bool binned : {true, false}) {
+        try {
+            (void)lignum::load(repro.string(), "auto", binned);
+        } catch (const std::runtime_error&) {
+            // Rejecting corrupted fields is valid; allocating GBs or crashing is not.
+        }
+    }
+}
