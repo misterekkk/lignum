@@ -8,6 +8,45 @@ description: What changed in each lignum version.
 Versions follow [Semantic Versioning](https://semver.org/); before 1.0, minor versions may
 change the API. Install a specific version with `pip install pylignum==<version>`.
 
+## [0.5.0] — 2026-11-27
+
+### Added
+
+- **Native support for `miter` models (`model_source::Miter = 4`).**
+  - Direct in-memory construction via `lignum::build_model(const ir::Forest&, bool binned)` (no
+    disk round-trip needed) with `n_outputs`-wide multiclass outputs (`transform::Softmax`),
+    two-branch miter sigmoid, and `num_iteration` sub-forests.
+  - **Oblique splits (`k <= 3`)** using miter's exact 16-bit quantizer semantics — both affine
+    quantizers and piecewise-linear **quantile Q16 quantizers (`quantizer_knots`)** — bit-exact
+    across direct (`KNode`), binned (`ONode`), and `compile()` C codegen (with anti-FMA barriers).
+  - **Native online ordered CTR tables (`CtrTableHeader`, `slot_kind::Ctr`, `feature_kind::Ctr`)**:
+    1–3 column hashed categorical combinations looked up directly in open-addressed hash tables
+    across direct, binned, and compiled modes.
+  - **Symmetric (oblivious) miter tree kernel (`SymForest`, `SymBinnedKernel`, compiled `sym_tree`)**:
+    automatically detected for level-wise symmetric `miter` forests (`depth <= 10`) for branch-free
+    SIMD-friendly evaluation of axis, categorical, CTR, and oblique splits.
+- **PEP 561 `py.typed` marker** shipped in `python/lignum/`.
+
+### Changed
+
+- **`.bin` format 0.10.** Adds an optional 64-byte extension header storing oblique splits, Q16
+  quantizer parameters and quantile knot tables, native CTR hash tables, and `ONode` binned data.
+  Format `0.8` and `0.9` `.bin` files continue to load unchanged; files written by `0.5.0` using
+  those extensions require `0.5.0+`.
+- **Faster inference and DataFrame handling:** O3 inference hot-path tuning and pandas DataFrame
+  block-extraction optimizations (zero regression verified across x86-64 and ARM64).
+- **Modularized CatBoost implementation** into focused `catboost.cpp`, `catboost_io.cpp`, and
+  `catboost_parsers.cpp` translation units.
+
+### Fixed & Security
+
+- **Hardened parsers, validators, and thread safety:** resolved security, overflow, bounds-checking,
+  and thread-safety issues uncovered during codebase audits (including strict validation of
+  power-of-2 CTR tables, non-empty slot invariants, `|w| <= 16384` oblique weights, quantizer
+  counts, and `tree_kinds` presence).
+- **Windows MSVC fixes:** fixed UBJSON big-endian numeric decoding on MSVC and resolved a
+  concurrent `compile()` cache file race on Windows; restored compiled deep-tree codegen.
+
 ## [0.4.3] — 2026-11-14
 
 ### Security
@@ -244,7 +283,8 @@ First release on PyPI (`pip install pylignum`, `import lignum`).
 
 Initial release of the package (GitHub only).
 
-[Unreleased]: https://github.com/misterekkk/lignum/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/misterekkk/lignum/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/misterekkk/lignum/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/misterekkk/lignum/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/misterekkk/lignum/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/misterekkk/lignum/compare/v0.4.0...v0.4.1

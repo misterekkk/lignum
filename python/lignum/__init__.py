@@ -21,7 +21,7 @@ import numpy as np
 from . import _core
 
 __all__ = ["Model", "load", "catboost_hash", "cache_dir", "clear_cache"]
-__version__ = "0.4.3"
+__version__ = "0.5.0"
 
 
 def cache_dir() -> str:
@@ -643,7 +643,7 @@ class Model:
 
     @property
     def source(self) -> str | None:
-        """Library the model was trained with: "lightgbm", "xgboost" or "catboost"."""
+        """Library the model was trained with: "lightgbm", "xgboost", "catboost" or "miter"."""
         return self._c_model.source or None
 
     @property
