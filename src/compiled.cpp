@@ -218,8 +218,9 @@ namespace lignum {
 
                 void tree(std::ostream& out, size_t t, const std::string& sum) {
                     leaf_ = sum + " += ";
-                    leaf_end_ = ";";
+                    leaf_end_ = "; goto end_" + std::to_string(t) + ";";
                     ref(out, f_.roots[t], 2);
+                    out << "    end_" << t << ":;\n";
                 }
 
                 // Leaves of the current block, read as L[k] (index in the block's table).
@@ -422,18 +423,51 @@ namespace lignum {
             SECURITY_ATTRIBUTES sa{};
             sa.nLength = sizeof(sa);
             sa.bInheritHandle = TRUE;
+            HANDLE hIn = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (hIn == INVALID_HANDLE_VALUE) return -1;
             const std::wstring target = log_path.empty() ? std::wstring(L"NUL") : log_path.wstring();
             HANDLE hLog = CreateFileW(target.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
                                       CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (hLog == INVALID_HANDLE_VALUE) return -1;
-            STARTUPINFOW si{};
-            si.cb = sizeof(si);
-            si.dwFlags = STARTF_USESTDHANDLES;
-            si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-            si.hStdOutput = hLog;
-            si.hStdError = hLog;
+            if (hLog == INVALID_HANDLE_VALUE) {
+                CloseHandle(hIn);
+                return -1;
+            }
+            SIZE_T attr_size = 0;
+            InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+            if (attr_size == 0) {
+                CloseHandle(hIn);
+                CloseHandle(hLog);
+                return -1;
+            }
+            std::vector<char> attr_buf(attr_size);
+            auto* attr_list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data());
+            if (!InitializeProcThreadAttributeList(attr_list, 1, 0, &attr_size)) {
+                CloseHandle(hIn);
+                CloseHandle(hLog);
+                return -1;
+            }
+            HANDLE handles[2] = {hIn, hLog};
+            if (!UpdateProcThreadAttribute(attr_list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                           handles, sizeof(handles), nullptr, nullptr)) {
+                DeleteProcThreadAttributeList(attr_list);
+                CloseHandle(hIn);
+                CloseHandle(hLog);
+                return -1;
+            }
+            STARTUPINFOEXW si{};
+            si.StartupInfo.cb = sizeof(si);
+            si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            si.StartupInfo.hStdInput = hIn;
+            si.StartupInfo.hStdOutput = hLog;
+            si.StartupInfo.hStdError = hLog;
+            si.lpAttributeList = attr_list;
             PROCESS_INFORMATION pi{};
-            const BOOL ok = CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+            const BOOL ok = CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, TRUE,
+                                           CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+                                           nullptr, nullptr, &si.StartupInfo, &pi);
+            DeleteProcThreadAttributeList(attr_list);
+            CloseHandle(hIn);
             CloseHandle(hLog);
             if (!ok) return -1;
             WaitForSingleObject(pi.hProcess, INFINITE);
@@ -669,7 +703,6 @@ namespace lignum {
                 argv.push_back(t.compiler);
                 if (parsed_flags.empty()) {
                     argv.push_back("-O2");
-                    argv.push_back("-fno-asynchronous-unwind-tables");
                 } else {
                     argv.insert(argv.end(), parsed_flags.begin(), parsed_flags.end());
                 }
@@ -769,6 +802,12 @@ namespace lignum {
         }
 
         std::atomic<bool> g_any_compiled{false};
+        constexpr size_t kCompileTargetLockStripes = 64;
+        std::mutex g_compile_target_locks[kCompileTargetLockStripes];
+
+        std::mutex& compile_target_lock_for(const std::string& target_path) {
+            return g_compile_target_locks[std::hash<std::string>{}(target_path) % kCompileTargetLockStripes];
+        }
 
         void* open_handle(const std::string& library) {
         #if defined(_WIN32)
@@ -1056,20 +1095,21 @@ namespace lignum {
         st.library = target.string();
 
         t0 = Clock::now();
-        if (!requested && fs::exists(target)) {
-            try {
-                auto compiled = open_library(model, st.library);
-                st.cached = true;
-                st.compile_ms = ms_since(t0);
-                return compiled;
-            } catch (const std::runtime_error&) {
-                std::error_code ec;
-                fs::remove(target, ec);  // damaged or stale: build it again
-            }
-        }
-
-        // 3. Build in a private folder, then move the library into place.
         {
+            std::lock_guard<std::mutex> build_lock(compile_target_lock_for(st.library));
+            if (!requested && fs::exists(target)) {
+                try {
+                    auto compiled = open_library(model, st.library);
+                    st.cached = true;
+                    st.compile_ms = ms_since(t0);
+                    return compiled;
+                } catch (const std::runtime_error&) {
+                    std::error_code ec;
+                    fs::remove(target, ec);  // damaged or stale: build it again
+                }
+            }
+
+            // 3. Build in a private folder, then move the library into place.
             const Toolchain toolchain = find_toolchain(options.compiler);
             const BuildDir dir;
             std::vector<fs::path> c_files(sources.size());
