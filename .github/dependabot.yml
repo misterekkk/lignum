@@ -1,0 +1,13 @@
+# Monthly, one grouped pull request for new versions of the GitHub Actions used in the workflows.
+# Python and C++ build dependencies are updated by hand (they can change wheels and model bits).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
