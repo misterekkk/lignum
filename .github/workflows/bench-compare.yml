@@ -42,18 +42,18 @@ jobs:
     steps:
       - name: Look up datasets cache
         id: lookup
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: shared-cache/datasets
           key: datasets-v1
           lookup-only: true
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: steps.lookup.outputs.cache-hit != 'true'
         with:
           path: head
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         if: steps.lookup.outputs.cache-hit != 'true'
         with:
           python-version: "3.12"
@@ -70,7 +70,7 @@ jobs:
 
       - name: Save datasets cache
         if: steps.lookup.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: shared-cache/datasets
           key: datasets-v1
@@ -85,17 +85,17 @@ jobs:
         os: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
       - name: Checkout HEAD
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: head
 
       - name: Checkout base ref
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.base_ref || 'main' }}
           path: base
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -103,7 +103,7 @@ jobs:
         run: lscpu | grep -E "Model name|^CPU\(s\)|Thread|Flags" | cut -c1-200 || true
 
       - name: Restore datasets
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: shared-cache/datasets
           key: datasets-v1
@@ -239,7 +239,7 @@ jobs:
           print("\n".join(lines) + "\n")
           PY
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bench-compare-${{ matrix.os }}
           path: results-out/

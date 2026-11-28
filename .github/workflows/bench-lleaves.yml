@@ -45,9 +45,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -57,7 +57,7 @@ jobs:
           python -m pip install ".[test]" lleaves "llvmlite<0.45"
 
       - name: Cache datasets
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: benchmarks/.cache/datasets
           key: datasets-v1
@@ -120,7 +120,7 @@ jobs:
                             f"1 row {m.group(5)} µs (1 thr) | 100 rows {m.group(6)} µs, {m.group(7)} µs (1 thr)")
           EOF
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bench-lleaves-${{ matrix.os }}
           path: |
