@@ -30,9 +30,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -45,7 +45,7 @@ jobs:
           python -m pip install ".[test]" polars
 
       - name: Cache datasets
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: benchmarks/.cache/datasets
           key: datasets-v1
@@ -67,7 +67,7 @@ jobs:
           print("::notice title=CatBoost profile ${{ matrix.os }}::" + text.replace("%", "%25").replace("\r", "").replace("\n", "%0A"))
           EOF
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: catboost-profile-${{ matrix.os }}
           path: profile.md
@@ -78,9 +78,9 @@ jobs:
     name: windows-latest (timings)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -88,7 +88,7 @@ jobs:
         run: python -m pip install ".[test]" polars
 
       - name: Cache datasets
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: benchmarks/.cache/datasets
           key: datasets-v1
@@ -122,7 +122,7 @@ jobs:
           print("::notice title=CatBoost on Windows::" + "\n".join(lines)[:4000].replace("%", "%25").replace("\n", "%0A"))
           PY
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: catboost-profile-windows-latest

@@ -25,9 +25,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -56,7 +56,7 @@ jobs:
           BENCH_ARGS: ${{ github.event.inputs.args || '--rows 300000 --trees 500 --repeats 5' }}
         run: python benchmarks/bench.py --engines lignum $BENCH_ARGS
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bench-${{ matrix.os }}
           path: |
